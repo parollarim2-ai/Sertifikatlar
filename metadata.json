@@ -1,0 +1,6 @@
+{
+  "name": "Veb-Sayt Studiyasi",
+  "description": "Bir Million Dasturchi va Coursera maktab o'quvchilari sertifikatlari, emaillar taqsimoti va to'lovlar tizimi",
+  "requestFramePermissions": ["clipboard-read", "clipboard-write"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

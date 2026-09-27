@@ -1,0 +1,115 @@
+{
+  "entities": {
+    "classes": {
+      "title": "ClassGroup",
+      "description": "School class groups led by a teacher",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "teacherPhone": { "type": "string" },
+        "pricePerStudent": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "notes": { "type": "string" }
+      },
+      "required": ["name", "teacherName"]
+    },
+    "students": {
+      "title": "Student",
+      "description": "Students registered for Bir Million Dasturchi Coursera certificates",
+      "type": "object",
+      "properties": {
+        "fullName": { "type": "string" },
+        "birthDate": { "type": "string" },
+        "passportOrId": { "type": "string" },
+        "classId": { "type": "string" },
+        "assignedEmail": { "type": "string" },
+        "assignedPassword": { "type": "string" },
+        "status": { "type": "string" },
+        "hasError": { "type": "boolean" },
+        "errorReason": { "type": "string" },
+        "errorImage": { "type": "string" },
+        "certificateLink": { "type": "string" },
+        "certificateDate": { "type": "string" },
+        "certificateNumber": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["fullName", "classId", "status"]
+    },
+    "emailAccounts": {
+      "title": "EmailAccount",
+      "description": "Email accounts pooled for assignment to students",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "password": { "type": "string" },
+        "isUsed": { "type": "boolean" },
+        "assignedToStudentId": { "type": "string" },
+        "addedAt": { "type": "string" }
+      },
+      "required": ["email", "isUsed"]
+    },
+    "sessions": {
+      "title": "TeacherSession",
+      "description": "Active and blocked teacher device sessions",
+      "type": "object",
+      "properties": {
+        "deviceId": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "className": { "type": "string" },
+        "classId": { "type": "string" },
+        "deviceName": { "type": "string" },
+        "browser": { "type": "string" },
+        "os": { "type": "string" },
+        "screen": { "type": "string" },
+        "lastActiveAt": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "isBlocked": { "type": "boolean" },
+        "blockedReason": { "type": "string" },
+        "blockedAt": { "type": "string" }
+      },
+      "required": ["deviceId", "deviceName", "isBlocked"]
+    },
+    "teacherMessages": {
+      "title": "TeacherMessage",
+      "description": "Direct communication messages sent by admin to teachers",
+      "type": "object",
+      "properties": {
+        "classId": { "type": "string" },
+        "className": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "priority": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "isRead": { "type": "boolean" },
+        "readAt": { "type": "string" },
+        "readDeviceName": { "type": "string" }
+      },
+      "required": ["classId", "title", "content", "isRead"]
+    }
+  },
+  "firestore": {
+    "/classes/{classId}": {
+      "schema": "classes",
+      "description": "Collection of school classes"
+    },
+    "/students/{studentId}": {
+      "schema": "students",
+      "description": "Collection of students"
+    },
+    "/emailPool/{emailId}": {
+      "schema": "emailAccounts",
+      "description": "Pool of available Coursera email accounts"
+    },
+    "/sessions/{sessionId}": {
+      "schema": "sessions",
+      "description": "Active and recorded teacher device sessions"
+    },
+    "/teacherMessages/{messageId}": {
+      "schema": "teacherMessages",
+      "description": "Direct messages sent to teachers"
+    }
+  }
+}
