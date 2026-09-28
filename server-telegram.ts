@@ -41,7 +41,9 @@ function loadStore() {
 
 function saveStore() {
   try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
+    const tmpFile = `${DATA_FILE}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(store, null, 2), 'utf8');
+    fs.renameSync(tmpFile, DATA_FILE);
   } catch (err) {
     console.error('Error saving telegram-data.json:', err);
   }
@@ -328,28 +330,49 @@ async function buildUnifiedClassPdf(classGroup: ClassGroup, students: Student[])
 }
 
 // Automatically check all classes and notify teacher if 100% completed/evaluated
-export async function checkAndNotifyCompletedClasses() {
+export async function checkAndNotifyCompletedClasses(options?: { force?: boolean }) {
+  const force = options?.force ?? false;
+  const result = {
+    totalClasses: store.classes.length,
+    completedClasses: 0,
+    notifiedCount: 0,
+    alreadyNotifiedCount: 0,
+    pendingClassesCount: 0,
+    noTeacherClassesCount: 0,
+    details: [] as string[],
+  };
+
   for (const classGroup of store.classes) {
     const classStudents = store.students.filter((s) => s.classId === classGroup.id);
     if (classStudents.length === 0) continue;
 
     // Check if any student is still 'pending'
     const pendingCount = classStudents.filter((s) => s.status === 'pending').length;
-    if (pendingCount > 0) continue; // Not completely done yet
+    if (pendingCount > 0) {
+      result.pendingClassesCount++;
+      continue; // Not completely done yet
+    }
+
+    result.completedClasses++;
 
     // All students are evaluated (certified or error)
     const certified = classStudents.filter((s) => s.status === 'certified').length;
     const errors = classStudents.filter((s) => s.status === 'error' || s.hasError).length;
     const stateHash = `${classGroup.id}:${classStudents.length}:${certified}:${errors}`;
 
-    if (store.notifiedClasses[classGroup.id] === stateHash) {
-      // Already notified for this exact state
+    if (!force && store.notifiedClasses[classGroup.id] === stateHash) {
+      result.alreadyNotifiedCount++;
+      result.details.push(`${classGroup.name} (avval xabar yuborilgan)`);
       continue;
     }
 
     // Find any telegram user for this class
     const tgUser = Object.values(store.telegramUsers).find((u) => u.classId === classGroup.id);
-    if (!tgUser) continue;
+    if (!tgUser) {
+      result.noTeacherClassesCount++;
+      result.details.push(`${classGroup.name} (Telegram botga sinf rahbari ulanmagan)`);
+      continue;
+    }
 
     // Send the requested automatic notification!
     const notifyText = `🔔 <b>Hurmatli ustoz sizning sinfingizga to'liq sertifikatlar olib bo'lindi, iltimos tekshirishingizni so'rayman.</b>\n\n` +
@@ -372,8 +395,14 @@ export async function checkAndNotifyCompletedClasses() {
     if (sent && sent.ok) {
       store.notifiedClasses[classGroup.id] = stateHash;
       saveStore();
+      result.notifiedCount++;
+      result.details.push(`${classGroup.name} (${tgUser.teacherName || tgUser.firstName} ga jo'natildi)`);
+    } else {
+      result.details.push(`${classGroup.name} (Telegram xabar yuborishda xatolik)`);
     }
   }
+
+  return result;
 }
 
 // Telegram Bot Polling Loop
@@ -400,8 +429,18 @@ export function startTelegramBot() {
             }
           }
         } else if (res.status === 409) {
-          // Webhook is active in Telegram; pause polling
-          await new Promise((r) => setTimeout(r, 30000));
+          // Webhook conflict detected; check if webhook has errors and clear it
+          console.warn('Telegram webhook conflict (409). Checking webhook health...');
+          try {
+            const hookInfo = await getTelegramWebhookInfo();
+            if (hookInfo?.result?.last_error_message || !hookInfo?.result?.url) {
+              console.log('Clearing failing webhook and restoring Long-Polling...');
+              await deleteTelegramWebhook();
+            }
+          } catch (e) {
+            console.error('Error checking webhook health:', e);
+          }
+          await new Promise((r) => setTimeout(r, 6000));
         }
       } catch (err: any) {
         // Network timeout is normal in long polling

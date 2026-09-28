@@ -9,6 +9,7 @@ import {
   Bell, 
   Check, 
   AlertCircle,
+  AlertTriangle,
   Copy,
   Users,
   ShieldCheck,
@@ -45,15 +46,25 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
   const handleTriggerAutoNotify = async () => {
     setIsCheckingAutoNotify(true);
     try {
-      const res = await fetch('/api/telegram/check-auto-notify', { method: 'POST' });
+      const res = await fetch('/api/telegram/check-auto-notify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ classes, students, force: false }),
+      });
       const data = await res.json();
       if (data.success) {
-        showToast("✅ Barcha sinflar tekshirildi va 100% to'liq bo'lgan sinf rahbarlariga bot orqali xabar yuborildi!");
+        if (data.notifiedCount > 0) {
+          showToast(`✅ ${data.notifiedCount} ta sinf rahbariga to'liq natijalar bot orqali muvaffaqiyatli yuborildi!`);
+        } else if (data.completedClasses > 0) {
+          showToast(`ℹ️ ${data.completedClasses} ta yakunlangan sinf tekshirildi. Barcha natijalar avval yuborilgan yoki ustoz hali botga ulanmagan.`);
+        } else {
+          showToast(`ℹ️ Jami ${classes.length} ta sinf tekshirildi. Hozircha barcha o'quvchilari 100% baholangan yangi sinflar yo'q.`);
+        }
       } else {
-        showToast("⚠️ Tekshirishda xatolik: " + (data.error || "Noma'lum"));
+        showToast("⚠️ Tekshirishda xatolik: " + (data.error || "Noma'lum xatolik"));
       }
-    } catch {
-      showToast("❌ Serverga ulanishda xatolik yuz berdi");
+    } catch (err: any) {
+      showToast("❌ Serverga ulanishda xatolik yuz berdi: " + (err.message || ''));
     } finally {
       setIsCheckingAutoNotify(false);
     }
@@ -444,22 +455,39 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
 
         {/* Current status display */}
         {webhookInfo && (
-          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1.5">
+          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-2.5">
             <div className="flex items-center justify-between">
-              <span className="text-slate-500 font-medium">Hozirgi Telegram Webhook URL:</span>
-              <span className="font-mono text-slate-900 font-semibold truncate max-w-md">
-                {webhookInfo.url || "O'rnatilmagan (Standart Long Polling ishlamoqda)"}
+              <span className="text-slate-600 font-medium">Hozirgi Ishlash Rejimi:</span>
+              <span className="font-semibold px-2.5 py-0.5 rounded-full text-[11px] inline-flex items-center gap-1.5 bg-emerald-100 text-emerald-800 border border-emerald-300">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                {webhookInfo.url ? "Webhook rejimi faol" : "Standart Long-Polling (Real-vaqtda faol)"}
               </span>
             </div>
+
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500 font-medium">Telegram Webhook Manzili:</span>
+              <span className="font-mono text-slate-800 font-semibold truncate max-w-md">
+                {webhookInfo.url || "O'rnatilmagan (To'g'ridan-to'g'ri so'rovlar qabul qilinmoqda)"}
+              </span>
+            </div>
+
             {webhookInfo.pending_update_count !== undefined && (
               <div className="flex items-center justify-between">
                 <span className="text-slate-500 font-medium">Kutilayotgan xabarlar (Queue):</span>
                 <span className="font-mono text-slate-700 font-semibold">{webhookInfo.pending_update_count} ta</span>
               </div>
             )}
+
             {webhookInfo.last_error_message && (
-              <div className="p-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-[11px]">
-                <b>Oxirgi xatolik:</b> {webhookInfo.last_error_message}
+              <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                <div>
+                  <b className="block">Telegramdan qaytgan xatolik:</b>
+                  <span>{webhookInfo.last_error_message}</span>
+                  <p className="mt-1 text-[11px] text-rose-600">
+                    Buni tuzatish uchun pastdagi "Webhookni tozalash (Long-Polling rejimiga qaytish)" tugmasini bosing.
+                  </p>
+                </div>
               </div>
             )}
           </div>
@@ -485,18 +513,38 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
               className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
             >
               <Zap className="w-3.5 h-3.5" />
-              <span>Webhookni ulash (24/7)</span>
+              <span>Webhookni ulash</span>
             </button>
-            {webhookInfo?.url && (
-              <button
-                type="button"
-                disabled={isUpdatingWebhook}
-                onClick={handleDeleteWebhook}
-                className="px-3.5 py-2.5 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-all cursor-pointer"
-              >
-                O'chirish (Polling)
-              </button>
-            )}
+            <button
+              type="button"
+              disabled={isUpdatingWebhook}
+              onClick={handleDeleteWebhook}
+              className="px-3.5 py-2.5 rounded-xl border border-rose-300 hover:bg-rose-50 text-rose-700 text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer bg-white"
+              title="Webhookni tozalab standart Long-Polling rejimiga o'tish"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Webhookni tozalash (Tavsiya etiladi)</span>
+            </button>
+          </div>
+          <p className="text-[11px] text-slate-500">
+            💡 <strong>Eslatma:</strong> Telegram bot 2 xil rejimda ishlashi mumkin: <strong>Long-Polling</strong> (server Telegramdan so'rab oladi, 100% kafolatlangan va tashqi URL talab qilmaydi) va <strong>Webhook</strong> (Telegram saytga to'g'ridan-to'g'ri yuboradi).
+          </p>
+
+          {/* Webhook and URL Explainer Card */}
+          <div className="p-3.5 bg-slate-100/90 rounded-xl border border-slate-300 text-xs space-y-2">
+            <div className="font-bold text-slate-800 flex items-center gap-1.5">
+              <Globe className="w-4 h-4 text-blue-600" />
+              <span>Webhook havolasi nima va nima uchun kerak?</span>
+            </div>
+            <p className="text-slate-600 text-[11px] leading-relaxed">
+              • <strong>Bu URL nima?</strong> Yuqoridagi havola (<code>/api/telegram/webhook</code>) Telegram serverlari foydalanuvchilar botga yozganda xabarlarni saytingizga yetkazib berishi uchun mo'ljallangan eshikdir. Brauzerda unga kirsangiz, u botning hozirgi holati to'g'risida ma'lumot beradi.
+            </p>
+            <p className="text-slate-600 text-[11px] leading-relaxed">
+              • <strong>Webhookni ulashni bossa nima bo'ladi?</strong> Tizim Telegramga: "Mening yangi xabarlarimni shu havola orqali jo'nat" deydi. Agar sayt test (preview) muhitida bo'lsa, tashqi Telegram serveri ba'zida unga ulanolmay qolishi mumkin. 
+            </p>
+            <p className="text-slate-700 text-[11px] leading-relaxed font-medium bg-emerald-50 p-2 rounded-lg border border-emerald-200 text-emerald-900">
+              ✅ <strong>Tavsiya:</strong> Agar bot ishlamasa yoki Webhookda xatolik ko'rsatsa, <strong>"Webhookni tozalash (Tavsiya etiladi)"</strong> tugmasini bosing! Shunda bot to'g'ridan-to'g'ri o'zi Telegram bilan bog'lanib, hech qanday xatoliksiz 24/7 xabarlarni qabul qila boshlaydi.
+            </p>
           </div>
         </div>
 
@@ -508,13 +556,13 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
           </div>
           <ul className="list-disc list-inside space-y-1 text-slate-700 leading-relaxed text-[11px]">
             <li>
-              <b>1. Telegram Webhook:</b> Yuqoridagi "Webhookni ulash" tugmasini bossangiz, Telegram o'zi foydalanuvchilar yozganda saytingizga to'g'ridan-to'g'ri so'rov jo'natadi.
+              <b>1. Telegram Bot (Long-Polling / Webhook):</b> Bot hozir serveringizda fonda ishlab turibdi. Agar birorta ustoz /start bossa yoki sinf tanlasa, u darhol javob beradi.
             </li>
             <li>
-              <b>2. UptimeRobot orqali serverni uyg'oq saqlash (100% Bepul):</b> Bulutli serverlar ma'lum vaqt foydalanilmasa uxlab qolmasligi uchun bepul <a href="https://uptimerobot.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">UptimeRobot.com</a> ga kiring va saytingiz havolasini <b>HTTP(s) Monitor (har 5 daqiqada ping)</b> qilib qo'shing. Shunda saytingiz va botingiz hech qachon to'xtamaydi.
+              <b>2. UptimeRobot orqali serverni doim uyg'oq saqlash (100% Bepul):</b> Bulutli serverlar uxlab qolmasligi uchun bepul <a href="https://uptimerobot.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">UptimeRobot.com</a> ga kiring va saytingiz havolasini <b>HTTP(s) Monitor (har 5 daqiqada ping)</b> qilib qo'shing. Shunda bot hech qachon to'xtamaydi.
             </li>
             <li>
-              <b>3. GitHub orqali bitta tugma bilan 24/7 ishga tushirish:</b> Loyihangiz GitHub-da (<code>https://github.com/forcourseram-ai/Courseradan</code>) joylashgani uchun uni <a href="https://render.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">Render.com</a> yoki <a href="https://railway.app" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">Railway.app</a> ga bepul ulab qo'ysangiz, u doimiy 24/7 serverda to'liq avtomatik ishlaydi.
+              <b>3. GitHub orqali 24/7 doimiy serverda ishlatish:</b> Loyihangiz GitHub-da (<code>https://github.com/forcourseram-ai/Courseradan</code>) tayyor turibdi. Uni <a href="https://render.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">Render.com</a> yoki <a href="https://railway.app" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">Railway.app</a> ga bog'lab qo'ysangiz, serveringiz o'chmasdan 24/7 ishlaydi.
             </li>
           </ul>
         </div>

@@ -60,23 +60,25 @@ async function startServer() {
       }
 
       const ai = new GoogleGenAI({ apiKey });
-      const prompt = `Siz maktab hujjatlarini tahlil qiluvchi aqlli yordamchisiz.
-Quyida O'zbekiston maktabidan olingan hujjat matni yoki ro'yxat keltirilgan (${fileName || 'maktab_hujjati'}).
-Iltimos, ushbu matndan quyidagi ma'lumotlarni aniq ajratib oling va FAQAT sof JSON formatida qaytaring:
+      const prompt = `Siz O'zbekiston maktab hujjatlarini (ERP, Kundalik, Excel ro'yxatlari, jurnallar) o'ta yuqori aniqlikda tahlil qiluvchi mutaxassis yordamchisiz.
+Quyida maktab hujjati (${fileName || 'maktab_hujjati'}) matni keltirilgan.
+Iltimos, ushbu matndan FAQAT o'quvchilar ma'lumotlarini aniq ajratib oling va sof JSON formatida qaytaring:
 
-1. "detectedClassName": Sinf nomi (masalan: "9-A", "10-B", "11-A"). Agar matnda aniq ko'rsatilmagan bo'lsa, bo'sh qoldiring "".
-2. "detectedTeacherName": Sinf rahbari yoki o'qituvchi F.I.SH (masalan: "Azizova Nigora", "Xoliqova Feruza"). Agar topilmasa, "".
-3. "students": O'quvchilar ro'yxati massiv shaklida. Har bir obyektda:
-   - "fullName": O'quvchining to'liq ismi-familiyasi (masalan: "Aliyev Vali Sanjar o'g'li"). Harflar to'g'rilangan, bosh harflar katta bo'lsin.
-   - "birthDate": Tug'ilgan sana (masalan: "14.05.2010" yoki "2010-05-14"). Agar bo'lmasa, "".
-   - "passportOrId": Pasport yoki tug'ilganlik guvohnoma seriyasi va raqami (masalan: "AA1234567", "AB9876543"). Agar bo'lmasa, "".
+QAT'IY QOIDALAR (BU QOIDALARGA 100% AMAL QILISH SHART):
+1. "fullName": FAQAT o'quvchining Familiyasi, Ismi va Sharifi bo'lishi shart! (Masalan: "Abdurasulov Fayzulloh Abdurahim o'g'li" yoki "Karimova Zilola Botir qizi").
+   - QAT'IY TAQIQLANADI: O'quvchining yashash manzili (viloyat, tuman, shahar, qishloq, mahalla, ko'cha, uy raqami), telefon raqamlari, ota-onasi, jinsi, millati, maktab raqami kabi qo'shimcha ma'lumotlarni ASLO fullName maydoniga qo'shmang! Bu ortiqcha ma'lumotlarni BUTUNLAY TASHAB YUBORING!
+   - Pasport yoki metrika ma'lumotlarini ham fullName ga qo'shmang, ularni passportOrId maydoniga ajrating!
+2. "birthDate": O'quvchining tug'ilgan sanasi ("DD.MM.YYYY" formatida, masalan: "18.03.2011"). Agar hujjatda sana bo'lmasa, bo'sh satr "" qoldiring.
+3. "passportOrId": Tug'ilganlik haqidagi guvohnoma (metrika: "I-TN 123456", "II-FR 765432", "I-АН 123456", "I-TO 0521092") yoki Pasport/ID ("AA 1234567", "AB 7654321") yoki PINFL (14 xonali son). Agar hujjatda bo'lmasa, bo'sh satr "" qoldiring.
+4. "detectedClassName": Hujjatdagi sinf nomi (masalan: "9-A", "10-B", "11-A"). Agar topilmasa, "".
+5. "detectedTeacherName": Sinf rahbari F.I.SH (masalan: "Niyozmatova Ziyoda"). Agar topilmasa, "".
 
 Hujjat matni:
 """
-${textContent.slice(0, 15000)}
+${textContent.slice(0, 20000)}
 """
 
-Qaytaring faqat toza JSON formatida (hech qanday markdown \`\`\`json belgisiz, faqat JSON):
+Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
 {
   "detectedClassName": "...",
   "detectedTeacherName": "...",
@@ -85,20 +87,53 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown \`\`\`json belgisiz, f
   ]
 }`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: prompt,
-      });
+      const candidateModels = ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+      let rawOutput = '';
+      for (const modelName of candidateModels) {
+        try {
+          const response = await Promise.race([
+            ai.models.generateContent({
+              model: modelName,
+              contents: prompt,
+            }),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('AI request timeout (7s)')), 7000)
+            ),
+          ]);
+          if (response && response.text) {
+            rawOutput = response.text;
+            break;
+          }
+        } catch (modelErr: any) {
+          console.warn(`Model ${modelName} error:`, modelErr.message || modelErr);
+        }
+      }
 
-      const rawOutput = response.text || '';
+      if (!rawOutput) {
+        throw new Error("Barcha AI modellari band yoki javob bermadi");
+      }
       const cleanJson = rawOutput.replace(/```json/gi, '').replace(/```/g, '').trim();
       const parsedData = JSON.parse(cleanJson);
+
+      // Extra server-side sanitization to guarantee clean names without address/phone residues
+      const sanitizedStudents = Array.isArray(parsedData.students)
+        ? parsedData.students.map((st: any) => {
+            let name = String(st.fullName || '').trim();
+            // Remove addresses, phones, and passport if leaked
+            name = name.replace(/\b(?:viloyat[ia]?|tuman[ia]?|shahar|shahri|sh\.?|qishloq|mahalla|ko'cha|ko'chasi|uy|xonadon|\+?998\d{9})\b.*$/i, ' ').trim();
+            return {
+              fullName: name,
+              birthDate: String(st.birthDate || '').trim(),
+              passportOrId: String(st.passportOrId || '').trim(),
+            };
+          }).filter((s: any) => s.fullName && s.fullName.split(/\s+/).length >= 2)
+        : [];
 
       return res.json({
         success: true,
         detectedClassName: parsedData.detectedClassName || '',
         detectedTeacherName: parsedData.detectedTeacherName || '',
-        students: Array.isArray(parsedData.students) ? parsedData.students : [],
+        students: sanitizedStudents,
       });
     } catch (error) {
       console.error("AI Document parse error:", error);
@@ -364,13 +399,71 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown \`\`\`json belgisiz, f
   });
 
   // Trigger check for classes where all students are evaluated
-  app.post('/api/telegram/check-auto-notify', async (_req, res) => {
+  app.post('/api/telegram/check-auto-notify', async (req, res) => {
     try {
-      await checkAndNotifyCompletedClasses();
-      res.json({ success: true });
+      if (req.body && (req.body.classes || req.body.students)) {
+        syncDataFromClient(req.body);
+      }
+      const force = Boolean(req.body?.force);
+      const result = await checkAndNotifyCompletedClasses({ force });
+      res.json({ success: true, ...result });
     } catch (err: any) {
+      console.error("check-auto-notify error:", err);
       res.status(500).json({ success: false, error: err.message });
     }
+  });
+
+  // Telegram Webhook health check endpoint (responds to GET from browsers and monitors)
+  app.get('/api/telegram/webhook', (req, res) => {
+    const isHtmlRequested = req.headers.accept?.includes('text/html');
+    if (isHtmlRequested) {
+      res.send(`<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Telegram Bot Webhook Holati | Courseradan</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 20px; max-width: 520px; width: 100%; padding: 32px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); text-align: center; }
+    .badge { display: inline-flex; align-items: center; gap: 8px; background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(74, 222, 128, 0.3); padding: 6px 14px; border-radius: 999px; font-weight: 700; font-size: 13px; margin-bottom: 20px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #4ade80; box-shadow: 0 0 10px #4ade80; }
+    h1 { font-size: 24px; margin: 0 0 10px 0; color: #ffffff; }
+    p { color: #94a3b8; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0; }
+    .info-box { background: #0f172a; border-radius: 12px; padding: 16px; text-align: left; font-size: 13px; color: #cbd5e1; margin-bottom: 24px; border: 1px solid #1e293b; }
+    .info-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #1e293b; }
+    .info-row:last-child { border-bottom: none; }
+    .info-label { color: #64748b; font-weight: 500; }
+    .info-val { font-weight: 600; color: #38bdf8; font-family: monospace; }
+    .btn { display: inline-block; background: #0284c7; color: white; text-decoration: none; padding: 12px 24px; border-radius: 12px; font-weight: 700; font-size: 14px; transition: background 0.2s; }
+    .btn:hover { background: #0369a1; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge"><span class="dot"></span> Webhook Endpoint Faol & Ishlamoqda</div>
+    <h1>Courseradan Telegram Bot</h1>
+    <p>Ushbu URL Telegram serverlaridan xabarlarni qabul qiluvchi rasmiy Webhook manzilidir. Bot serveri 24/7 rejimida yangilanishlarni qabul qilishga to'liq tayyor.</p>
+    <div class="info-box">
+      <div class="info-row"><span class="info-label">Bot:</span><span class="info-val">@Courseradan_bot</span></div>
+      <div class="info-row"><span class="info-label">Holat:</span><span class="info-val" style="color: #4ade80;">200 OK / Tayyor</span></div>
+      <div class="info-row"><span class="info-label">Metod:</span><span class="info-val">POST (Telegram Webhook)</span></div>
+      <div class="info-row"><span class="info-label">Vaqt:</span><span class="info-val">${new Date().toLocaleTimeString()}</span></div>
+    </div>
+    <a href="https://t.me/Courseradan_bot" target="_blank" class="btn">Telegram Botga O'tish →</a>
+  </div>
+</body>
+</html>`);
+      return;
+    }
+
+    res.json({
+      ok: true,
+      status: "webhook_active",
+      message: "Courseradan Telegram Bot Webhook endpointi faol va so'rovlarni qabul qilishga tayyor.",
+      bot: "@Courseradan_bot",
+      timestamp: new Date().toISOString(),
+    });
   });
 
   // Telegram Webhook endpoint (incoming updates from Telegram servers)

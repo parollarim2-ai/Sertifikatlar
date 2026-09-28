@@ -16,6 +16,7 @@ import {
   Plus,
   School,
   AlertTriangle,
+  AlertCircle,
   Layers,
   UserPlus
 } from 'lucide-react';
@@ -97,6 +98,30 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
     return existingClassStudents.some(s => s.fullName.trim().toLowerCase() === cleanName);
   };
 
+  // Detect duplicate passports/metrikas in the parsed list
+  const duplicatePassports = React.useMemo(() => {
+    const counts: Record<string, number> = {};
+    parsedStudents.forEach(st => {
+      const val = st.passportOrId?.trim().toUpperCase();
+      if (val && val.length >= 4) {
+        counts[val] = (counts[val] || 0) + 1;
+      }
+    });
+    const dups = new Set<string>();
+    Object.entries(counts).forEach(([val, count]) => {
+      if (count > 1) dups.add(val);
+    });
+    return dups;
+  }, [parsedStudents]);
+
+  const missingBirthDateCount = React.useMemo(() => {
+    return parsedStudents.filter(s => s.fullName.trim() && !s.birthDate?.trim()).length;
+  }, [parsedStudents]);
+
+  const missingPassportCount = React.useMemo(() => {
+    return parsedStudents.filter(s => s.fullName.trim() && !s.passportOrId?.trim()).length;
+  }, [parsedStudents]);
+
   // Process uploaded file
   const handleProcessFile = async (file: File) => {
     setIsProcessing(true);
@@ -116,7 +141,8 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
 
       let finalStudents = extracted.students;
 
-      if (extracted.rawText && extracted.rawText.length > 20) {
+      // Only invoke AI if local extraction found no students or if file has unformatted paragraph text
+      if (finalStudents.length === 0 && extracted.rawText && extracted.rawText.length > 20) {
         try {
           const aiRes = await fetch('/api/parse-document-ai', {
             method: 'POST',
@@ -583,6 +609,43 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
           {/* PREVIEW OF PARSED STUDENTS TABLE */}
           {parsedStudents.length > 0 && (
             <div className="space-y-3">
+              
+              {/* Duplicate Passport/Metrika Warning Banner */}
+              {duplicatePassports.size > 0 && (
+                <div className="p-3.5 bg-rose-50 border border-rose-300 rounded-xl flex items-start gap-3 text-xs text-rose-800 shadow-xs animate-fade-in">
+                  <AlertTriangle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold text-sm block text-rose-900">
+                      ⚠️ DIQQAT: {duplicatePassports.size} ta takroriy (dublikat) metrika yoki pasport aniqlandi!
+                    </span>
+                    <p className="mt-1 text-rose-700">
+                      Quyidagi hujjat raqamlari birdan ortiq o'quvchida takrorlanmoqda: <strong>{Array.from(duplicatePassports).join(', ')}</strong>. Iltimos, pastdagi qizil rang bilan belgilangan qatorlarni tekshiring va to'g'rilang.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Missing Data Warning Banner */}
+              {(missingBirthDateCount > 0 || missingPassportCount > 0) && (
+                <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl flex items-start gap-3 text-xs text-amber-800 shadow-xs animate-fade-in">
+                  <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold text-sm block text-amber-900">
+                      ⚠️ OGOHLANTIRISH: Ayrim ma'lumotlar to'liq emas!
+                    </span>
+                    <p className="mt-1 text-amber-700">
+                      {missingBirthDateCount > 0 && (
+                        <span>• <strong>{missingBirthDateCount} ta</strong> o'quvchida tug'ilgan sana kiritilmagan. </span>
+                      )}
+                      {missingPassportCount > 0 && (
+                        <span>• <strong>{missingPassportCount} ta</strong> o'quvchida metrika yoki pasport ma'lumoti yetishmayapti. </span>
+                      )}
+                      Jadvalning o'zida qatorlarga yozib ma'lumotlarni to'ldirishingiz mumkin.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
@@ -590,7 +653,7 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
                     <span>Yuklangan O'quvchilar Ko'rigi</span>
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Ma'lumotlarni to'g'ridan-to'g'ri jadvalda tekshirishingiz yoki tahrirlashingiz mumkin
+                    Ism-familiya, tug'ilgan sana va metrika ma'lumotlari avtomatik ajratildi (ortiqcha manzillar tashlab yuborildi)
                   </p>
                 </div>
 
@@ -604,25 +667,36 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
                 </button>
               </div>
 
-              <div className="border border-slate-200 rounded-xl overflow-hidden max-h-72 overflow-y-auto">
+              <div className="border border-slate-200 rounded-xl overflow-hidden max-h-72 overflow-y-auto shadow-inner">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-100 text-slate-600 font-bold sticky top-0 border-b border-slate-200">
+                  <thead className="bg-slate-100 text-slate-700 font-bold sticky top-0 border-b border-slate-200">
                     <tr>
                       <th className="py-2.5 pl-4 pr-2 w-10">№</th>
                       <th className="py-2.5 px-3">O'quvchi F.I.SH <span className="text-rose-500">*</span></th>
                       <th className="py-2.5 px-3">Tug'ilgan Sana</th>
                       <th className="py-2.5 px-3">Metrika / Pasport</th>
-                      <th className="py-2.5 px-3 text-center w-16">Holat</th>
+                      <th className="py-2.5 px-3 text-center w-24">Holat</th>
                       <th className="py-2.5 pr-4 text-right w-12">O'chirish</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {parsedStudents.map((st, idx) => {
-                      const isDup = isDuplicateName(st.fullName);
+                      const isDupName = isDuplicateName(st.fullName);
+                      const normPass = st.passportOrId?.trim().toUpperCase();
+                      const isDupPass = Boolean(normPass && normPass.length >= 4 && duplicatePassports.has(normPass));
+                      const isMissingBirth = !st.birthDate?.trim();
+                      const isMissingPass = !st.passportOrId?.trim();
+
                       return (
                         <tr 
                           key={idx} 
-                          className={`hover:bg-slate-50 transition-colors ${isDup ? 'bg-amber-50/60' : ''}`}
+                          className={`hover:bg-slate-50 transition-colors ${
+                            isDupPass 
+                              ? 'bg-rose-50/70' 
+                              : isDupName 
+                              ? 'bg-amber-50/70' 
+                              : ''
+                          }`}
                         >
                           <td className="py-2 pl-4 pr-2 font-mono text-slate-400">
                             {idx + 1}
@@ -632,11 +706,14 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
                               type="text"
                               value={st.fullName}
                               onChange={e => handleUpdateStudent(idx, 'fullName', e.target.value)}
-                              className={`w-full px-2 py-1 bg-transparent border rounded text-xs font-medium text-slate-900 focus:bg-white focus:outline-none ${
-                                isDup ? 'border-amber-400 bg-amber-50 text-amber-900' : 'border-transparent focus:border-blue-400'
+                              placeholder="Familiya Ism Sharif"
+                              className={`w-full px-2 py-1 bg-transparent border rounded text-xs font-semibold text-slate-900 focus:bg-white focus:outline-none ${
+                                isDupName 
+                                  ? 'border-amber-400 bg-amber-50 text-amber-900' 
+                                  : 'border-transparent focus:border-blue-400'
                               }`}
                             />
-                            {isDup && (
+                            {isDupName && (
                               <span className="text-[10px] text-amber-700 font-semibold flex items-center gap-1 mt-0.5">
                                 <AlertTriangle className="w-3 h-3 text-amber-600 flex-shrink-0" />
                                 <span>Bu sinfda allaqachon mavjud!</span>
@@ -646,29 +723,53 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
                           <td className="py-2 px-3">
                             <input
                               type="text"
-                              placeholder="YYYY-MM-DD"
+                              placeholder="Sana kiritilmagan"
                               value={st.birthDate || ''}
                               onChange={e => handleUpdateStudent(idx, 'birthDate', e.target.value)}
-                              className="w-full px-2 py-1 bg-transparent border border-transparent focus:border-blue-400 rounded text-xs text-slate-700 focus:bg-white focus:outline-none"
+                              className={`w-full px-2 py-1 bg-transparent border rounded text-xs text-slate-700 focus:bg-white focus:outline-none ${
+                                isMissingBirth
+                                  ? 'border-amber-300 border-dashed bg-amber-50/40 placeholder:text-amber-600 font-medium'
+                                  : 'border-transparent focus:border-blue-400'
+                              }`}
                             />
                           </td>
                           <td className="py-2 px-3">
                             <input
                               type="text"
-                              placeholder="Pasport / ID"
+                              placeholder="Metrika kiritilmagan"
                               value={st.passportOrId || ''}
                               onChange={e => handleUpdateStudent(idx, 'passportOrId', e.target.value)}
-                              className="w-full px-2 py-1 bg-transparent border border-transparent focus:border-blue-400 rounded text-xs text-slate-700 focus:bg-white focus:outline-none"
+                              className={`w-full px-2 py-1 bg-transparent border rounded text-xs font-mono uppercase text-slate-800 focus:bg-white focus:outline-none ${
+                                isDupPass
+                                  ? 'border-rose-400 bg-rose-50 text-rose-900 font-bold ring-1 ring-rose-400'
+                                  : isMissingPass
+                                  ? 'border-amber-300 border-dashed bg-amber-50/40 placeholder:text-amber-600 font-medium'
+                                  : 'border-transparent focus:border-blue-400'
+                              }`}
                             />
+                            {isDupPass && (
+                              <span className="text-[10px] text-rose-700 font-bold flex items-center gap-1 mt-0.5">
+                                <AlertTriangle className="w-3 h-3 text-rose-600 flex-shrink-0" />
+                                <span>Takroriy metrika!</span>
+                              </span>
+                            )}
                           </td>
                           <td className="py-2 px-3 text-center">
-                            {isDup ? (
+                            {isDupPass ? (
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-300">
+                                Dublikat metrika
+                              </span>
+                            ) : isDupName ? (
                               <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300">
-                                Dublikat
+                                Dublikat ism
+                              </span>
+                            ) : isMissingBirth || isMissingPass ? (
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                                Chala
                               </span>
                             ) : (
                               <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
-                                Yangi
+                                To'liq
                               </span>
                             )}
                           </td>
