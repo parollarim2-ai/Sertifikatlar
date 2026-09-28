@@ -1,4 +1,5 @@
 import JSZip from 'jszip';
+import { jsPDF } from 'jspdf';
 import { Student, ClassGroup } from '../types';
 
 export function generateCertificateHTML(student: Student, classGroup?: ClassGroup): string {
@@ -153,7 +154,206 @@ export function printAllClassCertificates(students: Student[], classGroup: Class
   printWindow.document.close();
 }
 
-// Generate ZIP file of all certificates for the class
+/**
+ * Generate a high-resolution canvas certificate image as base64 PNG.
+ * Used for both individual PDF generation and 100% reliable fallback.
+ */
+export async function generateCertificateCanvasImage(student: Student, classGroup?: ClassGroup): Promise<string> {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1600;
+  canvas.height = 1130;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error("Canvas context is not available");
+
+  const dateStr = student.certificateDate || new Date().toISOString().split('T')[0];
+  const certNumber = student.certificateNumber || `B1MD-${(student.classId || 'SF').toUpperCase()}-${student.id.slice(-4)}`;
+  const certLink = student.certificateLink || 'https://coursera.org/verify/UZB-B1M';
+
+  // 1. Background gradient
+  const bgGrad = ctx.createLinearGradient(0, 0, 1600, 1130);
+  bgGrad.addColorStop(0, '#0b1329');
+  bgGrad.addColorStop(0.5, '#0f172a');
+  bgGrad.addColorStop(1, '#1e293b');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, 1600, 1130);
+
+  // 2. Corner decorations and outer gold border
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 14;
+  ctx.strokeRect(30, 30, 1540, 1070);
+
+  // Inner subtle border
+  ctx.strokeStyle = 'rgba(245, 158, 11, 0.4)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(50, 50, 1500, 1030);
+
+  // Watermark
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(1350, 850, 350, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(56, 189, 248, 0.03)';
+  ctx.fill();
+  ctx.restore();
+
+  // 3. Header section
+  // 1M Logo box
+  const logoGrad = ctx.createLinearGradient(80, 80, 170, 170);
+  logoGrad.addColorStop(0, '#0284c7');
+  logoGrad.addColorStop(1, '#3b82f6');
+  ctx.fillStyle = logoGrad;
+  ctx.beginPath();
+  ctx.roundRect(80, 80, 90, 90, 16);
+  ctx.fill();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 38px Inter, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('1M', 125, 138);
+
+  // Title text
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#f59e0b';
+  ctx.font = 'bold 32px Inter, sans-serif';
+  ctx.fillText("BIR MILLION O'ZBEK DASTURCHILARI", 195, 120);
+
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '500 20px Inter, sans-serif';
+  ctx.fillText("Coursera & Raqamli Ta'lim Hamkorligi Dasturi", 195, 152);
+
+  // Certificate number (top right)
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#64748b';
+  ctx.font = '600 16px Inter, sans-serif';
+  ctx.fillText('SERTIFIKAT RAQAMI:', 1520, 115);
+  ctx.fillStyle = '#38bdf8';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText(certNumber, 1520, 145);
+
+  // Divider line
+  ctx.strokeStyle = 'rgba(245, 158, 11, 0.3)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(80, 200);
+  ctx.lineTo(1520, 200);
+  ctx.stroke();
+
+  // 4. Certificate Body
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = 'bold 22px Inter, sans-serif';
+  ctx.fillText('M U V A F F A Q I Y A T   S E R T I F I K A T I', 800, 290);
+
+  ctx.fillStyle = '#cbd5e1';
+  ctx.font = 'normal 20px Inter, sans-serif';
+  ctx.fillText("Ushbu sertifikat quyidagi o'quvchi kursni a'lo baholarga tamomlaganini tasdiqlaydi:", 800, 340);
+
+  // Student Full Name (Large, glowing)
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '900 52px Inter, sans-serif';
+  ctx.fillText(student.fullName, 800, 440);
+
+  // Underline for name
+  const nameWidth = ctx.measureText(student.fullName).width;
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(800 - nameWidth / 2 - 20, 465);
+  ctx.lineTo(800 + nameWidth / 2 + 20, 465);
+  ctx.stroke();
+
+  // Description
+  ctx.fillStyle = '#e2e8f0';
+  ctx.font = 'normal 22px Inter, sans-serif';
+  const classText = classGroup ? `${classGroup.name} sinf o'quvchisi. ` : '';
+  ctx.fillText(`${classText}"Bir Million Dasturchi" loyihasi doirasida xalqaro Coursera platformasidagi`, 800, 540);
+  ctx.font = 'bold 24px Inter, sans-serif';
+  ctx.fillStyle = '#38bdf8';
+  ctx.fillText('"Frontend Web Development & Algoritmlar"', 800, 580);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.font = 'normal 22px Inter, sans-serif';
+  ctx.fillText("ixtisoslashtirilgan ta'lim dasturini muvaffaqiyatli tamomladi.", 800, 620);
+
+  // 5. Verification and Signatures Footer
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(80, 880);
+  ctx.lineTo(1520, 880);
+  ctx.stroke();
+
+  // Date & Link (Left)
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '600 16px Inter, sans-serif';
+  ctx.fillText('BERILGAN SANA:', 80, 930);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.font = 'bold 22px Inter, sans-serif';
+  ctx.fillText(dateStr, 80, 960);
+
+  ctx.fillStyle = '#64748b';
+  ctx.font = '500 15px Inter, sans-serif';
+  ctx.fillText('Elektron tekshiruv havolasi:', 80, 1000);
+  ctx.fillStyle = '#38bdf8';
+  ctx.font = '500 17px monospace';
+  const displayLink = certLink.length > 55 ? certLink.slice(0, 52) + '...' : certLink;
+  ctx.fillText(displayLink, 80, 1025);
+
+  // Digital Seal (Center)
+  ctx.save();
+  ctx.translate(800, 970);
+  ctx.rotate(-0.1);
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(0, 0, 60, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(245, 158, 11, 0.08)';
+  ctx.fill();
+
+  ctx.fillStyle = '#f59e0b';
+  ctx.font = 'bold 15px Inter, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('★ TASDIQLANGAN ★', 0, -10);
+  ctx.font = '600 13px Inter, sans-serif';
+  ctx.fillText('RAQAMLI MUHR', 0, 15);
+  ctx.restore();
+
+  // Signatures (Right)
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#e2e8f0';
+  ctx.font = 'bold 20px Inter, sans-serif';
+  ctx.fillText('Loyiha Koordinatori', 1520, 930);
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '500 16px Inter, sans-serif';
+  ctx.fillText("O'zbekiston IT-Hamjamiyati", 1520, 958);
+
+  ctx.font = 'italic 26px cursive, sans-serif';
+  ctx.fillStyle = '#38bdf8';
+  ctx.fillText('Verified & Approved', 1520, 1010);
+
+  return canvas.toDataURL('image/png');
+}
+
+/**
+ * Generate a standalone single-student PDF document using jsPDF.
+ */
+export async function generateSingleStudentPdf(student: Student, classGroup?: ClassGroup): Promise<jsPDF> {
+  const doc = new jsPDF({
+    orientation: 'landscape',
+    unit: 'mm',
+    format: 'a4',
+  });
+
+  const imgData = await generateCertificateCanvasImage(student, classGroup);
+  // Fit 297 x 210 mm
+  doc.addImage(imgData, 'PNG', 5, 5, 287, 200, undefined, 'FAST');
+  return doc;
+}
+
+/**
+ * Generate ZIP file of all certificates for the class, with both individual PDF and HTML.
+ */
 export async function downloadAllCertificatesAsZip(
   students: Student[],
   classGroup: ClassGroup,
@@ -176,13 +376,27 @@ export async function downloadAllCertificatesAsZip(
   summaryText += `  Sana: ${new Date().toLocaleDateString('uz-UZ')}\n`;
   summaryText += `====================================================\n\n`;
 
-  certifiedStudents.forEach((student, index) => {
+  const total = certifiedStudents.length;
+
+  for (let index = 0; index < total; index++) {
+    const student = certifiedStudents[index];
+
     summaryText += `${index + 1}. ${student.fullName}\n`;
     summaryText += `   ID/Pasport: ${student.passportOrId || 'Mavjud emas'}\n`;
     summaryText += `   Havola: ${student.certificateLink || 'Mavjud emas'}\n`;
     summaryText += `   Email: ${student.assignedEmail || 'Mavjud emas'}\n\n`;
 
-    // Each individual certificate HTML file
+    // 1. Individual PDF file
+    try {
+      const studentPdf = await generateSingleStudentPdf(student, classGroup);
+      const pdfBlob = studentPdf.output('blob');
+      const safePdfName = `${index + 1}_${student.fullName.replace(/[^a-zA-Z0-9_\u0400-\u04FF]/g, '_')}.pdf`;
+      folder?.file(safePdfName, pdfBlob);
+    } catch (e) {
+      console.warn("Single student PDF error:", e);
+    }
+
+    // 2. Individual HTML file
     const certHTML = `
       <!DOCTYPE html>
       <html>
@@ -198,18 +412,20 @@ export async function downloadAllCertificatesAsZip(
         </body>
       </html>
     `;
+    const safeHtmlName = `${index + 1}_${student.fullName.replace(/[^a-zA-Z0-9_\u0400-\u04FF]/g, '_')}.html`;
+    folder?.file(safeHtmlName, certHTML);
 
-    // Clean filename
-    const safeName = `${index + 1}_${student.fullName.replace(/[^a-zA-Z0-9_\u0400-\u04FF]/g, '_')}.html`;
-    folder?.file(safeName, certHTML);
-  });
+    if (onProgress) {
+      onProgress(Math.round(((index + 1) / total) * 90));
+    }
+  }
 
   folder?.file('RO\'YXAT_VA_HAVOLALAR.txt', summaryText);
 
   // Generate ZIP
   const content = await zip.generateAsync({ type: 'blob' }, (metadata) => {
     if (onProgress) {
-      onProgress(metadata.percent);
+      onProgress(Math.min(99, 90 + Math.round(metadata.percent * 0.1)));
     }
   });
 
@@ -217,11 +433,206 @@ export async function downloadAllCertificatesAsZip(
   const url = URL.createObjectURL(content);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${classGroup.name}_sinf_sertifikatlari.zip`;
+  a.download = `${classGroup.name}_sinf_sertifikatlari_to'plami.zip`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Capture certificate image from external URL through backend proxy.
+ */
+export async function captureCertificateFromLink(
+  url: string,
+  studentName?: string,
+  className?: string
+): Promise<string | null> {
+  if (!url || typeof url !== 'string' || url.trim().length < 5) {
+    return null;
+  }
+
+  try {
+    const res = await fetch('/api/capture-certificate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: url.trim(),
+        studentName,
+        className,
+      }),
+    });
+
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.success && data.imageBase64) {
+      return data.imageBase64;
+    }
+    return null;
+  } catch (err) {
+    console.warn("captureCertificateFromLink failed:", err);
+    return null;
+  }
+}
+
+/**
+ * FEATURE 2:
+ * Generate a single unified PDF containing all student certificates
+ * captured from their actual links, sorted strictly alphabetically by surname!
+ */
+export async function generateUnifiedCertificatesPdf(
+  students: Student[],
+  classGroup: ClassGroup,
+  onProgress?: (statusText: string, current: number, total: number) => void
+): Promise<{ filename: string; blob: Blob } | null> {
+  const certifiedStudents = students.filter(s => s.status === 'certified' && s.classId === classGroup.id);
+  
+  if (certifiedStudents.length === 0) {
+    alert("Bu sinfda hali sertifikat olgan o'quvchilar yo'q!");
+    return null;
+  }
+
+  // 1. Sort strictly alphabetically by student surname / full name (Familya bo'yicha ketma-ket)
+  const sortedStudents = [...certifiedStudents].sort((a, b) => {
+    return a.fullName.trim().localeCompare(b.fullName.trim(), 'uz', { sensitivity: 'base' });
+  });
+
+  const total = sortedStudents.length;
+
+  // Initialize jsPDF in A4 landscape mode (297 x 210 mm)
+  const doc = new jsPDF({
+    orientation: 'landscape',
+    unit: 'mm',
+    format: 'a4',
+  });
+
+  for (let i = 0; i < total; i++) {
+    const student = sortedStudents[i];
+
+    if (onProgress) {
+      onProgress(
+        `"${student.fullName}" sertifikati olinmoqda (${i + 1}/${total})...`,
+        i + 1,
+        total
+      );
+    }
+
+    if (i > 0) {
+      doc.addPage('a4', 'landscape');
+    }
+
+    // Attempt to capture real certificate image from external link
+    let certificateImage: string | null = null;
+    if (student.certificateLink) {
+      certificateImage = await captureCertificateFromLink(
+        student.certificateLink,
+        student.fullName,
+        classGroup.name
+      );
+    }
+
+    // Guaranteed fallback: If external image capture fails or offline, use high-resolution canvas certificate!
+    if (!certificateImage) {
+      certificateImage = await generateCertificateCanvasImage(student, classGroup);
+    }
+
+    // Page Design (Executive Apple Clean Pro Layout):
+    // 1. Top Bar Banner
+    doc.setFillColor(15, 23, 42); // slate-900
+    doc.rect(0, 0, 297, 16, 'F');
+
+    // Accent line
+    doc.setFillColor(245, 158, 11); // amber-500
+    doc.rect(0, 16, 297, 1.2, 'F');
+
+    // Student Number and Full Name (Left)
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(13);
+    doc.text(`${i + 1}. ${student.fullName}`, 12, 11);
+
+    // Class Name & Teacher (Right)
+    doc.setTextColor(251, 191, 36); // amber-400
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    const teacherMeta = `${classGroup.name} sinfi | Sinf rahbari: ${classGroup.teacherName}`;
+    doc.text(teacherMeta, 285, 11, { align: 'right' });
+
+    // 2. Main Certificate Image in Center (Exact aspect-ratio preserved)
+    let imageW = 277;
+    let imageH = 175;
+    let imageX = 10;
+    let imageY = 20;
+
+    try {
+      const dimensions = await new Promise<{ w: number; h: number }>((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          resolve({ w: img.naturalWidth || img.width || 1772, h: img.naturalHeight || img.height || 928 });
+        };
+        img.onerror = () => resolve({ w: 1772, h: 928 });
+        img.src = certificateImage!;
+      });
+
+      const maxW = 279;
+      const maxH = 176;
+      const aspect = dimensions.w / dimensions.h;
+
+      imageW = maxW;
+      imageH = imageW / aspect;
+      if (imageH > maxH) {
+        imageH = maxH;
+        imageW = imageH * aspect;
+      }
+
+      imageX = (297 - imageW) / 2;
+      imageY = 18 + (178 - imageH) / 2;
+    } catch {
+      // Keep default values
+    }
+
+    // Outer subtle border around image
+    doc.setDrawColor(226, 232, 240); // slate-200
+    doc.setLineWidth(0.4);
+    doc.rect(imageX - 0.5, imageY - 0.5, imageW + 1, imageH + 1);
+
+    try {
+      const format = certificateImage.startsWith('data:image/png') ? 'PNG' : 'JPEG';
+      doc.addImage(certificateImage, format, imageX, imageY, imageW, imageH, undefined, 'FAST');
+    } catch (e) {
+      console.warn("Failed to add captured image, falling back to canvas:", e);
+      const fallbackImg = await generateCertificateCanvasImage(student, classGroup);
+      doc.addImage(fallbackImg, 'PNG', imageX, imageY, imageW, imageH, undefined, 'FAST');
+    }
+
+    // 3. Page Footer Bar
+    doc.setFillColor(248, 250, 252); // slate-50
+    doc.rect(0, 199, 297, 11, 'F');
+    doc.setDrawColor(203, 213, 225); // slate-300
+    doc.setLineWidth(0.3);
+    doc.line(0, 199, 297, 199);
+
+    // Footer Left: Verification Link
+    doc.setTextColor(71, 85, 105);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    const linkStr = student.certificateLink || 'https://coursera.org/verify';
+    const displayLink = linkStr.length > 90 ? linkStr.slice(0, 87) + '...' : linkStr;
+    doc.text(`Elektron tasdiq: ${displayLink}`, 12, 206);
+
+    // Footer Right: Page info
+    doc.setTextColor(30, 41, 59);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.text(`Sahifa ${i + 1} / ${total}`, 285, 206, { align: 'right' });
+  }
+
+  // Save the unified multi-page PDF
+  const cleanClassName = classGroup.name.replace(/[^a-zA-Z0-9_\u0400-\u04FF]/g, '_');
+  const filename = `${cleanClassName}_sinfi_barcha_sertifikatlar_yagona_royxati.pdf`;
+  doc.save(filename);
+  const blob = doc.output('blob');
+  return { filename, blob };
 }
 
 // Format all student certificates into clipboard-ready text

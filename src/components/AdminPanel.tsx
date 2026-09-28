@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage } from '../types';
+import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage, TelegramUser } from '../types';
 import { SessionsManagementTab } from './SessionsManagementTab';
+import { TelegramBotTab } from './TelegramBotTab';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
 import { 
   Users, 
@@ -46,7 +47,9 @@ interface AdminPanelProps {
   emailPool: EmailAccount[];
   sessions: TeacherSession[];
   messages: TeacherMessage[];
+  telegramUsers?: TelegramUser[];
   currentDeviceId?: string;
+  onRefreshTelegramUsers?: () => void;
   onOpenStudentModal: (student: Student, focusField?: 'passport' | 'name' | 'email') => void;
   onOpenPaymentModal: (classGroup: ClassGroup) => void;
   onOpenBulkEmailModal: () => void;
@@ -68,7 +71,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   emailPool,
   sessions,
   messages,
+  telegramUsers = [],
   currentDeviceId,
+  onRefreshTelegramUsers,
   onOpenStudentModal,
   onOpenPaymentModal,
   onOpenBulkEmailModal,
@@ -83,7 +88,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   onDeleteClass,
   onLogoutAdmin,
 }) => {
-  const [activeTab, setActiveTab] = useState<'classes' | 'finance' | 'emails' | 'sessions'>('classes');
+  const [activeTab, setActiveTab] = useState<'classes' | 'finance' | 'emails' | 'sessions' | 'telegram'>('classes');
   const [selectedClassId, setSelectedClassId] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   
@@ -535,6 +540,23 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           )}
           {sessions.some(s => s.isBlocked) && (
             <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" title="Bloklangan qurilma mavjud"></span>
+          )}
+        </button>
+
+        <button
+          onClick={() => setActiveTab('telegram')}
+          className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+            activeTab === 'telegram'
+              ? 'bg-[#24A1DE] text-white shadow-xs'
+              : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+          }`}
+        >
+          <Send className="w-4 h-4" />
+          <span>Telegram Bot (@Courseradan_bot)</span>
+          {telegramUsers && telegramUsers.length > 0 && (
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-emerald-500 text-white font-mono font-bold">
+              {telegramUsers.length} ustoz
+            </span>
           )}
         </button>
       </div>
@@ -1201,6 +1223,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           currentDeviceId={currentDeviceId}
           onToggleBlockDevice={onToggleBlockDevice}
           onDeleteSession={onDeleteSession}
+        />
+      )}
+
+      {/* TAB 5: Telegram Bot */}
+      {activeTab === 'telegram' && (
+        <TelegramBotTab
+          classes={classes}
+          students={students}
+          telegramUsers={telegramUsers}
+          onOpenTeacherMessageModal={onOpenTeacherMessageModal}
+          onRefreshUsers={onRefreshTelegramUsers}
         />
       )}
 

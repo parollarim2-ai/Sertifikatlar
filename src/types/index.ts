@@ -66,10 +66,26 @@ export interface TeacherMessage {
   readDeviceName?: string;
 }
 
+export interface TelegramUser {
+  id: string; // string representation of chatId
+  chatId: number;
+  teacherName: string;
+  classId: string;
+  className: string;
+  username?: string;
+  firstName?: string;
+  lastName?: string;
+  lastActiveAt: string;
+  createdAt: string;
+  isBlocked?: boolean;
+  lastNotifiedAllDone?: boolean;
+}
+
 export interface AppState {
   classes: ClassGroup[];
   students: Student[];
   emailPool: EmailAccount[];
   sessions: TeacherSession[];
   messages: TeacherMessage[];
+  telegramUsers: TelegramUser[];
 }

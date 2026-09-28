@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ClassGroup, TeacherMessage } from '../types';
+import { ClassGroup, TeacherMessage, TelegramUser } from '../types';
 import { 
   X, 
   Send, 
@@ -19,6 +19,7 @@ interface TeacherMessageModalProps {
   isOpen: boolean;
   classGroup: ClassGroup;
   messages: TeacherMessage[];
+  telegramUsers?: TelegramUser[];
   onClose: () => void;
   onSendMessage: (message: TeacherMessage) => void;
   onDeleteMessage: (messageId: string) => void;
@@ -28,6 +29,7 @@ export const TeacherMessageModal: React.FC<TeacherMessageModalProps> = ({
   isOpen,
   classGroup,
   messages,
+  telegramUsers = [],
   onClose,
   onSendMessage,
   onDeleteMessage,
@@ -38,6 +40,9 @@ export const TeacherMessageModal: React.FC<TeacherMessageModalProps> = ({
   const [imageUrl, setImageUrl] = useState('');
   const [activeTab, setActiveTab] = useState<'write' | 'history'>('write');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [sendViaTelegram, setSendViaTelegram] = useState(true);
+
+  const connectedTgUser = telegramUsers.find(u => u.classId === classGroup.id);
 
   React.useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -94,6 +99,21 @@ export const TeacherMessageModal: React.FC<TeacherMessageModalProps> = ({
     };
 
     onSendMessage(newMessage);
+
+    // If connected to Telegram Bot and enabled, send to Telegram immediately
+    if (sendViaTelegram && connectedTgUser) {
+      fetch('/api/telegram/send-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chatId: connectedTgUser.chatId,
+          title: title.trim(),
+          content: content.trim(),
+          priority,
+        }),
+      }).catch((err) => console.error("Telegram send error:", err));
+    }
+
     setIsSubmitting(false);
     setTitle('');
     setContent('');
@@ -183,6 +203,36 @@ export const TeacherMessageModal: React.FC<TeacherMessageModalProps> = ({
                 Qabul qiluvchi: <strong>{classGroup.teacherName}</strong> ({classGroup.name} sinf rahbari). Xabar yuborilgach, ustoz saytga kirishi bilanoq unga xabarnoma ko'rsatiladi.
               </span>
             </div>
+
+            {/* Telegram Bot Delivery Status */}
+            {connectedTgUser ? (
+              <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse flex-shrink-0"></div>
+                  <div>
+                    <span className="font-bold text-sky-950">Telegram Bot Ulangan: </span>
+                    <span className="text-sky-700 font-semibold">{connectedTgUser.username || connectedTgUser.firstName}</span>
+                    <span className="text-slate-500 text-[11px] block">
+                      Oxirgi faollik: {new Date(connectedTgUser.lastActiveAt).toLocaleDateString('uz-UZ')} {new Date(connectedTgUser.lastActiveAt).toLocaleTimeString('uz-UZ', { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                </div>
+                <label className="flex items-center gap-1.5 cursor-pointer font-semibold text-[#24A1DE] select-none bg-white px-2.5 py-1.5 rounded-lg border border-sky-200 shadow-2xs">
+                  <input
+                    type="checkbox"
+                    checked={sendViaTelegram}
+                    onChange={(e) => setSendViaTelegram(e.target.checked)}
+                    className="rounded text-[#24A1DE] focus:ring-[#24A1DE]"
+                  />
+                  <span>Bot orqali ham yuborish</span>
+                </label>
+              </div>
+            ) : (
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center gap-2 text-xs text-slate-500">
+                <div className="w-2 h-2 rounded-full bg-slate-300 flex-shrink-0"></div>
+                <span>Ustoz hali <b>@Courseradan_bot</b> ga kirmagan (Xabar sayt ichida ko'rsatiladi).</span>
+              </div>
+            )}
 
             {/* Priority */}
             <div>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage } from './types';
+import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage, TelegramUser } from './types';
 import { INITIAL_CLASSES, INITIAL_STUDENTS, INITIAL_EMAIL_POOL } from './data/mockData';
 import { TeacherPortal } from './components/TeacherPortal';
 import { AdminPanel } from './components/AdminPanel';
@@ -74,6 +74,43 @@ export default function App() {
   // Sessions and Messages
   const [sessions, setSessions] = useState<TeacherSession[]>([]);
   const [messages, setMessages] = useState<TeacherMessage[]>([]);
+  const [telegramUsers, setTelegramUsers] = useState<TelegramUser[]>([]);
+
+  // Periodically fetch connected Telegram users from bot server
+  const fetchTelegramStatus = () => {
+    fetch('/api/telegram/status')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.users && Array.isArray(data.users)) {
+          setTelegramUsers(data.users);
+        }
+      })
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    fetchTelegramStatus();
+    const interval = setInterval(fetchTelegramStatus, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Sync classes and students to server telegram store whenever they update
+  useEffect(() => {
+    if (classes.length > 0 || students.length > 0) {
+      fetch('/api/telegram/sync-data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ classes, students }),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.users && Array.isArray(data.users)) {
+            setTelegramUsers(data.users);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [classes, students]);
 
   // Admin authentication state
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState<boolean>(() => {
@@ -338,12 +375,35 @@ export default function App() {
   };
 
   // Sessions and Device Management Handlers
-  const handleRegisterSession = async (session: TeacherSession) => {
+  const handleRegisterSession = async (session: Partial<TeacherSession> & { deviceId: string }) => {
+    const fullSession: TeacherSession = {
+      id: session.id || session.deviceId,
+      deviceId: session.deviceId,
+      teacherName: session.teacherName || '',
+      className: session.className || '',
+      classId: session.classId || '',
+      deviceName: session.deviceName || '',
+      browser: session.browser || '',
+      os: session.os || '',
+      screen: session.screen || '',
+      lastActiveAt: session.lastActiveAt || new Date().toISOString(),
+      createdAt: session.createdAt || new Date().toISOString(),
+      isBlocked: session.isBlocked || false,
+      blockedReason: session.blockedReason,
+    };
+
     setSessions(prev => {
+      const existing = prev.find(s => s.deviceId === session.deviceId);
+      const merged: TeacherSession = {
+        ...fullSession,
+        isBlocked: existing ? existing.isBlocked : false,
+        blockedReason: existing ? existing.blockedReason : undefined,
+        createdAt: existing ? existing.createdAt : fullSession.createdAt,
+      };
       const filtered = prev.filter(s => s.deviceId !== session.deviceId);
-      return [session, ...filtered];
+      return [merged, ...filtered];
     });
-    await syncSaveSession(session);
+    await syncSaveSession(fullSession);
   };
 
   const handleToggleBlockDevice = async (deviceId: string, isBlocked: boolean, reason?: string) => {
@@ -464,6 +524,8 @@ export default function App() {
               emailPool={emailPool}
               sessions={sessions}
               messages={messages}
+              telegramUsers={telegramUsers}
+              onRefreshTelegramUsers={fetchTelegramStatus}
               onOpenStudentModal={(student) => setActiveStudentModal(student)}
               onOpenPaymentModal={(classGroup) => setActivePaymentClass(classGroup)}
               onOpenBulkEmailModal={() => setIsBulkEmailOpen(true)}
@@ -576,6 +638,7 @@ export default function App() {
           isOpen={true}
           classGroup={activeMessageClass}
           messages={messages}
+          telegramUsers={telegramUsers}
           onClose={() => setActiveMessageClass(null)}
           onSendMessage={handleSendMessage}
           onDeleteMessage={handleDeleteTeacherMessage}

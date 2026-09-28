@@ -4,9 +4,11 @@ import { detectCurrentDevice } from '../utils/deviceDetector';
 import { extractPassportDigits } from '../utils/studentValidator';
 import { TeacherIncomingNoticeModal } from './TeacherIncomingNoticeModal';
 import { BlockedAccessOverlay } from './BlockedAccessOverlay';
+import { TelegramShareModal } from './TelegramShareModal';
 import { 
   formatClassCertificatesForClipboard, 
   downloadAllCertificatesAsZip,
+  generateUnifiedCertificatesPdf,
 } from '../utils/certificateGenerator';
 import confetti from 'canvas-confetti';
 import { 
@@ -23,15 +25,19 @@ import {
   School, 
   UserCheck, 
   ChevronRight, 
+  ChevronDown,
   RefreshCw, 
   Clock, 
   Sparkles, 
   CreditCard, 
   Layers, 
   FileSpreadsheet,
+  FolderArchive,
+  FileStack,
   Bell,
   BellRing,
-  Info
+  Info,
+  ArrowLeft
 } from 'lucide-react';
 
 interface TeacherPortalProps {
@@ -74,6 +80,45 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   const [copySuccessToast, setCopySuccessToast] = useState('');
   const [isZipping, setIsZipping] = useState(false);
   const [zipProgress, setZipProgress] = useState(0);
+
+  // Multi-option download popup emerging from the download button
+  const downloadMenuRef = useRef<HTMLDivElement>(null);
+  const [isDownloadMenuOpen, setIsDownloadMenuOpen] = useState(false);
+  const [isGeneratingUnifiedPdf, setIsGeneratingUnifiedPdf] = useState(false);
+  const [unifiedProgressText, setUnifiedProgressText] = useState('');
+  const [unifiedProgressPercent, setUnifiedProgressPercent] = useState(0);
+
+  // Telegram Share Modal state after PDF download completes
+  const [telegramShareModalData, setTelegramShareModalData] = useState<{
+    isOpen: boolean;
+    fileName: string;
+    className: string;
+    teacherName: string;
+    studentCount: number;
+    pdfBlob?: Blob | null;
+  }>({
+    isOpen: false,
+    fileName: '',
+    className: '',
+    teacherName: '',
+    studentCount: 0,
+    pdfBlob: null,
+  });
+
+  // Click outside listener to close the download menu
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (downloadMenuRef.current && !downloadMenuRef.current.contains(e.target as Node)) {
+        setIsDownloadMenuOpen(false);
+      }
+    };
+    if (isDownloadMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isDownloadMenuOpen]);
 
   // Problem view modal for teachers
   const [viewingProblemStudent, setViewingProblemStudent] = useState<Student | null>(null);
@@ -232,6 +277,183 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     }
   };
 
+  // Feature 2: Generate Unified Combined PDF from actual links sorted alphabetically by surname
+  const handleGenerateUnifiedPdf = async () => {
+    if (!currentClass || certifiedCount === 0) return;
+    setIsDownloadMenuOpen(false);
+    setIsGeneratingUnifiedPdf(true);
+    setUnifiedProgressPercent(0);
+    setUnifiedProgressText("Jarayon boshlanmoqda...");
+
+    try {
+      const result = await generateUnifiedCertificatesPdf(students, currentClass, (statusText, current, total) => {
+        setUnifiedProgressText(statusText);
+        setUnifiedProgressPercent(Math.round((current / total) * 100));
+      });
+      confetti({
+        particleCount: 60,
+        spread: 80,
+        origin: { y: 0.6 }
+      });
+      setCopySuccessToast(`✅ ${currentClass.name} sinfi uchun yagona birlashtirilgan PDF muvaffaqiyatli yaratildi va yuklandi!`);
+      setTimeout(() => setCopySuccessToast(''), 5000);
+
+      // Prompt Telegram Share dialog immediately upon download completion!
+      if (result?.filename) {
+        setTelegramShareModalData({
+          isOpen: true,
+          fileName: result.filename,
+          className: currentClass.name,
+          teacherName: currentClass.teacherName,
+          studentCount: certifiedCount,
+          pdfBlob: result.blob || null,
+        });
+      }
+    } catch (err: any) {
+      console.error("Unified PDF generation error:", err);
+      alert("PDF yaratishda xatolik yuz berdi. Iltimos qaytadan urinib ko'ring.");
+    } finally {
+      setIsGeneratingUnifiedPdf(false);
+      setUnifiedProgressPercent(0);
+      setUnifiedProgressText('');
+    }
+  };
+
+  // Teacher Picker Modal (Accessible both on landing and in active class dashboard)
+  const renderTeacherPickerModal = () => {
+    if (!isTeacherPickerOpen) return null;
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
+        <div className="relative w-full max-w-lg bg-white border border-slate-200 rounded-2xl shadow-2xl p-5 space-y-4 max-h-[85vh] flex flex-col">
+          
+          <div className="flex items-center justify-between pb-3 border-b border-slate-200/70 flex-shrink-0">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg apple-badge-blue flex items-center justify-center">
+                <School className="w-4 h-4 text-blue-600" />
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-900 text-sm">
+                  {selectedClassId ? "Sinfni almashtirish" : "O'z sinfingizni tanlang"}
+                </h3>
+                <p className="text-[11px] text-slate-500">Ism-familiyangiz yoki sinf nomini qidiring</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsTeacherPickerOpen(false)}
+              className="w-7 h-7 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center transition-colors cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Search input in modal */}
+          <div className="relative flex-shrink-0">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+            <input
+              type="text"
+              placeholder="Ustoz ismi yoki sinf (masalan: 9-B)..."
+              value={teacherSearchQuery}
+              onChange={e => setTeacherSearchQuery(e.target.value)}
+              autoFocus
+              className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs sm:text-sm text-slate-900 focus:outline-none focus:bg-white focus:border-blue-600"
+            />
+          </div>
+
+          {/* Class List inside Modal */}
+          <div className="space-y-1.5 overflow-y-auto flex-1 pr-1">
+            {filteredClasses.length === 0 ? (
+              <div className="py-8 text-center text-xs text-slate-400">
+                "{teacherSearchQuery}" bo'yicha sinf yoki o'qituvchi topilmadi
+              </div>
+            ) : (
+              filteredClasses.map(c => {
+                const cStudents = students.filter(s => s.classId === c.id);
+                const cCert = cStudents.filter(s => s.status === 'certified').length;
+                const isCurrent = c.id === selectedClassId;
+
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedClassId(c.id);
+                      setIsTeacherPickerOpen(false);
+                      setTeacherSearchQuery('');
+                    }}
+                    className={`w-full p-3 rounded-xl border flex items-center justify-between text-left transition-all cursor-pointer group ${
+                      isCurrent 
+                        ? 'border-blue-500 bg-blue-50/70 ring-1 ring-blue-500' 
+                        : 'border-slate-200/80 hover:border-blue-500 hover:bg-blue-50/50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className={`w-9 h-9 rounded-lg font-bold text-xs flex items-center justify-center flex-shrink-0 transition-colors ${
+                        isCurrent 
+                          ? 'bg-blue-600 text-white' 
+                          : 'apple-badge-blue group-hover:bg-blue-600 group-hover:text-white'
+                      }`}>
+                        {c.name}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-slate-900 text-xs sm:text-sm block truncate group-hover:text-blue-700">
+                            {c.teacherName}
+                          </span>
+                          {isCurrent && (
+                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-blue-200 text-blue-900 font-bold">
+                              Hozirgi sinf
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[11px] text-slate-500">
+                          {c.name} sinfi • {cStudents.length} ta o'quvchi ({cCert} ta tayyor)
+                        </span>
+                      </div>
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-blue-600 group-hover:translate-x-1 transition-all flex-shrink-0" />
+                  </button>
+                );
+              })
+            )}
+          </div>
+
+          {/* Modal Footer */}
+          <div className="pt-2 border-t border-slate-200/70 flex items-center justify-between text-xs text-slate-500 flex-shrink-0">
+            <div className="flex items-center gap-2">
+              <span>Topildi: {filteredClasses.length} ta sinf</span>
+              {selectedClassId && (
+                <>
+                  <span>•</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedClassId('');
+                      setIsTeacherPickerOpen(false);
+                      setTeacherSearchQuery('');
+                    }}
+                    className="text-blue-600 hover:text-blue-800 font-bold hover:underline cursor-pointer flex items-center gap-1"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Bosh sahifaga chiqish</span>
+                  </button>
+                </>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsTeacherPickerOpen(false)}
+              className="px-3.5 py-1.5 apple-btn-secondary text-slate-700 rounded-lg font-medium cursor-pointer"
+            >
+              Yopish
+            </button>
+          </div>
+
+        </div>
+      </div>
+    );
+  };
+
   // 1. If no classes exist at all in database
   if (classes.length === 0) {
     return (
@@ -303,10 +525,10 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                 Barcha tayyor sertifikatlarni bitta tugma bilan guruhga nusxalash
               </p>
             </div>
-            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
-              <span className="text-[11px] font-bold text-slate-700 block">📥 ZIP arxiv yuklash</span>
-              <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
-                Sinfingiz sertifikatlarini bitta faylda kompyuterga yuklab olish
+            <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200/80">
+              <span className="text-[11px] font-bold text-indigo-900 block">📑 Yagona PDF & ZIP</span>
+              <p className="text-[11px] text-indigo-700 mt-0.5 leading-snug">
+                Haqiqiy sertifikatlarni A-Z tartibda bitta PDF yoki ZIP arxivda yuklash
               </p>
             </div>
           </div>
@@ -314,98 +536,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         </div>
 
         {/* MODAL: TEACHER PICKER POPUP */}
-        {isTeacherPickerOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
-            <div className="relative w-full max-w-lg bg-white border border-slate-200 rounded-2xl shadow-2xl p-5 space-y-4 max-h-[85vh] flex flex-col">
-              
-              <div className="flex items-center justify-between pb-3 border-b border-slate-200/70 flex-shrink-0">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg apple-badge-blue flex items-center justify-center">
-                    <School className="w-4 h-4 text-blue-600" />
-                  </div>
-                  <div>
-                    <h3 className="font-bold text-slate-900 text-sm">O'z sinfingizni tanlang</h3>
-                    <p className="text-[11px] text-slate-500">Ism-familiyangiz yoki sinf nomini qidiring</p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setIsTeacherPickerOpen(false)}
-                  className="w-7 h-7 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center transition-colors cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              {/* Search input in modal */}
-              <div className="relative flex-shrink-0">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                <input
-                  type="text"
-                  placeholder="Ustoz ismi yoki sinf (masalan: 9-B)..."
-                  value={teacherSearchQuery}
-                  onChange={e => setTeacherSearchQuery(e.target.value)}
-                  autoFocus
-                  className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs sm:text-sm text-slate-900 focus:outline-none focus:bg-white focus:border-blue-600"
-                />
-              </div>
-
-              {/* Class List inside Modal */}
-              <div className="space-y-1.5 overflow-y-auto flex-1 pr-1">
-                {filteredClasses.length === 0 ? (
-                  <div className="py-8 text-center text-xs text-slate-400">
-                    "{teacherSearchQuery}" bo'yicha sinf yoki o'qituvchi topilmadi
-                  </div>
-                ) : (
-                  filteredClasses.map(c => {
-                    const cStudents = students.filter(s => s.classId === c.id);
-                    const cCert = cStudents.filter(s => s.status === 'certified').length;
-
-                    return (
-                      <button
-                        key={c.id}
-                        type="button"
-                        onClick={() => {
-                          setSelectedClassId(c.id);
-                          setIsTeacherPickerOpen(false);
-                        }}
-                        className="w-full p-3 rounded-xl border border-slate-200/80 hover:border-blue-500 hover:bg-blue-50/50 flex items-center justify-between text-left transition-all cursor-pointer group"
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div className="w-9 h-9 rounded-lg apple-badge-blue font-bold text-xs flex items-center justify-center flex-shrink-0 group-hover:bg-blue-600 group-hover:text-white transition-colors">
-                            {c.name}
-                          </div>
-                          <div className="min-w-0">
-                            <span className="font-bold text-slate-900 text-xs sm:text-sm block truncate group-hover:text-blue-700">
-                              {c.teacherName}
-                            </span>
-                            <span className="text-[11px] text-slate-500">
-                              {c.name} sinfi • {cStudents.length} ta o'quvchi ({cCert} ta tayyor)
-                            </span>
-                          </div>
-                        </div>
-                        <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-blue-600 group-hover:translate-x-1 transition-all flex-shrink-0" />
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-
-              {/* Modal Footer */}
-              <div className="pt-2 border-t border-slate-200/70 flex items-center justify-between text-xs text-slate-500 flex-shrink-0">
-                <span>Topildi: {filteredClasses.length} ta sinf</span>
-                <button
-                  type="button"
-                  onClick={() => setIsTeacherPickerOpen(false)}
-                  className="px-3.5 py-1.5 apple-btn-secondary text-slate-700 rounded-lg font-medium cursor-pointer"
-                >
-                  Yopish
-                </button>
-              </div>
-
-            </div>
-          </div>
-        )}
+        {renderTeacherPickerModal()}
 
       </div>
     );
@@ -441,6 +572,19 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Quick exit to landing / all teachers */}
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedClassId('');
+                setTeacherSearchQuery('');
+              }}
+              className="p-2.5 apple-btn-secondary rounded-xl text-slate-600 hover:text-slate-900 transition-all flex-shrink-0 cursor-pointer active:scale-95"
+              title="Bosh sahifaga chiqish"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+
             {/* Messages button */}
             <button
               type="button"
@@ -459,13 +603,14 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
               )}
             </button>
 
+            {/* Sinfni almashtirish button */}
             <button
               type="button"
               onClick={() => {
                 setTeacherSearchQuery('');
                 setIsTeacherPickerOpen(true);
               }}
-              className="px-3.5 py-2 apple-btn-secondary rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all flex-shrink-0 cursor-pointer w-fit active:scale-95"
+              className="px-3.5 py-2 apple-btn-secondary hover:border-blue-500 hover:bg-blue-50/60 rounded-xl text-xs font-bold text-slate-800 flex items-center gap-1.5 transition-all flex-shrink-0 cursor-pointer w-fit active:scale-95 shadow-2xs"
             >
               <RefreshCw className="w-3.5 h-3.5 text-blue-600" />
               <span>Sinfni almashtirish</span>
@@ -549,20 +694,174 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
           <span>Telegram uchun nusxalash</span>
         </button>
 
-        <button
-          type="button"
-          disabled={certifiedCount === 0 || isZipping}
-          onClick={handleDownloadZip}
-          className="w-full py-3.5 px-4 apple-btn-secondary disabled:opacity-50 text-slate-800 text-xs sm:text-sm font-semibold rounded-xl flex items-center justify-center gap-2.5 transition-all cursor-pointer active:scale-[0.98]"
-        >
-          <Download className="w-4 h-4 text-blue-600 flex-shrink-0" />
-          <span>
-            {isZipping 
-              ? `Arxivlanmoqda... ${zipProgress}%` 
-              : `Barcha sertifikatlarni yuklash (.zip)`}
-          </span>
-        </button>
+        {/* Emergent Multi-Option Download Button */}
+        <div className="relative" ref={downloadMenuRef}>
+          <button
+            type="button"
+            disabled={certifiedCount === 0 || isZipping || isGeneratingUnifiedPdf}
+            onClick={() => setIsDownloadMenuOpen(prev => !prev)}
+            className={`w-full py-3.5 px-4 apple-btn-secondary disabled:opacity-50 text-slate-800 text-xs sm:text-sm font-semibold rounded-xl flex items-center justify-between gap-2.5 transition-all cursor-pointer active:scale-[0.98] ${
+              isDownloadMenuOpen ? 'ring-2 ring-blue-500 bg-blue-50/70 border-blue-400' : ''
+            }`}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <Download className="w-4 h-4 text-blue-600 flex-shrink-0" />
+              <span className="truncate">
+                {isZipping 
+                  ? `Arxivlanmoqda... ${zipProgress}%` 
+                  : isGeneratingUnifiedPdf
+                  ? `PDF jamlanmoqda... ${unifiedProgressPercent}%`
+                  : `Barcha sertifikatlarni yuklash`}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-blue-100 text-blue-800">
+                2 xil variant
+              </span>
+              <ChevronDown className={`w-4 h-4 text-slate-500 transition-transform duration-300 ${isDownloadMenuOpen ? 'rotate-180 text-blue-600' : ''}`} />
+            </div>
+          </button>
+
+          {/* Emergent Menu popping right from the button */}
+          {isDownloadMenuOpen && (
+            <div className="absolute right-0 top-full mt-2 w-full sm:w-[420px] z-40 bg-white/95 backdrop-blur-xl border border-blue-200/90 rounded-2xl shadow-2xl p-3.5 space-y-2.5 animate-scale-up origin-top-right">
+              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                <div className="flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+                  <span className="text-xs font-bold text-slate-900">Yuklash turini tanlang</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsDownloadMenuOpen(false)}
+                  className="w-6 h-6 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center transition-colors cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Tugma 1: Existing ZIP option */}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsDownloadMenuOpen(false);
+                  handleDownloadZip();
+                }}
+                className="w-full p-3 rounded-xl border border-slate-200/80 hover:border-blue-500 hover:bg-blue-50/60 text-left flex items-start gap-3 transition-all cursor-pointer group"
+              >
+                <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center flex-shrink-0 group-hover:bg-blue-600 group-hover:text-white transition-colors">
+                  <FolderArchive className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs sm:text-sm font-bold text-slate-900 group-hover:text-blue-700">
+                      ZIP to'plam (Alohida sertifikatlar)
+                    </span>
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+                      .ZIP
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
+                    Har bir o'quvchi uchun alohida sertifikat fayli (.pdf va .html) bitta ZIP arxivda yuklanadi.
+                  </p>
+                </div>
+              </button>
+
+              {/* Tugma 2: New Unified PDF from actual links */}
+              <button
+                type="button"
+                onClick={handleGenerateUnifiedPdf}
+                className="w-full p-3 rounded-xl border-2 border-indigo-300 bg-gradient-to-r from-indigo-50/70 to-blue-50/70 hover:border-indigo-600 hover:from-indigo-100/70 hover:to-blue-100/70 text-left flex items-start gap-3 transition-all cursor-pointer group shadow-xs"
+              >
+                <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center flex-shrink-0 shadow-md shadow-indigo-500/25 group-hover:scale-105 transition-transform">
+                  <FileStack className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-xs sm:text-sm font-bold text-indigo-950 group-hover:text-indigo-700 flex items-center gap-1.5">
+                      <span>Birlashtirilgan Yagona PDF</span>
+                      <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded-md bg-amber-400 text-amber-950">
+                        Yangi
+                      </span>
+                    </span>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800">
+                      .PDF
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-600 mt-1 leading-snug">
+                    Kiritilgan havolalardan sertifikat rasmlarini olib, <strong>familiya bo'yicha ketma-ketlikda (A-Z)</strong> bitta uzun ro'yxat PDF qilib beradi.
+                  </p>
+                </div>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Unified PDF Generation Live Progress Card */}
+      {isGeneratingUnifiedPdf && (
+        <div className="apple-glass rounded-2xl p-4 border border-indigo-200 bg-indigo-50/60 shadow-lg space-y-3 animate-fade-in">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center animate-spin">
+                <RefreshCw className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="text-xs sm:text-sm font-bold text-indigo-950">
+                  Haqiqiy sertifikatlar jamlanmoqda...
+                </h4>
+                <p className="text-[11px] text-indigo-700 truncate max-w-xs sm:max-w-md">
+                  {unifiedProgressText}
+                </p>
+              </div>
+            </div>
+            <span className="text-sm font-black text-indigo-700 font-mono">
+              {unifiedProgressPercent}%
+            </span>
+          </div>
+
+          <div className="w-full bg-indigo-200/80 h-2 rounded-full overflow-hidden">
+            <div 
+              className="bg-indigo-600 h-full rounded-full transition-all duration-300"
+              style={{ width: `${unifiedProgressPercent}%` }}
+            ></div>
+          </div>
+          <div className="flex items-center justify-between text-[10px] text-slate-500">
+            <span>Familiya bo'yicha saralanmoqda</span>
+            <span>Iltimos, sahifani yopmang</span>
+          </div>
+        </div>
+      )}
+
+      {/* ZIP Generation Live Progress Card */}
+      {isZipping && (
+        <div className="apple-glass rounded-2xl p-4 border border-blue-200 bg-blue-50/60 shadow-lg space-y-3 animate-fade-in">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center animate-spin">
+                <RefreshCw className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="text-xs sm:text-sm font-bold text-blue-950">
+                  ZIP arxiv tayyorlanmoqda...
+                </h4>
+                <p className="text-[11px] text-blue-700">
+                  Har bir o'quvchi sertifikati PDF shaklida arxivlanmoqda
+                </p>
+              </div>
+            </div>
+            <span className="text-sm font-black text-blue-700 font-mono">
+              {zipProgress}%
+            </span>
+          </div>
+
+          <div className="w-full bg-blue-200/80 h-2 rounded-full overflow-hidden">
+            <div 
+              className="bg-blue-600 h-full rounded-full transition-all duration-300"
+              style={{ width: `${zipProgress}%` }}
+            ></div>
+          </div>
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="apple-glass rounded-xl p-3 shadow-xs space-y-3">
@@ -884,6 +1183,20 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
           </div>
         </div>
       )}
+
+      {/* Telegram Share Confirmation Modal after PDF download */}
+      <TelegramShareModal
+        isOpen={telegramShareModalData.isOpen}
+        onClose={() => setTelegramShareModalData(prev => ({ ...prev, isOpen: false }))}
+        fileName={telegramShareModalData.fileName}
+        className={telegramShareModalData.className}
+        teacherName={telegramShareModalData.teacherName}
+        studentCount={telegramShareModalData.studentCount}
+        pdfBlob={telegramShareModalData.pdfBlob}
+      />
+
+      {/* Teacher Picker Modal (When switching class from dashboard) */}
+      {renderTeacherPickerModal()}
 
     </div>
   );
