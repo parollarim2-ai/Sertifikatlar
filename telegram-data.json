@@ -1,0 +1,19 @@
+{
+  "classes": [],
+  "students": [],
+  "telegramUsers": {
+    "8395813306": {
+      "id": "8395813306",
+      "chatId": 8395813306,
+      "teacherName": "Niyozmatova Ziyoda",
+      "classId": "class-9a-1329",
+      "className": "9-A",
+      "username": "@qiziqyabsizmi",
+      "firstName": "Akramxon",
+      "lastName": "Saidov",
+      "lastActiveAt": "2026-09-28T15:33:36.223Z",
+      "createdAt": "2026-09-28T15:33:36.223Z"
+    }
+  },
+  "notifiedClasses": {}
+}
