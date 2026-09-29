@@ -348,18 +348,78 @@ export default function App() {
     }
   };
 
-  const handleUpdatePayment = async (classId: string, newPaidAmount: number) => {
+  const handleUpdatePayment = async (
+    classId: string, 
+    newPaidAmount: number,
+    updatedStudentPayments?: { studentId: string; isPaid: boolean }[]
+  ) => {
     const targetClass = classes.find(c => c.id === classId);
     if (!targetClass) return;
 
-    const updated = {
+    const updatedClass = {
       ...targetClass,
       paidAmount: newPaidAmount,
     };
 
-    setClasses(prev => prev.map(c => c.id === classId ? updated : c));
+    setClasses(prev => prev.map(c => c.id === classId ? updatedClass : c));
+
+    let updatedStudentsList: Student[] = [];
+    if (updatedStudentPayments && updatedStudentPayments.length > 0) {
+      const paymentMap = new Map(updatedStudentPayments.map(p => [p.studentId, p.isPaid]));
+      const nowIso = new Date().toISOString();
+      
+      setStudents(prev => {
+        const next = prev.map(s => {
+          if (paymentMap.has(s.id)) {
+            const isPaid = Boolean(paymentMap.get(s.id));
+            return {
+              ...s,
+              isPaid,
+              paidAt: isPaid ? (s.paidAt || nowIso) : undefined,
+            };
+          }
+          return s;
+        });
+        updatedStudentsList = next.filter(s => paymentMap.has(s.id));
+        return next;
+      });
+    }
+
     setActivePaymentClass(null);
-    await syncSaveClass(updated);
+    await syncSaveClass(updatedClass);
+    if (updatedStudentsList.length > 0) {
+      await syncSaveBatchStudents(updatedStudentsList);
+    }
+  };
+
+  const handleToggleStudentPayment = async (studentId: string) => {
+    const student = students.find(s => s.id === studentId);
+    if (!student) return;
+
+    const newIsPaid = !student.isPaid;
+    const nowIso = new Date().toISOString();
+    const updatedStudent: Student = {
+      ...student,
+      isPaid: newIsPaid,
+      paidAt: newIsPaid ? nowIso : undefined,
+    };
+
+    setStudents(prev => prev.map(s => s.id === studentId ? updatedStudent : s));
+    await syncSaveStudent(updatedStudent);
+
+    // Also update class's paidAmount accordingly
+    const targetClass = classes.find(c => c.id === student.classId);
+    if (targetClass) {
+      const price = targetClass.pricePerStudent || 5000;
+      const classStudents = students.map(s => s.id === studentId ? updatedStudent : s).filter(s => s.classId === targetClass.id);
+      const paidCount = classStudents.filter(s => s.isPaid).length;
+      const updatedClass = {
+        ...targetClass,
+        paidAmount: paidCount * price,
+      };
+      setClasses(prev => prev.map(c => c.id === targetClass.id ? updatedClass : c));
+      await syncSaveClass(updatedClass);
+    }
   };
 
   const handleApplyEmailDistribution = async (distributedStudents: Student[], updatedPool: EmailAccount[]) => {
@@ -580,6 +640,7 @@ export default function App() {
             onRegisterSession={handleRegisterSession}
             onMarkMessageAsRead={handleMarkMessageAsRead}
             onOpenStudentModal={(student) => setActiveStudentModal(student)}
+            onToggleStudentPayment={handleToggleStudentPayment}
           />
         ) : (
           <div className="animate-fade-in">
@@ -594,6 +655,7 @@ export default function App() {
               onRefreshTelegramUsers={fetchTelegramStatus}
               onOpenStudentModal={(student) => setActiveStudentModal(student)}
               onOpenPaymentModal={(classGroup) => setActivePaymentClass(classGroup)}
+              onToggleStudentPayment={handleToggleStudentPayment}
               onOpenBulkEmailModal={() => setIsBulkEmailOpen(true)}
               onApplyEmailDistribution={handleApplyEmailDistribution}
               onOpenBulkUploadModal={(classId) => {
@@ -675,7 +737,7 @@ export default function App() {
           students={students}
           isOpen={true}
           onClose={() => setActivePaymentClass(null)}
-          onUpdatePayment={(classId, newAmount) => handleUpdatePayment(classId, newAmount)}
+          onUpdatePayment={(classId, newAmount, studentPayments) => handleUpdatePayment(classId, newAmount, studentPayments)}
         />
       )}
 

@@ -7,6 +7,8 @@ export interface Student {
   assignedEmail?: string;
   assignedPassword?: string;
   status: 'pending' | 'certified' | 'error';
+  isPaid?: boolean;
+  paidAt?: string;
   certificateLink?: string;
   certificateDate?: string;
   certificateNumber?: string;

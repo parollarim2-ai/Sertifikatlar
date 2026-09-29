@@ -61,7 +61,11 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
   
   const [parsedStudents, setParsedStudents] = useState<ParsedStudentPreview[]>([]);
   const [uploadedFileName, setUploadedFileName] = useState('');
+  const [rawExtractedText, setRawExtractedText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isAiScanning, setIsAiScanning] = useState(false);
+  const [showMissingAssistant, setShowMissingAssistant] = useState(false);
+  const [previewFilter, setPreviewFilter] = useState<'all' | 'incomplete' | 'ready'>('all');
   const [isDragging, setIsDragging] = useState(false);
   const [manualText, setManualText] = useState('');
   const [showManualInput, setShowManualInput] = useState(false);
@@ -122,6 +126,74 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
     return parsedStudents.filter(s => s.fullName.trim() && !s.passportOrId?.trim()).length;
   }, [parsedStudents]);
 
+  const incompleteStudents = React.useMemo(() => {
+    return parsedStudents
+      .map((st, origIdx) => ({ ...st, origIdx }))
+      .filter(s => s.fullName.trim() && (!s.birthDate?.trim() || !s.passportOrId?.trim()));
+  }, [parsedStudents]);
+
+  const readyStudentsCount = React.useMemo(() => {
+    return parsedStudents.filter(s => s.fullName.trim() && s.birthDate?.trim() && s.passportOrId?.trim()).length;
+  }, [parsedStudents]);
+
+  const displayedStudents = React.useMemo(() => {
+    if (previewFilter === 'incomplete') {
+      return parsedStudents
+        .map((st, origIdx) => ({ ...st, origIdx }))
+        .filter(s => !s.birthDate?.trim() || !s.passportOrId?.trim());
+    }
+    if (previewFilter === 'ready') {
+      return parsedStudents
+        .map((st, origIdx) => ({ ...st, origIdx }))
+        .filter(s => s.fullName.trim() && s.birthDate?.trim() && s.passportOrId?.trim());
+    }
+    return parsedStudents.map((st, origIdx) => ({ ...st, origIdx }));
+  }, [parsedStudents, previewFilter]);
+
+  // Deep AI Document Scan specifically to discover missing passports / birthdates
+  const handleDeepAiScan = async () => {
+    if (!rawExtractedText || isAiScanning) return;
+    setIsAiScanning(true);
+    try {
+      const aiRes = await fetch('/api/parse-document-ai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ textContent: rawExtractedText, fileName: uploadedFileName || 'maktab_hujjati' }),
+      });
+      if (aiRes.ok) {
+        const aiData = await aiRes.json();
+        if (aiData.success && Array.isArray(aiData.students) && aiData.students.length > 0) {
+          setParsedStudents(prev => {
+            return prev.map(existing => {
+              const normExist = existing.fullName.toLowerCase().replace(/[^a-z\u0400-\u04FF]/g, '');
+              const aiMatch = aiData.students.find((aiSt: any) => {
+                const normAi = (aiSt.fullName || '').toLowerCase().replace(/[^a-z\u0400-\u04FF]/g, '');
+                return (
+                  normExist.includes(normAi) ||
+                  normAi.includes(normExist) ||
+                  (normExist.length >= 6 && normAi.length >= 6 && normExist.slice(0, 6) === normAi.slice(0, 6))
+                );
+              });
+              if (aiMatch) {
+                return {
+                  fullName: existing.fullName,
+                  birthDate: existing.birthDate?.trim() ? existing.birthDate : (aiMatch.birthDate || ''),
+                  passportOrId: existing.passportOrId?.trim() ? existing.passportOrId : (aiMatch.passportOrId || ''),
+                };
+              }
+              return existing;
+            });
+          });
+          confetti({ particleCount: 50, spread: 60 });
+        }
+      }
+    } catch (err) {
+      console.error("AI skanerlashda xatolik:", err);
+    } finally {
+      setIsAiScanning(false);
+    }
+  };
+
   // Process uploaded file
   const handleProcessFile = async (file: File) => {
     setIsProcessing(true);
@@ -129,6 +201,7 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
 
     try {
       const extracted = await extractStudentsFromFile(file);
+      setRawExtractedText(extracted.rawText || '');
 
       if (uploadMode === 'new') {
         if (extracted.detectedClassName && !newClassName) {
@@ -141,7 +214,7 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
 
       let finalStudents = extracted.students;
 
-      // Only invoke AI if local extraction found no students or if file has unformatted paragraph text
+      // If local extraction found no students at all, invoke AI parser
       if (finalStudents.length === 0 && extracted.rawText && extracted.rawText.length > 20) {
         try {
           const aiRes = await fetch('/api/parse-document-ai', {
@@ -625,28 +698,74 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
                 </div>
               )}
 
-              {/* Missing Data Warning Banner */}
+              {/* Missing Data Warning & Action Banner */}
               {(missingBirthDateCount > 0 || missingPassportCount > 0) && (
-                <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl flex items-start gap-3 text-xs text-amber-800 shadow-xs animate-fade-in">
-                  <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <span className="font-bold text-sm block text-amber-900">
-                      ⚠️ OGOHLANTIRISH: Ayrim ma'lumotlar to'liq emas!
-                    </span>
-                    <p className="mt-1 text-amber-700">
-                      {missingBirthDateCount > 0 && (
-                        <span>• <strong>{missingBirthDateCount} ta</strong> o'quvchida tug'ilgan sana kiritilmagan. </span>
-                      )}
-                      {missingPassportCount > 0 && (
-                        <span>• <strong>{missingPassportCount} ta</strong> o'quvchida metrika yoki pasport ma'lumoti yetishmayapti. </span>
-                      )}
-                      Jadvalning o'zida qatorlarga yozib ma'lumotlarni to'ldirishingiz mumkin.
-                    </p>
+                <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-300 rounded-2xl shadow-xs animate-fade-in space-y-3">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-bold text-sm block text-amber-900">
+                        ⚠️ Diqqat: {incompleteStudents.length} ta o'quvchida ma'lumot to'liq emas!
+                      </span>
+                      <p className="mt-0.5 text-xs text-amber-800">
+                        {missingBirthDateCount > 0 && (
+                          <span>• <strong>{missingBirthDateCount} ta</strong> o'quvchida tug'ilgan sana topilmadi. </span>
+                        )}
+                        {missingPassportCount > 0 && (
+                          <span>• <strong>{missingPassportCount} ta</strong> o'quvchida metrika yoki pasport topilmadi. </span>
+                        )}
+                        Quyidagi qulay yordamchi tugmalar orqali ularni to'ldirishingiz yoki AI bilan hujjatdan chuqurroq qidirishingiz mumkin:
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    {rawExtractedText && (
+                      <button
+                        type="button"
+                        onClick={handleDeepAiScan}
+                        disabled={isAiScanning}
+                        className="px-3.5 py-1.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs"
+                      >
+                        {isAiScanning ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>AI hujjatdan sinchiklab qidirmoqda...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>✨ AI bilan chuqur qidirish</span>
+                          </>
+                        )}
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => setShowMissingAssistant(true)}
+                      className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>✍️ Yetishmayotganlarni to'ldirish yordamchisi ({incompleteStudents.length})</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setPreviewFilter(previewFilter === 'incomplete' ? 'all' : 'incomplete')}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                        previewFilter === 'incomplete'
+                          ? 'bg-amber-200 border-amber-400 text-amber-900 font-bold'
+                          : 'bg-white border-amber-300 text-amber-800 hover:bg-amber-100/50'
+                      }`}
+                    >
+                      <span>{previewFilter === 'incomplete' ? "Barchasini ko'rsatish" : "Faqat to'ldirilishi kerak bo'lganlar"}</span>
+                    </button>
                   </div>
                 </div>
               )}
 
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
                 <div>
                   <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                     <Users className="w-4 h-4 text-blue-600" />
@@ -657,14 +776,57 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleAddEmptyRow}
-                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Qator qo'shish</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  {/* Segmented Filter Pills */}
+                  <div className="inline-flex items-center p-0.5 bg-slate-100 border border-slate-200 rounded-lg text-[11px] font-semibold">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewFilter('all')}
+                      className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
+                        previewFilter === 'all'
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Barchasi ({parsedStudents.length})
+                    </button>
+                    {incompleteStudents.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewFilter('incomplete')}
+                        className={`px-2 py-1 rounded-md transition-colors cursor-pointer flex items-center gap-1 ${
+                          previewFilter === 'incomplete'
+                            ? 'bg-amber-500 text-white shadow-xs'
+                            : 'text-amber-700 hover:bg-amber-50'
+                        }`}
+                      >
+                        <span>⚠️ Chala</span>
+                        <span className="text-[10px] bg-amber-600/30 px-1 rounded-full">{incompleteStudents.length}</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setPreviewFilter('ready')}
+                      className={`px-2 py-1 rounded-md transition-colors cursor-pointer flex items-center gap-1 ${
+                        previewFilter === 'ready'
+                          ? 'bg-emerald-600 text-white shadow-xs'
+                          : 'text-emerald-700 hover:bg-emerald-50'
+                      }`}
+                    >
+                      <span>✅ To'liq</span>
+                      <span className="text-[10px] bg-emerald-600/20 px-1 rounded-full">{readyStudentsCount}</span>
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleAddEmptyRow}
+                    className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Qator qo'shish</span>
+                  </button>
+                </div>
               </div>
 
               <div className="border border-slate-200 rounded-xl overflow-hidden max-h-72 overflow-y-auto shadow-inner">
@@ -680,7 +842,8 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {parsedStudents.map((st, idx) => {
+                    {displayedStudents.map((st) => {
+                      const idx = st.origIdx;
                       const isDupName = isDuplicateName(st.fullName);
                       const normPass = st.passportOrId?.trim().toUpperCase();
                       const isDupPass = Boolean(normPass && normPass.length >= 4 && duplicatePassports.has(normPass));
@@ -723,12 +886,12 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
                           <td className="py-2 px-3">
                             <input
                               type="text"
-                              placeholder="Sana kiritilmagan"
+                              placeholder="⚠️ Sana kiritilmagan"
                               value={st.birthDate || ''}
                               onChange={e => handleUpdateStudent(idx, 'birthDate', e.target.value)}
                               className={`w-full px-2 py-1 bg-transparent border rounded text-xs text-slate-700 focus:bg-white focus:outline-none ${
                                 isMissingBirth
-                                  ? 'border-amber-300 border-dashed bg-amber-50/40 placeholder:text-amber-600 font-medium'
+                                  ? 'border-amber-400 border-dashed bg-amber-50/50 text-amber-900 placeholder:text-amber-500 font-medium'
                                   : 'border-transparent focus:border-blue-400'
                               }`}
                             />
@@ -736,14 +899,14 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
                           <td className="py-2 px-3">
                             <input
                               type="text"
-                              placeholder="Metrika kiritilmagan"
+                              placeholder="⚠️ Pasport / metrika kiritilmagan"
                               value={st.passportOrId || ''}
                               onChange={e => handleUpdateStudent(idx, 'passportOrId', e.target.value)}
                               className={`w-full px-2 py-1 bg-transparent border rounded text-xs font-mono uppercase text-slate-800 focus:bg-white focus:outline-none ${
                                 isDupPass
                                   ? 'border-rose-400 bg-rose-50 text-rose-900 font-bold ring-1 ring-rose-400'
                                   : isMissingPass
-                                  ? 'border-amber-300 border-dashed bg-amber-50/40 placeholder:text-amber-600 font-medium'
+                                  ? 'border-rose-300 border-dashed bg-rose-50/50 text-rose-900 placeholder:text-rose-400 font-medium'
                                   : 'border-transparent focus:border-blue-400'
                               }`}
                             />
@@ -788,6 +951,131 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
                     })}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          )}
+
+          {/* INTERACTIVE MISSING INFORMATION ASSISTANT MODAL */}
+          {showMissingAssistant && (
+            <div className="fixed inset-0 z-60 flex items-center justify-center p-3 sm:p-4 bg-slate-900/70 backdrop-blur-xs animate-fade-in">
+              <div className="relative w-full max-w-2xl bg-white border border-amber-300 rounded-2xl shadow-2xl overflow-hidden max-h-[85vh] flex flex-col">
+                {/* Header */}
+                <div className="px-6 py-4 bg-gradient-to-r from-amber-50 to-orange-50 border-b border-amber-200 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-amber-100 border border-amber-300 text-amber-700 flex items-center justify-center flex-shrink-0">
+                      <AlertCircle className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-base font-bold text-slate-900">
+                        Yetishmayotgan Ma'lumotlarni To'ldirish
+                      </h3>
+                      <p className="text-xs text-slate-600">
+                        Quyidagi {incompleteStudents.length} ta o'quvchining pasport yoki tug'ilgan sanasi hujjatda topilmadi. Iltimos, ularni kiriting:
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowMissingAssistant(false)}
+                    className="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg transition-colors cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                {/* Body: List of incomplete students */}
+                <div className="p-4 sm:p-6 overflow-y-auto space-y-3.5 flex-1">
+                  {incompleteStudents.map((st, i) => (
+                    <div key={st.origIdx} className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2.5 hover:border-blue-300 transition-colors">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-slate-800">
+                          {i + 1}. {st.fullName}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          {!st.birthDate?.trim() && (
+                            <span className="px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-800 rounded">
+                              Sana kerak
+                            </span>
+                          )}
+                          {!st.passportOrId?.trim() && (
+                            <span className="px-2 py-0.5 text-[10px] font-bold bg-rose-100 text-rose-800 rounded">
+                              Pasport kerak
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div>
+                          <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                            Tug'ilgan sana (DD.MM.YYYY)
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="Masalan: 15.04.2008"
+                            value={st.birthDate || ''}
+                            onChange={e => handleUpdateStudent(st.origIdx, 'birthDate', e.target.value)}
+                            className={`w-full px-3 py-1.5 text-xs rounded-lg border focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                              !st.birthDate?.trim()
+                                ? 'border-amber-400 bg-amber-50/50 text-slate-900 font-medium placeholder:text-amber-500'
+                                : 'border-slate-300 bg-white'
+                            }`}
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                            Metrika yoki Pasport raqami
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="Masalan: AA 1234567 yoki I-TN 1234567"
+                            value={st.passportOrId || ''}
+                            onChange={e => handleUpdateStudent(st.origIdx, 'passportOrId', e.target.value)}
+                            className={`w-full px-3 py-1.5 text-xs font-mono uppercase rounded-lg border focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                              !st.passportOrId?.trim()
+                                ? 'border-rose-400 bg-rose-50/50 text-slate-900 font-bold placeholder:text-rose-400'
+                                : 'border-slate-300 bg-white'
+                            }`}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Footer */}
+                <div className="px-6 py-3.5 bg-slate-100 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                  {rawExtractedText ? (
+                    <button
+                      type="button"
+                      onClick={handleDeepAiScan}
+                      disabled={isAiScanning}
+                      className="px-3.5 py-2 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-700 text-xs font-bold rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      {isAiScanning ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>AI hujjatni qayta qidirmoqda...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+                          <span>AI orqali hujjatdan qidirish</span>
+                        </>
+                      )}
+                    </button>
+                  ) : <div />}
+
+                  <button
+                    type="button"
+                    onClick={() => setShowMissingAssistant(false)}
+                    className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer flex items-center gap-1.5"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Saqlash va jadvalga qaytish</span>
+                  </button>
+                </div>
               </div>
             </div>
           )}

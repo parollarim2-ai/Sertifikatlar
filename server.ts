@@ -83,22 +83,23 @@ async function startServer() {
       }
 
       const ai = new GoogleGenAI({ apiKey });
-      const prompt = `Siz O'zbekiston maktab hujjatlarini (ERP, Kundalik, Excel ro'yxatlari, jurnallar) o'ta yuqori aniqlikda tahlil qiluvchi mutaxassis yordamchisiz.
+      const prompt = `Siz O'zbekiston maktab hujjatlarini (ERP, Kundalik, Excel jurnallari, Word jadvallari, eMaktab ro'yxatlari) o'ta yuqori aniqlikda tahlil qiluvchi mutaxassis yordamchisiz.
 Quyida maktab hujjati (${fileName || 'maktab_hujjati'}) matni keltirilgan.
-Iltimos, ushbu matndan FAQAT o'quvchilar ma'lumotlarini aniq ajratib oling va sof JSON formatida qaytaring:
+Iltimos, ushbu matndan HAR BIR o'quvchining to'liq ma'lumotlarini (Familiya-Ism, Tug'ilgan sana, Pasport yoki Metrika) aniq ajratib oling va sof JSON formatida qaytaring:
 
 QAT'IY QOIDALAR (BU QOIDALARGA 100% AMAL QILISH SHART):
-1. "fullName": FAQAT o'quvchining Familiyasi, Ismi va Sharifi bo'lishi shart! (Masalan: "Abdurasulov Fayzulloh Abdurahim o'g'li" yoki "Karimova Zilola Botir qizi").
-   - QAT'IY TAQIQLANADI: O'quvchining yashash manzili (viloyat, tuman, shahar, qishloq, mahalla, ko'cha, uy raqami), telefon raqamlari, ota-onasi, jinsi, millati, maktab raqami kabi qo'shimcha ma'lumotlarni ASLO fullName maydoniga qo'shmang! Bu ortiqcha ma'lumotlarni BUTUNLAY TASHAB YUBORING!
+1. "fullName": FAQAT o'quvchining Familiyasi, Ismi va Sharifi bo'lishi shart! (Masalan: "Abdurasulov Fayzulloh Abdurahim o'g'li", "Topvoldiyeva Munisaxon Hojiakbar qizi", "Hamidov Hadyatilloh Hikmatilloh o'g'li").
+   - QAT'IY TAQIQLANADI: O'quvchining yashash manzili (viloyat, tuman, shahar, qishloq, mahalla, ko'cha, uy raqami), telefon raqamlari, ota-onasi, jinsi, maktab raqami kabi qo'shimcha ma'lumotlarni ASLO fullName maydoniga qo'shmang!
    - Pasport yoki metrika ma'lumotlarini ham fullName ga qo'shmang, ularni passportOrId maydoniga ajrating!
-2. "birthDate": O'quvchining tug'ilgan sanasi ("DD.MM.YYYY" formatida, masalan: "18.03.2011"). Agar hujjatda sana bo'lmasa, bo'sh satr "" qoldiring.
-3. "passportOrId": Tug'ilganlik haqidagi guvohnoma (metrika: "I-TN 123456", "II-FR 765432", "I-АН 123456", "I-TO 0521092") yoki Pasport/ID ("AA 1234567", "AB 7654321") yoki PINFL (14 xonali son). Agar hujjatda bo'lmasa, bo'sh satr "" qoldiring.
-4. "detectedClassName": Hujjatdagi sinf nomi (masalan: "9-A", "10-B", "11-A"). Agar topilmasa, "".
-5. "detectedTeacherName": Sinf rahbari F.I.SH (masalan: "Niyozmatova Ziyoda"). Agar topilmasa, "".
+2. "birthDate": O'quvchining tug'ilgan sanasi ("DD.MM.YYYY" formatida, masalan: "18.03.2011", "05.04.2008"). Agar hujjatda sana bo'lsa, uni albatta toping va "DD.MM.YYYY" formatiga keltiring! Agar mutlaqo topilmasa, bo'sh satr "" qoldiring.
+3. "passportOrId": Tug'ilganlik haqidagi guvohnoma (metrika: "I-TN 1234567", "1-TN 1234567", "I-FR 0585496", "1-FR 0585496", "II-TO 765432") yoki Pasport/ID ("AA 1234567", "AB 7654321", "FA 1234567", ruscha "АА", "АВ" bo'lsa ham lotinchaga o'giring) yoki PINFL (14 xonali son).
+   - E'TIBOR: Hujjatdagi har bir o'quvchining pasport yoki metrikasini sinchiklab qidiring! Hech bir o'quvchini pasportsiz qoldirmang agar hujjatda bo'lsa! Agar mutlaqo bo'lmasa, bo'sh satr "" qoldiring.
+4. "detectedClassName": Hujjatdagi sinf nomi (masalan: "9-A", "10-B", "11-A").
+5. "detectedTeacherName": Sinf rahbari F.I.SH (masalan: "Niyozmatova Ziyoda").
 
 Hujjat matni:
 """
-${textContent.slice(0, 20000)}
+${textContent.slice(0, 30000)}
 """
 
 Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
@@ -110,7 +111,7 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
   ]
 }`;
 
-      const candidateModels = ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+      const candidateModels = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-3.1-flash-lite'];
       let rawOutput = '';
       for (const modelName of candidateModels) {
         try {
@@ -120,7 +121,7 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
               contents: prompt,
             }),
             new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error('AI request timeout (7s)')), 7000)
+              setTimeout(() => reject(new Error('AI request timeout (30s)')), 30000)
             ),
           ]);
           if (response && response.text) {

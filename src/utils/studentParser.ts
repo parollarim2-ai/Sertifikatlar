@@ -2,29 +2,91 @@ export interface ParsedStudentPreview {
   fullName: string;
   birthDate: string;
   passportOrId: string;
+  sourceSnippet?: string;
+}
+
+// Complete Cyrillic to Latin character map for passport and document series
+const CYRILLIC_TO_LATIN_SERIES: Record<string, string> = {
+  // Uppercase visually / intended
+  'А': 'A', 'В': 'B', 'С': 'C', 'Е': 'E', 'К': 'K', 'М': 'M', 'Н': 'N',
+  'О': 'O', 'Р': 'P', 'Т': 'T', 'Х': 'X', 'Ф': 'F', 'У': 'U', 'Д': 'D',
+  'И': 'I', 'З': 'Z', 'Б': 'B', 'Г': 'G', 'Ж': 'J', 'Л': 'L', 'П': 'P',
+  'Ш': 'SH', 'Щ': 'SH', 'Ч': 'CH', 'Ц': 'TS', 'Э': 'E', 'Ю': 'YU', 'Я': 'YA',
+  'Ў': 'O', 'Қ': 'Q', 'Ғ': 'G', 'Ҳ': 'H',
+  // Lowercase
+  'а': 'A', 'в': 'B', 'с': 'C', 'е': 'E', 'к': 'K', 'м': 'M', 'н': 'N',
+  'о': 'O', 'р': 'P', 'т': 'T', 'х': 'X', 'ф': 'F', 'у': 'U', 'д': 'D',
+  'и': 'I', 'з': 'Z', 'б': 'B', 'г': 'G', 'ж': 'J', 'л': 'L', 'п': 'P',
+  'ш': 'SH', 'щ': 'SH', 'ч': 'CH', 'ц': 'TS', 'э': 'E', 'ю': 'YU', 'я': 'YA',
+  'ў': 'O', 'қ': 'Q', 'ғ': 'G', 'ҳ': 'H',
+};
+
+/**
+ * Normalizes all Uzbek apostrophe variations (U+02BB, U+02BC, U+2019, U+2018, U+00B4, `, ') into standard ASCII '
+ */
+export function normalizeUzbekApostrophes(str: string): string {
+  if (!str) return '';
+  return str.replace(/[\u02BB\u02BC\u2019\u2018\u00B4\`]/g, "'");
+}
+
+export function normalizePassportLetters(str: string): string {
+  return str.replace(/[А-Яа-яЁёЎўҚқҒғҲҳ]/g, c => CYRILLIC_TO_LATIN_SERIES[c] || c);
 }
 
 /**
  * Normalizes Uzbek and Cyrillic names into Title Case
  * e.g. "ABDURASULOV FAYZULLOH ABDURAHIM O'G'LI" -> "Abdurasulov Fayzulloh Abdurahim o'g'li"
+ * e.g. "GʻAYRATOV SARDOR FARHOD OʻGʻLI" -> "G'ayratov Sardor Farhod o'g'li"
  */
 export function formatUzbekName(name: string): string {
   if (!name) return '';
-  const words = name.trim().split(/\s+/);
+  const clean = normalizeUzbekApostrophes(name);
+  const words = clean.trim().split(/\s+/);
   return words
     .map((word, idx) => {
       const lower = word.toLowerCase();
-      // Handle Uzbek patronymics: o'g'li, qizi, o‘g‘li, qizi
-      if ((lower === "o'g'li" || lower === "o‘g‘li" || lower === "o`g`li" || lower === "qizi") && idx > 1) {
+      // Handle Uzbek patronymics: o'g'li, qizi, o‘g‘li, ogli, ugli, ўғли, қизи, угли, кизи
+      if ((lower === "o'g'li" || lower === "ogli" || lower === "ugli" || lower === "ўғли" || lower === "угли") && idx > 1) {
         return "o'g'li";
       }
-      if (lower === "qizi" && idx > 1) {
+      if ((lower === "qizi" || lower === "kizi" || lower === "қизи" || lower === "кизи") && idx > 1) {
         return "qizi";
       }
-      // Preserve apostrophes inside names e.g. G'ayrat, Ulug'bek, Ma'ruf
+      // Preserve apostrophes inside names e.g. G'ayrat, Ulug'bek, Ma'ruf, Qo'chqor
+      // When capitalizing words with G' or O': e.g. "g'ayrat" -> "G'ayrat", "o'rol" -> "O'rol"
+      if (/^[go]'/i.test(word)) {
+        return word.charAt(0).toUpperCase() + "'" + word.slice(2).toLowerCase();
+      }
       return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
     })
     .join(' ');
+}
+
+/**
+ * Converts an Excel serial date number (e.g. 40250 or "39553") into DD.MM.YYYY string
+ */
+export function parseExcelSerialDate(val: any): string {
+  let num: number | null = null;
+  if (typeof val === 'number') {
+    num = val;
+  } else if (typeof val === 'string' && /^\s*\d{5}\s*$/.test(val)) {
+    num = parseInt(val.trim(), 10);
+  }
+
+  if (num && num > 20000 && num < 60000) {
+    try {
+      const utcDays = Math.floor(num - 25569);
+      const utcValue = utcDays * 86400;
+      const dateInfo = new Date(utcValue * 1000);
+      const day = String(dateInfo.getUTCDate()).padStart(2, '0');
+      const month = String(dateInfo.getUTCMonth() + 1).padStart(2, '0');
+      const year = dateInfo.getUTCFullYear();
+      return `${day}.${month}.${year}`;
+    } catch {
+      return '';
+    }
+  }
+  return '';
 }
 
 /**
@@ -36,36 +98,48 @@ export function extractBirthDate(text: string): { birthDate: string; remainder: 
   let remainder = text;
   let birthDate = '';
 
-  // 1. Standard numeric formats: DD.MM.YYYY, DD/MM/YYYY, DD-MM-YYYY
-  const dmyMatch = text.match(/\b([0-3]?\d)[\.\/\-]([0-1]?\d)[\.\/\-](\d{2,4})\b/);
+  // 1. Spaced or standard numeric formats: DD.MM.YYYY, DD/MM/YYYY, DD-MM-YYYY (e.g. "15 . 04 . 2008", "15.04.2008.", "15.04.2008 y.")
+  const dmyMatch = text.match(/\b([0-3]?\d)\s*[\.\/\-]\s*([0-1]?\d)\s*[\.\/\-]\s*(\d{2,4})\b/);
   if (dmyMatch) {
-    let day = dmyMatch[1].padStart(2, '0');
-    let month = dmyMatch[2].padStart(2, '0');
+    const dVal = parseInt(dmyMatch[1], 10);
+    const mVal = parseInt(dmyMatch[2], 10);
     let year = dmyMatch[3];
     if (year.length === 2) {
       year = parseInt(year, 10) > 30 ? `19${year}` : `20${year}`;
     }
-    birthDate = `${day}.${month}.${year}`;
-    remainder = remainder.replace(dmyMatch[0], ' ');
-    return { birthDate, remainder: cleanWhitespace(remainder) };
+    const yVal = parseInt(year, 10);
+
+    if (mVal >= 1 && mVal <= 12 && dVal >= 1 && dVal <= 31 && yVal >= 1960 && yVal <= 2026) {
+      const day = String(dVal).padStart(2, '0');
+      const month = String(mVal).padStart(2, '0');
+      birthDate = `${day}.${month}.${year}`;
+      remainder = remainder.replace(dmyMatch[0], ' ');
+      return { birthDate, remainder: cleanWhitespace(remainder) };
+    }
   }
 
   // 2. ISO format: YYYY-MM-DD or YYYY.MM.DD
-  const ymdMatch = text.match(/\b(\d{4})[\.\/\-]([0-1]?\d)[\.\/\-]([0-3]?\d)\b/);
+  const ymdMatch = text.match(/\b(\d{4})\s*[\.\/\-]\s*([0-1]?\d)\s*[\.\/\-]\s*([0-3]?\d)\b/);
   if (ymdMatch) {
     const year = ymdMatch[1];
-    const month = ymdMatch[2].padStart(2, '0');
-    const day = ymdMatch[3].padStart(2, '0');
-    birthDate = `${day}.${month}.${year}`;
-    remainder = remainder.replace(ymdMatch[0], ' ');
-    return { birthDate, remainder: cleanWhitespace(remainder) };
+    const mVal = parseInt(ymdMatch[2], 10);
+    const dVal = parseInt(ymdMatch[3], 10);
+    const yVal = parseInt(year, 10);
+
+    if (mVal >= 1 && mVal <= 12 && dVal >= 1 && dVal <= 31 && yVal >= 1960 && yVal <= 2026) {
+      const day = String(dVal).padStart(2, '0');
+      const month = String(mVal).padStart(2, '0');
+      birthDate = `${day}.${month}.${year}`;
+      remainder = remainder.replace(ymdMatch[0], ' ');
+      return { birthDate, remainder: cleanWhitespace(remainder) };
+    }
   }
 
-  // 3. Uzbek text month format: "15-may 2009" or "15 may 2009-yil"
+  // 3. Uzbek text month format: "15-may 2009", "15 may 2009-yil", "15-май 2008"
   const textMonthRegex = /\b([0-3]?\d)\s*[-_ ]?\s*(yanvar|fevral|mart|aprel|may|iyun|iyul|avgust|sentabr|oktabr|noyabr|dekabr|январ|феврал|март|апрел|май|июн|июл|август|сентабр|октябр|ноябр|декабр)\s*[-_ ,]?\s*(\d{4})(?:\s*[-_]?\s*yil|\s*[-_]?\s*й\.?)?\b/i;
   const tmMatch = text.match(textMonthRegex);
   if (tmMatch) {
-    const day = tmMatch[1].padStart(2, '0');
+    const dVal = parseInt(tmMatch[1], 10);
     const monthMap: Record<string, string> = {
       yanvar: '01', fevral: '02', mart: '03', aprel: '04', may: '05', iyun: '06',
       iyul: '07', avgust: '08', sentabr: '09', oktabr: '10', noyabr: '11', dekabr: '12',
@@ -74,9 +148,18 @@ export function extractBirthDate(text: string): { birthDate: string; remainder: 
     };
     const month = monthMap[tmMatch[2].toLowerCase()] || '01';
     const year = tmMatch[3];
-    birthDate = `${day}.${month}.${year}`;
-    remainder = remainder.replace(tmMatch[0], ' ');
-    return { birthDate, remainder: cleanWhitespace(remainder) };
+    if (dVal >= 1 && dVal <= 31) {
+      const day = String(dVal).padStart(2, '0');
+      birthDate = `${day}.${month}.${year}`;
+      remainder = remainder.replace(tmMatch[0], ' ');
+      return { birthDate, remainder: cleanWhitespace(remainder) };
+    }
+  }
+
+  // 4. Excel serial date if standalone
+  const serialDate = parseExcelSerialDate(text);
+  if (serialDate) {
+    return { birthDate: serialDate, remainder: '' };
   }
 
   return { birthDate: '', remainder: cleanWhitespace(remainder) };
@@ -84,102 +167,146 @@ export function extractBirthDate(text: string): { birthDate: string; remainder: 
 
 /**
  * Extracts and standardizes Passport, ID card, PINFL, or Birth Certificate (Metrika)
+ * Supports both Latin and Cyrillic series letters, Roman and Arabic numbers (1-TN, I-TN, 1-ТН, 1-ТШ, 1-БХ, etc.).
  * Examples:
- * - Metrika: "I-TN 123456", "II-FR 765432", "I-АН 123456", "I-TO 0521092"
- * - Passport: "AA 1234567", "AB 7654321", "FA 1234567"
+ * - Metrika: "I-TN 1234567", "1-TN 1234567", "II-FR 765432", "1-ФР 0585496", "TN 1234567", "1-ТШ 1234567"
+ * - Passport: "AA 1234567", "АА 1234567", "AB 7654321", "ФА 1234567", "AA1234567"
  * - PINFL: "52301055550012" (14 digits)
  */
 export function extractPassportOrId(text: string): { passportOrId: string; remainder: string } {
   if (!text) return { passportOrId: '', remainder: '' };
 
   let remainder = text;
+  const normalized = normalizePassportLetters(text);
 
-  // 1. Birth certificate / Metrika:
-  // Roman numeral (I, II, III, IV, V) + optional hyphen/space + 2 to 4 letters (Latin or Cyrillic) + optional No/№ + 5 to 7 digits
-  const metrikaRegex = /\b((?:I{1,3}|IV|V|VI)\s*[-_/\s]?\s*[A-Za-z\u0400-\u04FF]{2,4}\s*(?:№|no\.?|#)?\s*\d{5,8})\b/i;
-  const metrikaMatch = text.match(metrikaRegex);
-  if (metrikaMatch) {
-    const cleanId = metrikaMatch[1]
-      .replace(/\s+/g, ' ')
-      .replace(/[-_/\s]+/g, '-')
-      .replace(/-(?:№|no\.?|#)?-?/i, ' ')
-      .toUpperCase()
-      .trim();
-    remainder = remainder.replace(metrikaMatch[0], ' ');
+  // 1. Birth certificate with Roman or Arabic prefix (1-TN, I-TN, 1-FR, 1-ТН, 1-ТШ, II-TO)
+  const metrikaPrefixRegex = /\b((?:I{1,3}|IV|V|VI|[1-3])\s*[-_/\s]?\s*[A-Z]{2,4}\s*(?:№|no\.?|#)?\s*\d{5,8})\b/i;
+  const mMatch = normalized.match(metrikaPrefixRegex);
+  if (mMatch) {
+    const rawMatch = mMatch[1];
+    const parts = rawMatch.match(/^([IVX1-3]+)[-_/\s]*([A-Z]{2,4})[-_/\s]*(?:№|no\.?|#)?[-_/\s]*(\d{5,8})$/i);
+    let cleanId = rawMatch.toUpperCase().replace(/\s+/g, ' ');
+    if (parts) {
+      let rom = parts[1].toUpperCase()
+        .replace(/^1$/, 'I')
+        .replace(/^2$/, 'II')
+        .replace(/^3$/, 'III');
+      cleanId = `${rom}-${parts[2].toUpperCase()} ${parts[3]}`;
+    }
+    const origSlice = text.slice(mMatch.index || 0, (mMatch.index || 0) + mMatch[0].length);
+    remainder = remainder.replace(origSlice, ' ');
     return { passportOrId: cleanId, remainder: cleanWhitespace(remainder) };
   }
 
-  // 2. Passport / ID card: 2 letters + 7 digits (e.g. AA 1234567 or AB1234567)
-  const passRegex = /\b([A-Za-z]{2}\s*[-_/\s]?\s*\d{7})\b/;
-  const passMatch = text.match(passRegex);
-  if (passMatch) {
-    const raw = passMatch[1].replace(/[-_/\s]+/g, '').toUpperCase();
-    const cleanId = `${raw.slice(0, 2)} ${raw.slice(2)}`;
-    remainder = remainder.replace(passMatch[0], ' ');
+  // 2. Metrika series without prefix: TN, TSH, FR, AN, NM, SM, BX, BH, QSH, KSH, SR, JZ, NV, XR, QR, DZ, BG, TO, QD, TM, SV
+  const metrikaRegionalRegex = /\b(TN|TSH|FR|AN|NM|SM|BX|BH|QSH|KSH|SR|JZ|NV|XR|QR|DZ|BG|TO|QD|TM|SV)\s*(?:№|no\.?|#)?\s*(\d{6,8})\b/i;
+  const regMatch = normalized.match(metrikaRegionalRegex);
+  if (regMatch) {
+    const cleanId = `I-${regMatch[1].toUpperCase()} ${regMatch[2]}`;
+    const origSlice = text.slice(regMatch.index || 0, (regMatch.index || 0) + regMatch[0].length);
+    remainder = remainder.replace(origSlice, ' ');
     return { passportOrId: cleanId, remainder: cleanWhitespace(remainder) };
   }
 
-  // 3. JSHSHIR / PINFL: exactly 14 digits starting with 1-6
-  const pinflRegex = /\b([1-6]\d{13})\b/;
+  // 3. Biometric Passport / ID card: 2 letters + 7 digits (AA 1234567 or AA1234567)
+  const passRegex = /\b([A-Z]{2})\s*[-_/\s]?\s*(\d{7})\b/i;
+  const pMatch = normalized.match(passRegex);
+  if (pMatch) {
+    const cleanId = `${pMatch[1].toUpperCase()} ${pMatch[2]}`;
+    const origSlice = text.slice(pMatch.index || 0, (pMatch.index || 0) + pMatch[0].length);
+    remainder = remainder.replace(origSlice, ' ');
+    return { passportOrId: cleanId, remainder: cleanWhitespace(remainder) };
+  }
+
+  // 4. JSHSHIR / PINFL: exactly 14 digits (with optional spaces between groups)
+  const pinflRegex = /\b([1-6]\s*\d{3}\s*\d{4}\s*\d{4}\s*\d{2}|\b[1-6]\d{13})\b/;
   const pinflMatch = text.match(pinflRegex);
   if (pinflMatch) {
-    const cleanId = pinflMatch[1];
+    const cleanId = pinflMatch[1].replace(/\s+/g, '');
     remainder = remainder.replace(pinflMatch[0], ' ');
     return { passportOrId: cleanId, remainder: cleanWhitespace(remainder) };
+  }
+
+  // 5. Standalone document number after "№" or "No"
+  const docNumMatch = text.match(/\b(?:№|no\.?|#)\s*(\d{6,8})\b/i);
+  if (docNumMatch) {
+    remainder = remainder.replace(docNumMatch[0], ' ');
+    return { passportOrId: docNumMatch[1], remainder: cleanWhitespace(remainder) };
   }
 
   return { passportOrId: '', remainder: cleanWhitespace(remainder) };
 }
 
 /**
- * Cleans name string by strictly removing:
- * - Addresses (viloyat, tuman, shahar, qishloq, mahalla, MFY, ko'cha, uy, xonadon)
+ * Cleans name string by safely removing:
+ * - Leading table row numbers ("1.", "2)", "03 - ")
  * - Phone numbers (+998...)
- * - Gender (erkak, ayol, o'g'il, qiz)
- * - School, class, nationality tokens
- * - Table line numbers
- * Returns purely: Familiya Ism Sharif (e.g. "Abdurasulov Fayzulloh Abdurahim o'g'li")
+ * - Explicit address clauses
+ * - Document/school indicator keywords
+ * Preserves authentic Uzbek names (including Qo'chqor, Shamsiyev, To'xtasinov, etc.)
+ * Trims cleanly at patronymic ("o'g'li", "qizi", "-ovich", "-ovna")
  */
 export function cleanFullName(rawName: string): string {
   if (!rawName) return '';
 
-  let str = rawName.trim();
+  let str = normalizeUzbekApostrophes(rawName.trim());
 
-  // Remove leading row indices: "1.", "2)", "3 - ", "1:"
+  // 1. Remove leading row indices: "1.", "2)", "3 - ", "1:"
   str = str.replace(/^\s*\d+[\.\)\-\:\s]+/, '');
 
-  // Remove phone numbers (+998 or 9 digits)
+  // 2. Remove phone numbers (+998 or 9 digits)
   str = str.replace(/(?:\+?998[\s\-]?)?(?:\(?\d{2}\)?[\s\-]?)?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}/g, ' ');
   str = str.replace(/\+?998\d{9}/g, ' ');
   str = str.replace(/\b\d{9}\b/g, ' ');
 
-  // Remove address patterns and anything following them:
-  // e.g. "Toshkent viloyati, Parkent tumani...", "Yunusobod tumani...", "Mustaqillik ko'chasi 14-uy"
-  const addressPrefixRegex = /\b(?:viloyat[ia]?|vil\.?|tuman[ia]?|tum\.?|shahar|shahri|sh\.?|qishloq|qishlog'i|mahalla|mahallas[ia]|mfy|qfy|ko'cha|ko'chasi|ko'ch\.?|uy|xonadon|kvartira|dom|ko'ch)\b.*$/i;
-  str = str.replace(addressPrefixRegex, ' ');
+  // 3. Remove passports or IDs if leaked in name string
+  str = str.replace(/\b(?:I{1,3}|IV|V|[1-3])\s*[-_/\s]?\s*[A-Za-z\u0400-\u04FF]{2,4}\s*(?:№|no\.?|#)?\s*\d{5,8}\b/gi, ' ');
+  str = str.replace(/\b[A-Za-z\u0400-\u04FF]{2}\s*[-_/\s]?\s*\d{7}\b/g, ' ');
+  str = str.replace(/\b\d{14}\b/g, ' ');
 
-  // Remove gender tokens
+  // 4. Remove dates if leaked
+  str = str.replace(/\b\d{1,2}[\.\/\-]\d{1,2}[\.\/\-]\d{2,4}\b/g, ' ');
+
+  // 5. Remove known address clauses safely (do NOT use broad .*$ that deletes names!)
+  str = str.replace(/\b(?:toshkent|samarqand|farg['`’]ona|andijon|namangan|buxoro|xorazm|qashqadaryo|surxondaryo|jizzax|sirdaryo|navoiy|qoraqalpog['`’]iston)\s+(?:viloyat[ia]?|shahar|shahri)?\b/gi, ' ');
+  str = str.replace(/\b(?:viloyat[ia]|tuman[ia]|shahri|qishlog['`’]i|mahallas[ia]|mfy|qfy|ko['`’]chasi|xonadon|kvartira)\b/gi, ' ');
+
+  // 6. Remove gender tokens
   str = str.replace(/\b(erkak|ayol|o'g'il bola|qiz bola|o'g'il|qiz|jinsi|еркак|аёл)\b/gi, ' ');
 
-  // Remove school / class indicators
+  // 7. Remove school / class indicators
   str = str.replace(/\b\d{1,2}\s*[-_]?\s*[A-Za-z\u0400-\u04FF]\s*(?:sinf|sinfi)?\b/gi, ' ');
-  str = str.replace(/\b(?:maktab|maktabi|maktabda|umumta'lim|litsey|kollej)\b.*$/i, ' ');
+  str = str.replace(/\b(?:maktab|maktabi|umumta'lim|litsey|kollej)\b/gi, ' ');
 
-  // Remove common document labels
-  str = str.replace(/\b(?:pasport|metrika|guvohnoma|hujjat|seriya|raqam|raqami|jshshir|pinfl)\b.*$/i, ' ');
+  // 8. Remove document labels
+  str = str.replace(/\b(?:pasport|metrika|guvohnoma|hujjat|seriya|raqami|jshshir|pinfl)\b/gi, ' ');
 
-  // Remove separators like |, ;, commas
+  // 9. Remove noise symbols
   str = str.replace(/[\|\;\,]/g, ' ');
 
-  // Split into words and only keep valid name words (letters, apostrophes, hyphens)
-  const words = str
+  // Split into words and only keep valid name words
+  const rawWords = str
     .split(/\s+/)
-    .map(w => w.replace(/^[^a-zA-Z\u0400-\u04FF]+|[^a-zA-Z\u0400-\u04FF]+$/g, ''))
-    .filter(w => w.length > 0 && /^[a-zA-Z\u0400-\u04FF'`’‘-]+$/.test(w));
+    .map(w => w.replace(/^[^a-zA-Z\u0400-\u04FF'-]+|[^a-zA-Z\u0400-\u04FF'-]+$/g, ''))
+    .filter(w => w.length > 0 && /^[a-zA-Z\u0400-\u04FF'-]+$/.test(w));
 
-  // A student's name in Uzbek documents is at most 4 words: Familiya + Ism + Sharif (Otasining ismi o'g'li/qizi)
-  const nameWords = words.slice(0, 4);
-  if (nameWords.length === 0) return '';
+  if (rawWords.length < 2) return '';
+
+  // In Uzbek names, stop at the patronymic ("o'g'li", "qizi", "-ovich", "-ovna")
+  let nameWords = rawWords.slice(0, 5);
+  for (let i = 1; i < nameWords.length; i++) {
+    const w = nameWords[i].toLowerCase();
+    if (w === "o'g'li" || w === "qizi" || w === "ogli" || w === "ugli" || w === "kizi" || w === "ўғли" || w === "қизи" || w === "угли" || w === "кизи") {
+      nameWords = nameWords.slice(0, i + 1);
+      break;
+    }
+    if (/(?:ovich|ovna|yevich|yevna|ович|овна|евич|евна)$/i.test(w)) {
+      nameWords = nameWords.slice(0, i + 1);
+      break;
+    }
+  }
+
+  if (nameWords.length < 2) return '';
 
   return formatUzbekName(nameWords.join(' '));
 }
@@ -217,9 +344,23 @@ export function parseSingleStudentLine(line: string): ParsedStudentPreview | nul
     let birthCandidate = '';
     let passCandidate = '';
 
-    for (let part of parts) {
+    // Check adjacent cells for series + document number (e.g. "AA" in one cell, "1234567" in next)
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!passCandidate) {
+        const combined = `${parts[i]} ${parts[i + 1]}`.trim();
+        const { passportOrId } = extractPassportOrId(combined);
+        if (passportOrId) {
+          passCandidate = passportOrId;
+        }
+      }
+    }
+
+    for (const part of parts) {
       if (!part) continue;
-      part = part.replace(/^\s*\d+[\.\)\-\:\s]+/, '').trim();
+      // Skip pure line number cells (e.g. "1", "24", "10.")
+      if (/^\s*\d{1,3}[\.\)\-]?\s*$/.test(part)) {
+        continue;
+      }
 
       // Check date
       if (!birthCandidate) {
@@ -262,7 +403,8 @@ export function parseSingleStudentLine(line: string): ParsedStudentPreview | nul
   }
 
   // Fallback: Line-wide extraction
-  let workingText = trimmed.replace(/^\s*\d+[\.\)\-\:\s]+/, '');
+  // Only strip leading row index if followed by a letter (start of name)
+  let workingText = trimmed.replace(/^\s*\d{1,3}[\.\)\-\:\s]+\s*(?=[A-Za-z\u0400-\u04FF])/, '');
 
   // 1. Extract birth date
   const dateRes = extractBirthDate(workingText);
