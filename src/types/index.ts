@@ -81,6 +81,29 @@ export interface TelegramUser {
   lastNotifiedAllDone?: boolean;
 }
 
+export interface TeacherCertificate {
+  id: string;
+  fullName: string;
+  subject?: string; // Fani / mutaxassisligi
+  birthDate?: string;
+  passportOrId?: string; // Pasport yoki 14 xonali JShShIR
+  phone?: string;
+  assignedEmail?: string;
+  assignedPassword?: string;
+  status: 'pending' | 'certified' | 'error';
+  certificateLink?: string;
+  certificateDate?: string;
+  certificateNumber?: string;
+  hasError?: boolean;
+  errorReason?: string;
+  errorImage?: string;
+  price: number; // in UZS (default 5000)
+  paidAmount: number; // in UZS
+  paymentStatus: 'pending' | 'partial' | 'paid';
+  notes?: string;
+  createdAt: string;
+}
+
 export interface AppState {
   classes: ClassGroup[];
   students: Student[];
@@ -88,4 +111,5 @@ export interface AppState {
   sessions: TeacherSession[];
   messages: TeacherMessage[];
   telegramUsers: TelegramUser[];
+  teacherCertificates?: TeacherCertificate[];
 }

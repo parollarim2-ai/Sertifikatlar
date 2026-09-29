@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage, TelegramUser } from './types';
+import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage, TelegramUser, TeacherCertificate } from './types';
 import { INITIAL_CLASSES, INITIAL_STUDENTS, INITIAL_EMAIL_POOL } from './data/mockData';
 import { TeacherPortal } from './components/TeacherPortal';
 import { AdminPanel } from './components/AdminPanel';
@@ -41,6 +41,7 @@ const STORAGE_CLASSES_KEY = 'b1m_school_classes_v5';
 const STORAGE_STUDENTS_KEY = 'b1m_school_students_v5';
 const STORAGE_EMAILS_KEY = 'b1m_school_emails_v5';
 const STORAGE_ADMIN_AUTH_KEY = 'b1m_school_admin_auth_v5';
+const STORAGE_TEACHERS_KEY = 'b1m_school_teacher_certs_v5';
 
 export default function App() {
   // Load state from localStorage or initial empty list
@@ -70,6 +71,22 @@ export default function App() {
       return INITIAL_EMAIL_POOL;
     }
   });
+
+  // Teacher certificates state (Admin-only)
+  const [teacherCertificates, setTeacherCertificates] = useState<TeacherCertificate[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_TEACHERS_KEY);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_TEACHERS_KEY, JSON.stringify(teacherCertificates));
+    } catch {}
+  }, [teacherCertificates]);
 
   // Sessions and Messages
   const [sessions, setSessions] = useState<TeacherSession[]>([]);
@@ -433,12 +450,58 @@ export default function App() {
     await syncDeleteTeacherMessage(msgId);
   };
 
+  // Teacher certificates handlers
+  const handleAddTeacher = (teacher: TeacherCertificate) => {
+    setTeacherCertificates(prev => [teacher, ...prev]);
+  };
+
+  const handleAddBatchTeachers = (newTeachers: TeacherCertificate[]) => {
+    setTeacherCertificates(prev => [...newTeachers, ...prev]);
+  };
+
+  const handleUpdateTeacher = (updated: TeacherCertificate) => {
+    setTeacherCertificates(prev => prev.map(t => t.id === updated.id ? updated : t));
+  };
+
+  const handleDeleteTeacher = (teacherId: string) => {
+    setTeacherCertificates(prev => prev.filter(t => t.id !== teacherId));
+  };
+
+  const handleAssignTeacherEmail = (teacherId: string) => {
+    const availableEmail = emailPool.find(e => !e.isUsed);
+    if (!availableEmail) {
+      alert("Zaxirada bo'sh email mavjud emas! Avval Email Zaxirasiga yangi pochtalar qo'shing.");
+      return;
+    }
+    const updatedEmail: EmailAccount = {
+      ...availableEmail,
+      isUsed: true,
+      assignedToStudentId: teacherId,
+    };
+    setEmailPool(prev => prev.map(e => e.email === updatedEmail.email ? updatedEmail : e));
+    syncSaveSingleEmail(updatedEmail);
+
+    setTeacherCertificates(prev =>
+      prev.map(t =>
+        t.id === teacherId
+          ? {
+              ...t,
+              assignedEmail: updatedEmail.email,
+              assignedPassword: updatedEmail.password || 'Coursera2026!',
+            }
+          : t
+      )
+    );
+  };
+
   const handleClearAllData = () => {
     if (confirm("Diqqat! Barcha sinflar va o'quvchilar ro'yxati to'liq o'chiriladi. Davom ettirasizmi?")) {
       setClasses([]);
       setStudents([]);
+      setTeacherCertificates([]);
       localStorage.removeItem(STORAGE_CLASSES_KEY);
       localStorage.removeItem(STORAGE_STUDENTS_KEY);
+      localStorage.removeItem(STORAGE_TEACHERS_KEY);
       alert("Ma'lumotlar bazasi tozalandi.");
     }
   };
@@ -446,19 +509,21 @@ export default function App() {
   return (
     <div className="min-h-screen apple-canvas text-slate-900 flex flex-col font-sans selection:bg-blue-600 selection:text-white">
       
-      {/* Admin Mode Alert Banner */}
+      {/* Admin Mode Sleek Top Bar (Frosted Dark Glass - Yellow replaced with Apple Pro style) */}
       {currentView === 'admin' && (
-        <div className="bg-amber-600/95 backdrop-blur-md text-white px-4 py-2.5 text-xs font-semibold flex items-center justify-between shadow-sm border-b border-amber-500/50">
+        <div className="bg-slate-900/90 backdrop-blur-xl text-slate-200 px-4 py-2 text-xs font-medium flex items-center justify-between shadow-xs border-b border-white/10">
           <div className="flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4 flex-shrink-0" />
-            <span>Administrator rejimi: Tizim boshqaruvi, faol seanslar va xabarnomalar</span>
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+            <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+            <span className="text-slate-200 font-semibold">Administrator Boshqaruv Rejimi</span>
+            <span className="hidden sm:inline text-slate-400 text-[11px]">• Tizim boshqaruvi, faol seanslar va sertifikatlar monitoringi</span>
           </div>
           <button
             onClick={() => {
               setCurrentView('teacher');
               window.location.hash = '';
             }}
-            className="px-3 py-1 bg-slate-900/90 text-white hover:bg-slate-950 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs"
+            className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border border-white/10"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
             <span>O'qituvchilar portaliga qaytish</span>
@@ -525,6 +590,7 @@ export default function App() {
               sessions={sessions}
               messages={messages}
               telegramUsers={telegramUsers}
+              teacherCertificates={teacherCertificates}
               onRefreshTelegramUsers={fetchTelegramStatus}
               onOpenStudentModal={(student) => setActiveStudentModal(student)}
               onOpenPaymentModal={(classGroup) => setActivePaymentClass(classGroup)}
@@ -542,6 +608,11 @@ export default function App() {
               onSaveClass={handleSaveClass}
               onDeleteClass={handleDeleteClass}
               onLogoutAdmin={handleAdminLogout}
+              onAddTeacher={handleAddTeacher}
+              onAddBatchTeachers={handleAddBatchTeachers}
+              onUpdateTeacher={handleUpdateTeacher}
+              onDeleteTeacher={handleDeleteTeacher}
+              onAssignTeacherEmail={handleAssignTeacherEmail}
             />
           </div>
         )}

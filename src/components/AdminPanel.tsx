@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage, TelegramUser } from '../types';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage, TelegramUser, TeacherCertificate } from '../types';
 import { SessionsManagementTab } from './SessionsManagementTab';
 import { TelegramBotTab } from './TelegramBotTab';
+import { TeacherCertificatesTab } from './TeacherCertificatesTab';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
 import { 
   Users, 
@@ -38,8 +39,25 @@ import {
   Bell,
   Copy,
   AlertOctagon,
-  Check
+  Check,
+  GraduationCap
 } from 'lucide-react';
+
+export interface UnifiedItem {
+  id: string;
+  fullName: string;
+  passportOrId?: string;
+  birthDate?: string;
+  assignedEmail?: string;
+  assignedPassword?: string;
+  status: 'pending' | 'certified' | 'error';
+  certificateLink?: string;
+  hasError?: boolean;
+  isTeacher: boolean;
+  badgeLabel: string;
+  rawStudent?: Student;
+  rawTeacher?: TeacherCertificate;
+}
 
 interface AdminPanelProps {
   classes: ClassGroup[];
@@ -48,6 +66,7 @@ interface AdminPanelProps {
   sessions: TeacherSession[];
   messages: TeacherMessage[];
   telegramUsers?: TelegramUser[];
+  teacherCertificates?: TeacherCertificate[];
   currentDeviceId?: string;
   onRefreshTelegramUsers?: () => void;
   onOpenStudentModal: (student: Student, focusField?: 'passport' | 'name' | 'email') => void;
@@ -63,6 +82,11 @@ interface AdminPanelProps {
   onSaveClass: (classGroup: ClassGroup) => void;
   onDeleteClass: (classId: string) => void;
   onLogoutAdmin: () => void;
+  onAddTeacher?: (teacher: TeacherCertificate) => void;
+  onAddBatchTeachers?: (teachers: TeacherCertificate[]) => void;
+  onUpdateTeacher?: (teacher: TeacherCertificate) => void;
+  onDeleteTeacher?: (teacherId: string) => void;
+  onAssignTeacherEmail?: (teacherId: string) => void;
 }
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({
@@ -72,6 +96,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   sessions,
   messages,
   telegramUsers = [],
+  teacherCertificates = [],
   currentDeviceId,
   onRefreshTelegramUsers,
   onOpenStudentModal,
@@ -87,8 +112,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   onSaveClass,
   onDeleteClass,
   onLogoutAdmin,
+  onAddTeacher = () => {},
+  onAddBatchTeachers = () => {},
+  onUpdateTeacher = () => {},
+  onDeleteTeacher = () => {},
+  onAssignTeacherEmail,
 }) => {
-  const [activeTab, setActiveTab] = useState<'classes' | 'finance' | 'emails' | 'sessions' | 'telegram'>('classes');
+  const [activeTab, setActiveTab] = useState<'classes' | 'teachers' | 'finance' | 'emails' | 'sessions' | 'telegram'>('classes');
   const [selectedClassId, setSelectedClassId] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   
@@ -110,7 +140,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     };
   }, []);
 
-  const handlePassportSingleClick = (st: Student) => {
+  const handlePassportSingleClick = (st: { passportOrId?: string }) => {
     if (passportClickTimeoutRef.current) {
       clearTimeout(passportClickTimeoutRef.current);
       passportClickTimeoutRef.current = null;
@@ -126,12 +156,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }, 220);
   };
 
-  const handlePassportDoubleClick = (st: Student) => {
+  const handlePassportDoubleClick = (st: Student | UnifiedItem) => {
     if (passportClickTimeoutRef.current) {
       clearTimeout(passportClickTimeoutRef.current);
       passportClickTimeoutRef.current = null;
     }
-    onOpenStudentModal(st, 'passport');
+    if ('rawStudent' in st && st.rawStudent) {
+      onOpenStudentModal(st.rawStudent, 'passport');
+    } else if ('classId' in st) {
+      onOpenStudentModal(st as Student, 'passport');
+    }
   };
 
   // ESC key listener to close internal modals
@@ -176,7 +210,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     showQuickToast(`📋 Nusxalandi: "${text}"`);
   };
 
-  // Overall statistics
+  // Overall statistics (Students + Teachers)
   const totalStudents = students.length;
   const certifiedStudents = students.filter(s => s.status === 'certified');
   const certifiedCount = certifiedStudents.length;
@@ -188,17 +222,96 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const certifiedPercent = totalStudents > 0 ? Math.round((certifiedCount / totalStudents) * 100) : 0;
   const studentsWithoutEmail = students.filter(s => !s.assignedEmail || s.assignedEmail.trim() === '');
 
-  // Filtered students
-  const filteredStudents = students.filter(st => {
-    if (selectedClassId !== 'all' && st.classId !== selectedClassId) return false;
+  // Teacher statistics
+  const totalTeachers = teacherCertificates.length;
+  const certifiedTeachers = teacherCertificates.filter(t => t.status === 'certified');
+  const teachersRevenue = teacherCertificates.reduce((sum, t) => sum + (t.price || 5000), 0);
+  const teachersPaid = teacherCertificates.reduce((sum, t) => sum + (t.paidAmount || 0), 0);
+  const teachersDebt = Math.max(0, teachersRevenue - teachersPaid);
+
+  // Grand totals across all certificates (Students + Teachers)
+  const grandTotalCertified = certifiedCount + certifiedTeachers.length;
+  const grandTotalPotentialRevenue = totalPotentialRevenue + teachersRevenue;
+  const grandTotalPaidRevenue = totalPaidRevenue + teachersPaid;
+  const grandTotalRemainingDebt = totalRemainingDebt + teachersDebt;
+
+  // Unified list of people for the table (Students + Teachers when selected or searching)
+  const unifiedList = useMemo(() => {
+    interface UnifiedItem {
+      id: string;
+      fullName: string;
+      passportOrId?: string;
+      birthDate?: string;
+      assignedEmail?: string;
+      assignedPassword?: string;
+      status: 'pending' | 'certified' | 'error';
+      certificateLink?: string;
+      hasError?: boolean;
+      isTeacher: boolean;
+      badgeLabel: string;
+      rawStudent?: Student;
+      rawTeacher?: TeacherCertificate;
+    }
+
+    const list: UnifiedItem[] = [];
+
+    // Add students if not explicitly filtering only teachers
+    if (selectedClassId !== 'only_teachers') {
+      students.forEach(st => {
+        if (selectedClassId !== 'all' && selectedClassId !== 'all_with_teachers' && st.classId !== selectedClassId) return;
+        const stClass = classes.find(c => c.id === st.classId);
+        list.push({
+          id: st.id,
+          fullName: st.fullName,
+          passportOrId: st.passportOrId,
+          birthDate: st.birthDate,
+          assignedEmail: st.assignedEmail,
+          assignedPassword: st.assignedPassword,
+          status: st.status,
+          certificateLink: st.certificateLink,
+          hasError: st.hasError || st.status === 'error',
+          isTeacher: false,
+          badgeLabel: stClass?.name || 'Sinf',
+          rawStudent: st,
+        });
+      });
+    }
+
+    // Add teachers if selectedClassId === 'all_with_teachers' or if user is searching or only_teachers
+    if (selectedClassId === 'all_with_teachers' || selectedClassId === 'only_teachers' || searchQuery.trim().length > 0) {
+      teacherCertificates.forEach(t => {
+        list.push({
+          id: t.id,
+          fullName: t.fullName,
+          passportOrId: t.passportOrId,
+          birthDate: t.birthDate,
+          assignedEmail: t.assignedEmail,
+          assignedPassword: t.assignedPassword,
+          status: t.status,
+          certificateLink: t.certificateLink,
+          hasError: t.hasError || t.status === 'error',
+          isTeacher: true,
+          badgeLabel: t.subject ? `Ustoz: ${t.subject}` : 'Ustoz',
+          rawTeacher: t,
+        });
+      });
+    }
+
+    // Filter by search query
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      return st.fullName.toLowerCase().includes(q) ||
-        (st.passportOrId && st.passportOrId.toLowerCase().includes(q)) ||
-        (st.assignedEmail && st.assignedEmail.toLowerCase().includes(q));
+      return list.filter(item =>
+        item.fullName.toLowerCase().includes(q) ||
+        (item.passportOrId && item.passportOrId.toLowerCase().includes(q)) ||
+        (item.assignedEmail && item.assignedEmail.toLowerCase().includes(q)) ||
+        item.badgeLabel.toLowerCase().includes(q)
+      );
     }
-    return true;
-  });
+
+    return list;
+  }, [students, teacherCertificates, classes, selectedClassId, searchQuery]);
+
+  const filteredStudents = unifiedList;
 
   // Assign unique emails to missing students in Email tab
   const handleAssignEmailsToMissingStudents = () => {
@@ -485,54 +598,76 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         </div>
       </div>
 
-      {/* Modern Segmented Navigation Tabs */}
-      <div className="bg-slate-200/70 p-1 rounded-xl flex flex-wrap sm:flex-nowrap gap-1 border border-slate-300">
+      {/* Sleek Segmented Navigation Pill Bar (Mobile Optimized & Desktop Wide) */}
+      <div className="bg-slate-200/80 p-1 sm:p-1.5 rounded-2xl flex items-center gap-1 overflow-x-auto no-scrollbar border border-slate-300 shadow-inner">
         <button
           onClick={() => setActiveTab('classes')}
-          className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+          className={`flex-shrink-0 sm:flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-all cursor-pointer whitespace-nowrap ${
             activeTab === 'classes'
               ? 'bg-white text-slate-900 shadow-xs'
               : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
           }`}
         >
-          <Layers className="w-4 h-4 text-blue-700" />
-          <span>Sinflar va O'quvchilar Boshqaruvi</span>
+          <Layers className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-blue-700 flex-shrink-0" />
+          <span className="sm:hidden">Sinflar</span>
+          <span className="hidden sm:inline">Sinflar & O'quvchilar</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('teachers')}
+          className={`flex-shrink-0 sm:flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-all cursor-pointer whitespace-nowrap ${
+            activeTab === 'teachers'
+              ? 'bg-white text-purple-900 shadow-xs ring-1 ring-purple-200'
+              : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+          }`}
+        >
+          <GraduationCap className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-purple-700 flex-shrink-0" />
+          <span className="sm:hidden">Ustozlar</span>
+          <span className="hidden sm:inline">Ustozlar Sertifikatlari</span>
+          {teacherCertificates && teacherCertificates.length > 0 && (
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-purple-100 text-purple-800 font-mono font-bold">
+              {teacherCertificates.length}
+            </span>
+          )}
         </button>
 
         <button
           onClick={() => setActiveTab('finance')}
-          className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+          className={`flex-shrink-0 sm:flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-all cursor-pointer whitespace-nowrap ${
             activeTab === 'finance'
               ? 'bg-white text-slate-900 shadow-xs'
               : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
           }`}
         >
-          <DollarSign className="w-4 h-4 text-emerald-700" />
-          <span>Moliya & To'lovlar Matritsasi</span>
+          <DollarSign className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-700 flex-shrink-0" />
+          <span className="sm:hidden">Moliya</span>
+          <span className="hidden sm:inline">Moliya & To'lovlar</span>
         </button>
 
         <button
           onClick={() => setActiveTab('emails')}
-          className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+          className={`flex-shrink-0 sm:flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-all cursor-pointer whitespace-nowrap ${
             activeTab === 'emails'
               ? 'bg-white text-slate-900 shadow-xs'
               : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
           }`}
         >
-          <Mail className="w-4 h-4 text-blue-700" />
-          <span>Email Zaxirasi & Pochta Boshqaruvi</span>
+          <Mail className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-blue-700 flex-shrink-0" />
+          <span className="sm:hidden">Emaillar</span>
+          <span className="hidden sm:inline">Email Zaxirasi</span>
         </button>
 
         <button
           onClick={() => setActiveTab('sessions')}
-          className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+          className={`flex-shrink-0 sm:flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-all cursor-pointer whitespace-nowrap ${
             activeTab === 'sessions'
               ? 'bg-white text-slate-900 shadow-xs'
               : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
           }`}
         >
-          <Smartphone className="w-4 h-4 text-purple-600" />
-          <span>Faol Seanslar & Qurilmalar</span>
+          <Smartphone className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-purple-600 flex-shrink-0" />
+          <span className="sm:hidden">Seanslar</span>
+          <span className="hidden sm:inline">Faol Seanslar</span>
           {sessions.length > 0 && (
             <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-200 text-slate-700 font-mono">
               {sessions.length}
@@ -545,14 +680,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
         <button
           onClick={() => setActiveTab('telegram')}
-          className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+          className={`flex-shrink-0 sm:flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 sm:gap-2 transition-all cursor-pointer whitespace-nowrap ${
             activeTab === 'telegram'
               ? 'bg-[#24A1DE] text-white shadow-xs'
               : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
           }`}
         >
-          <Send className="w-4 h-4" />
-          <span>Telegram Bot (@Courseradan_bot)</span>
+          <Send className="w-3.5 h-3.5 sm:w-4 sm:h-4 flex-shrink-0" />
+          <span className="sm:hidden">Telegram</span>
+          <span className="hidden sm:inline">Telegram Bot</span>
           {telegramUsers && telegramUsers.length > 0 && (
             <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-emerald-500 text-white font-mono font-bold">
               {telegramUsers.length} ustoz
@@ -820,6 +956,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 text-xs font-medium focus:outline-none focus:bg-white focus:border-blue-700 cursor-pointer"
               >
                 <option value="all">Barcha sinflar ({totalStudents})</option>
+                <option value="all_with_teachers">🎓 Barcha sertifikatlar (O'quvchilar + Ustozlar: {totalStudents + totalTeachers})</option>
+                <option value="only_teachers">👨‍🏫 Faqat Ustozlar ({totalTeachers})</option>
                 {classes.map(c => (
                   <option key={c.id} value={c.id}>
                     {c.name} sinfi ({c.teacherName})
@@ -865,7 +1003,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     </tr>
                   ) : (
                     filteredStudents.map((st, idx) => {
-                      const stClass = classes.find(c => c.id === st.classId);
                       const isCertified = st.status === 'certified';
                       const isError = st.hasError || st.status === 'error';
 
@@ -873,29 +1010,45 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         <tr
                           key={st.id}
                           className={`hover:bg-slate-50/80 transition-colors select-none ${
-                            isError ? 'bg-rose-50/40' : ''
+                            isError ? 'bg-rose-50/40' : st.isTeacher ? 'bg-purple-50/25' : ''
                           }`}
-                          onDoubleClick={() => onOpenStudentModal(st)}
+                          onDoubleClick={() => {
+                            if (st.isTeacher) {
+                              setActiveTab('teachers');
+                              showQuickToast(`Ustozlar bo'limiga o'tildi: ${st.fullName}`);
+                            } else if (st.rawStudent) {
+                              onOpenStudentModal(st.rawStudent);
+                            }
+                          }}
                         >
                           <td className="py-3 pl-5 pr-2 text-slate-400 font-medium">{idx + 1}</td>
 
-                          {/* Full Name & Passport & Birth date with Single-Click Copy and Double-Click Edit */}
+                          {/* Full Name & Passport & Birth date */}
                           <td className="py-3 px-3 font-sans font-semibold text-slate-900">
                             <div className="flex items-center gap-2">
                               <span
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  handleCopyField(st.fullName, "O'quvchi F.I.SH");
+                                  handleCopyField(st.fullName, st.isTeacher ? "Ustoz F.I.SH" : "O'quvchi F.I.SH");
                                 }}
                                 onDoubleClick={(e) => {
                                   e.stopPropagation();
-                                  onOpenStudentModal(st);
+                                  if (st.isTeacher) {
+                                    setActiveTab('teachers');
+                                  } else if (st.rawStudent) {
+                                    onOpenStudentModal(st.rawStudent);
+                                  }
                                 }}
                                 className="cursor-pointer hover:text-blue-700 hover:underline active:opacity-70 transition-all rounded px-1 -mx-1"
-                                title="1 marta bosing - nusxalash, 2 marta - tahrirlash"
+                                title="1 marta bosing - nusxalash"
                               >
                                 {st.fullName}
                               </span>
+                              {st.isTeacher && (
+                                <span className="px-1.5 py-0.2 text-[9px] font-bold rounded bg-purple-100 text-purple-800 border border-purple-200 uppercase tracking-wider font-sans">
+                                  USTOZ
+                                </span>
+                              )}
                               {isError && (
                                 <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-rose-100 text-rose-800 border border-rose-200 font-sans">
                                   XATO
@@ -930,7 +1083,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                   }}
                                   onDoubleClick={(e) => {
                                     e.stopPropagation();
-                                    onOpenStudentModal(st);
+                                    if (st.rawStudent) onOpenStudentModal(st.rawStudent);
                                   }}
                                   className="cursor-pointer hover:text-blue-700 hover:underline active:opacity-70 transition-all rounded px-1 -mx-1"
                                   title="1 marta bosing - nusxalash, 2 marta - tahrirlash"
@@ -944,9 +1097,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                           </td>
 
                           <td className="py-3 px-3 text-slate-800 font-sans">
-                            <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-800 text-[11px] font-semibold border border-slate-200">
-                              {stClass?.name || 'Sinf'}
-                            </span>
+                            {st.isTeacher ? (
+                              <span className="px-2 py-0.5 rounded bg-purple-100 text-purple-800 text-[11px] font-bold border border-purple-200">
+                                {st.badgeLabel}
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-800 text-[11px] font-semibold border border-slate-200">
+                                {st.badgeLabel}
+                              </span>
+                            )}
                           </td>
 
                           {/* Email with Single-Click Copy and Double-Click Edit */}
@@ -959,10 +1118,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                 }}
                                 onDoubleClick={(e) => {
                                   e.stopPropagation();
-                                  onOpenStudentModal(st);
+                                  if (st.isTeacher) {
+                                    setActiveTab('teachers');
+                                  } else if (st.rawStudent) {
+                                    onOpenStudentModal(st.rawStudent);
+                                  }
                                 }}
                                 className="text-slate-800 font-mono text-[11px] cursor-pointer hover:text-blue-700 hover:underline active:opacity-70 transition-all rounded px-1 -mx-1 block"
-                                title="1 marta bosing - nusxalash, 2 marta - tahrirlash"
+                                title="1 marta bosing - nusxalash"
                               >
                                 {st.assignedEmail}
                               </span>
@@ -1006,7 +1169,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                 type="button"
                                 onClick={e => {
                                   e.stopPropagation();
-                                  onOpenStudentModal(st);
+                                  if (st.isTeacher) {
+                                    setActiveTab('teachers');
+                                  } else if (st.rawStudent) {
+                                    onOpenStudentModal(st.rawStudent);
+                                  }
                                 }}
                                 className="px-2 py-0.5 text-[11px] font-sans font-semibold rounded bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 flex items-center gap-1 cursor-pointer"
                               >
@@ -1017,16 +1184,29 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                           </td>
 
                           <td className="py-3 pr-5 pl-3 text-right">
-                            <button
-                              type="button"
-                              onClick={e => {
-                                e.stopPropagation();
-                                onOpenStudentModal(st);
-                              }}
-                              className="px-2.5 py-1 text-xs font-sans font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded border border-slate-200 transition-colors cursor-pointer"
-                            >
-                              Tahrirlash
-                            </button>
+                            {st.isTeacher ? (
+                              <button
+                                type="button"
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  setActiveTab('teachers');
+                                }}
+                                className="px-2.5 py-1 text-xs font-sans font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 rounded border border-purple-200 transition-colors cursor-pointer"
+                              >
+                                Ustozlar paneli
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  if (st.rawStudent) onOpenStudentModal(st.rawStudent);
+                                }}
+                                className="px-2.5 py-1 text-xs font-sans font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded border border-slate-200 transition-colors cursor-pointer"
+                              >
+                                Tahrirlash
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );
@@ -1039,9 +1219,62 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         </div>
       )}
 
+      {/* TAB: Teacher Certificates Management */}
+      {activeTab === 'teachers' && (
+        <TeacherCertificatesTab
+          teachers={teacherCertificates}
+          emailPool={emailPool}
+          onAddTeacher={onAddTeacher}
+          onAddBatchTeachers={onAddBatchTeachers}
+          onUpdateTeacher={onUpdateTeacher}
+          onDeleteTeacher={onDeleteTeacher}
+          onAssignEmailFromPool={onAssignTeacherEmail}
+        />
+      )}
+
       {/* TAB 2: Finance & Payments Matrix */}
       {activeTab === 'finance' && (
         <div className="space-y-5">
+          {/* Executive Grand Total Summary */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs">
+              <span className="text-xs font-medium text-slate-500 block mb-1">
+                Sinflar (O'quvchilar) Tushumi
+              </span>
+              <div className="text-xl font-bold text-slate-900">
+                {totalPaidRevenue.toLocaleString()} <span className="text-xs font-normal text-slate-500">so'm</span>
+              </div>
+              <div className="text-xs text-amber-800 font-semibold mt-1">
+                Qarz: {totalRemainingDebt.toLocaleString()} so'm
+              </div>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs">
+              <span className="text-xs font-medium text-purple-700 block mb-1">
+                Ustozlar Tushumi ({teacherCertificates.length} nafar)
+              </span>
+              <div className="text-xl font-bold text-purple-900">
+                {teachersPaid.toLocaleString()} <span className="text-xs font-normal text-purple-600">so'm</span>
+              </div>
+              <div className={`text-xs font-semibold mt-1 ${teachersDebt > 0 ? 'text-rose-600' : 'text-emerald-700'}`}>
+                {teachersDebt > 0 ? `Qarz: ${teachersDebt.toLocaleString()} so'm` : "Qarz yo'q (100% to'langan)"}
+              </div>
+            </div>
+
+            <div className="bg-emerald-50/80 border border-emerald-200 rounded-2xl p-4 shadow-xs">
+              <span className="text-xs font-medium text-emerald-800 block mb-1">
+                Umumiy Jami Tushum (Maktab bo'yicha)
+              </span>
+              <div className="text-xl font-bold text-emerald-900">
+                {grandTotalPaidRevenue.toLocaleString()} <span className="text-xs font-normal text-emerald-700">so'm</span>
+              </div>
+              <div className="text-xs text-slate-700 font-semibold mt-1">
+                Jami Qolgan Qarz: <span className="text-rose-700 font-bold">{grandTotalRemainingDebt.toLocaleString()} so'm</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Classes Table */}
           <div className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-xs">
             <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
               <div>
@@ -1116,6 +1349,120 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       </tr>
                     );
                   })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Teachers Financial Table */}
+          <div className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-xs">
+            <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-purple-50 text-purple-700 flex items-center justify-center">
+                  <GraduationCap className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900 text-sm sm:text-base">
+                    Ustozlar Bo'yicha To'lovlar va Qarzdorlik Hisoboti
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    O'qituvchilarning Coursera sertifikatlari uchun to'lov holati va qarzlari.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setActiveTab('teachers')}
+                className="px-3 py-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+              >
+                Ustozlar bo'limiga o'tish →
+              </button>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs text-slate-700">
+                <thead className="bg-slate-100/75 text-slate-600 uppercase text-[11px] font-bold tracking-wider border-b border-slate-200">
+                  <tr>
+                    <th className="py-3.5 pl-5 pr-3">Ustoz F.I.SH</th>
+                    <th className="py-3.5 px-3">Fani</th>
+                    <th className="py-3.5 px-3">Sertifikat</th>
+                    <th className="py-3.5 px-3">Narxi</th>
+                    <th className="py-3.5 px-3">To'langan Summa</th>
+                    <th className="py-3.5 px-3">Qarzdorlik</th>
+                    <th className="py-3.5 pr-5 pl-3 text-right">To'lov Holati</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-mono">
+                  {teacherCertificates.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-8 text-center text-slate-400 font-sans">
+                        Hozircha ustozlar kiritilmagan. "Ustozlar" bo'limi orqali yangi ustozlarni kiritishingiz mumkin.
+                      </td>
+                    </tr>
+                  ) : (
+                    teacherCertificates.map(t => {
+                      const debt = (t.price || 5000) - (t.paidAmount || 0);
+                      const isPaid = debt <= 0;
+
+                      return (
+                        <tr key={t.id} className="hover:bg-slate-50 transition-colors">
+                          <td className="py-3.5 pl-5 pr-3 font-bold text-slate-900 font-sans">
+                            {t.fullName}
+                          </td>
+                          <td className="py-3.5 px-3 font-sans text-purple-700 font-semibold">
+                            {t.subject || '—'}
+                          </td>
+                          <td className="py-3.5 px-3 font-sans">
+                            {t.status === 'certified' ? (
+                              <span className="text-emerald-700 font-bold">✓ Tayyor</span>
+                            ) : t.status === 'error' ? (
+                              <span className="text-rose-700 font-bold">✕ Xato</span>
+                            ) : (
+                              <span className="text-amber-700 font-medium">⏳ Kutilmoqda</span>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-3 font-semibold">
+                            {(t.price || 5000).toLocaleString()} so'm
+                          </td>
+                          <td className="py-3.5 px-3 text-emerald-800 font-semibold">
+                            {(t.paidAmount || 0).toLocaleString()} so'm
+                          </td>
+                          <td className="py-3.5 px-3">
+                            {isPaid ? (
+                              <span className="text-emerald-700 font-sans font-bold text-[11px]">
+                                Qarz yo'q
+                              </span>
+                            ) : (
+                              <span className="text-rose-700 font-bold">
+                                {debt.toLocaleString()} so'm
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3.5 pr-5 pl-3 text-right">
+                            {isPaid ? (
+                              <span className="inline-flex items-center gap-1 text-emerald-800 font-sans font-bold text-[11px] bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                                <CheckCircle2 className="w-3.5 h-3.5" /> To'liq to'langan
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onUpdateTeacher({
+                                    ...t,
+                                    paidAmount: t.price || 5000,
+                                    paymentStatus: 'paid'
+                                  });
+                                  showQuickToast(`✅ ${t.fullName} uchun to'lov to'liq belgilandi`);
+                                }}
+                                className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-sans font-bold rounded-lg transition-colors cursor-pointer"
+                              >
+                                To'liq to'landi
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
                 </tbody>
               </table>
             </div>

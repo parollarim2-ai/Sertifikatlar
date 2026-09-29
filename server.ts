@@ -38,10 +38,33 @@ async function getBrowser(): Promise<Browser> {
 
 async function startServer() {
   const app = express();
-  // In AI Studio Cloud Run container, Nginx listens on PORT 8080 and proxies traffic to 3000.
-  const port = 3000;
+  // Port determination:
+  // 1. If explicit command-line flag is given: --port <num> (e.g. `npm run dev --port 3000`)
+  // 2. If running inside AI Studio dev container where Nginx is listening on NGINX_PORT (8080)
+  //    and reverse-proxying to DEFAULT_APP_PORT (3000), use DEFAULT_APP_PORT (3000).
+  // 3. Otherwise, for production Cloud Run deployment rollout, Render, Railway, or standalone,
+  //    use process.env.PORT (defaults to 8080 on Cloud Run, or 3000 as fallback).
+  function determinePort(): number {
+    const portArgIndex = process.argv.indexOf('--port');
+    if (portArgIndex !== -1 && process.argv[portArgIndex + 1]) {
+      return parseInt(process.argv[portArgIndex + 1], 10);
+    }
+    if (process.env.NGINX_PORT && process.env.DEFAULT_APP_PORT) {
+      return parseInt(process.env.DEFAULT_APP_PORT, 10) || 3000;
+    }
+    if (process.env.PORT) {
+      return parseInt(process.env.PORT, 10);
+    }
+    return 3000;
+  }
+  const port = determinePort();
 
   app.use(express.json({ limit: '20mb' }));
+
+  // Cloud Run / container health check endpoints
+  app.get(['/health', '/healthz', '/_health'], (_req, res) => {
+    res.status(200).json({ status: 'ok', uptime: process.uptime() });
+  });
 
   // AI Document parsing endpoint using Gemini
   app.post('/api/parse-document-ai', async (req, res) => {
@@ -521,23 +544,53 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
   }
 
   // Mount Vite development middlewares in dev mode, or serve static dist in production
-  const isProd = process.env.NODE_ENV === 'production' || (process.env.NODE_ENV !== 'development' && fs.existsSync(path.resolve(process.cwd(), 'dist', 'index.html')));
-  if (!isProd) {
+  const isDev = process.env.NODE_ENV !== 'production';
+
+  if (isDev) {
+    // In development, always use Vite's HMR and middleware mode to serve directly from source
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
+    // In production, serve the compiled dist folder
     const distPath = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(distPath, 'index.html'));
+    const indexPath = path.resolve(distPath, 'index.html');
+
+    if (fs.existsSync(distPath)) {
+      app.use(express.static(distPath));
+    }
+
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/')) {
+        return res.status(404).json({ error: 'Endpoint topilmadi' });
+      }
+
+      if (fs.existsSync(indexPath)) {
+        return res.sendFile(indexPath, (err) => {
+          if (err && !res.headersSent) {
+            next(err);
+          }
+        });
+      }
+
+      // Safe fallback if dist was somehow cleaned or missing in production
+      const rootIndex = path.resolve(process.cwd(), 'index.html');
+      if (fs.existsSync(rootIndex)) {
+        return res.sendFile(rootIndex, (err) => {
+          if (err && !res.headersSent) {
+            next(err);
+          }
+        });
+      }
+
+      res.status(503).send('Ilova yuklanmoqda... Iltimos bir necha soniyadan so\'ng qayta yangilang.');
     });
   }
 
   app.listen(port, '0.0.0.0', () => {
-    console.log(`Server running on http://0.0.0.0:${port}`);
+    console.log(`Server running on http://0.0.0.0:${port} (NODE_ENV: ${process.env.NODE_ENV || 'not set'})`);
   });
 }
 
