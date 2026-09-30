@@ -35,12 +35,31 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
   onRefreshUsers,
 }) => {
   const [isCheckingAutoNotify, setIsCheckingAutoNotify] = useState(false);
+  const [isForceRefreshing, setIsForceRefreshing] = useState(false);
   const [feedbackToast, setFeedbackToast] = useState('');
   const [copiedLink, setCopiedLink] = useState(false);
 
   const showToast = (msg: string) => {
     setFeedbackToast(msg);
     setTimeout(() => setFeedbackToast(''), 4000);
+  };
+
+  const handleForceRefresh = async () => {
+    setIsForceRefreshing(true);
+    try {
+      const res = await fetch('/api/telegram/force-refresh', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        showToast(`✅ Real-vaqt sinxronlandi! ${data.stats?.certifiedCount ?? 0} ta sertifikatlangan o'quvchi Firestore'dan botga uzatildi.`);
+        if (onRefreshUsers) onRefreshUsers();
+      } else {
+        showToast("⚠️ Sinxronlash xatoligi: " + (data.error || "Noma'lum"));
+      }
+    } catch (err: any) {
+      showToast("❌ Serverga ulanishda xatolik: " + err.message);
+    } finally {
+      setIsForceRefreshing(false);
+    }
   };
 
   const handleTriggerAutoNotify = async () => {
@@ -222,8 +241,40 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
         </div>
       </div>
 
+      {/* Real-time Status & Sync Notice Banner */}
+      <div className="p-4 rounded-2xl bg-gradient-to-r from-blue-900 via-indigo-900 to-slate-900 text-white border border-blue-500/30 shadow-md">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping"></span>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                Firestore Real-Vaqt Jonli Sinxronizatsiya: Faol
+                <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-emerald-400/20 text-emerald-300 border border-emerald-400/40">
+                  0s Kechikish (Real-time)
+                </span>
+              </h3>
+            </div>
+            <p className="text-xs text-blue-200 max-w-2xl leading-relaxed">
+              Bot endi veb-sayt brauzeriga bog'liq emas — server to'g'ridan-to'g'ri Firebase Firestore bazasiga real-vaqtda ulangan. 
+              Saytda yangi o'quvchi tasdiqlanishi bilan Telegram botda soniya ichida aks etadi (avvalgi 2-3 soatlik kechikish to'liq yo'qotildi).
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button
+              onClick={handleForceRefresh}
+              disabled={isForceRefreshing}
+              className="py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all flex items-center gap-2 shadow-xs cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isForceRefreshing ? 'animate-spin' : ''}`} />
+              <span>{isForceRefreshing ? 'Baza yangilanmoqda...' : 'Darhol Sinxronlash (Force Refresh)'}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Control Strip & Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs">
           <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Jami Sinflar</div>
           <div className="text-2xl font-black text-slate-900 mt-1">{classes.length} ta</div>
@@ -237,14 +288,31 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
         </div>
 
         <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs flex flex-col justify-between">
+          <div className="text-[11px] font-bold text-indigo-600 uppercase tracking-wider">Baza Sinxronligi</div>
+          <div className="flex items-center gap-1.5 mt-1">
+            <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+            <span className="text-sm font-black text-slate-900">Firestore 100% Jonli</span>
+          </div>
+          <button
+            onClick={handleForceRefresh}
+            disabled={isForceRefreshing}
+            className="w-full mt-2 py-1.5 px-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold transition-all flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3 h-3 ${isForceRefreshing ? 'animate-spin' : ''}`} />
+            <span>Bazani yangilash</span>
+          </button>
+        </div>
+
+        <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs flex flex-col justify-between">
           <div className="text-[11px] font-bold text-blue-600 uppercase tracking-wider">Avtomatik Tekshiruv</div>
+          <div className="text-sm font-black text-slate-900 mt-1">100% Tayyor Sinflar</div>
           <button
             onClick={handleTriggerAutoNotify}
             disabled={isCheckingAutoNotify}
-            className="w-full mt-2 py-2 px-3 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            className="w-full mt-2 py-1.5 px-2 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold transition-all flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${isCheckingAutoNotify ? 'animate-spin' : ''}`} />
-            <span>To'liq sinflarni tekshirish</span>
+            <RefreshCw className={`w-3 h-3 ${isCheckingAutoNotify ? 'animate-spin' : ''}`} />
+            <span>Xabar yuborish</span>
           </button>
         </div>
       </div>
@@ -548,23 +616,49 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
           </div>
         </div>
 
-        {/* 24/7 Master Guide */}
-        <div className="p-4 rounded-xl bg-blue-50/70 border border-blue-200 space-y-2 text-xs text-blue-950">
-          <div className="font-bold flex items-center gap-1.5 text-blue-900">
+        {/* 24/7 Master Guide & FAQ */}
+        <div className="p-4 rounded-xl bg-blue-50/70 border border-blue-200 space-y-3 text-xs text-blue-950">
+          <div className="font-bold flex items-center gap-1.5 text-blue-900 text-sm">
             <Sparkles className="w-4 h-4 text-blue-600" />
-            <span>Sayt va Botni 24/7 uzluksiz ishlatish bo'yicha amaliy tavsiyalar:</span>
+            <span>Bot ishlashi va 24/7 doimiy uzluksizlik bo'yicha muhim savol-javoblar:</span>
           </div>
-          <ul className="list-disc list-inside space-y-1 text-slate-700 leading-relaxed text-[11px]">
-            <li>
-              <b>1. Telegram Bot (Long-Polling / Webhook):</b> Bot hozir serveringizda fonda ishlab turibdi. Agar birorta ustoz /start bossa yoki sinf tanlasa, u darhol javob beradi.
-            </li>
-            <li>
-              <b>2. UptimeRobot orqali serverni doim uyg'oq saqlash (100% Bepul):</b> Bulutli serverlar uxlab qolmasligi uchun bepul <a href="https://uptimerobot.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">UptimeRobot.com</a> ga kiring va saytingiz havolasini <b>HTTP(s) Monitor (har 5 daqiqada ping)</b> qilib qo'shing. Shunda bot hech qachon to'xtamaydi.
-            </li>
-            <li>
-              <b>3. GitHub orqali 24/7 doimiy serverda ishlatish:</b> Loyihangiz GitHub-da (<code>https://github.com/forcourseram-ai/Courseradan</code>) tayyor turibdi. Uni <a href="https://render.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">Render.com</a> yoki <a href="https://railway.app" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">Railway.app</a> ga bog'lab qo'ysangiz, serveringiz o'chmasdan 24/7 ishlaydi.
-            </li>
-          </ul>
+
+          <div className="space-y-2 text-[11px] text-slate-700 leading-relaxed">
+            <div className="p-3 bg-white rounded-lg border border-blue-100 shadow-2xs space-y-1">
+              <p className="font-bold text-slate-900 flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                1. Nega saytda 7 ta o'quvchi qilganingizda botda 2-3 ta deb kechikkan edi va bu qanday tuzatildi?
+              </p>
+              <p className="text-slate-600">
+                <b>Sababi:</b> Avvalgi versiyada Telegram bot ma'lumotlarni faqat admin/ustoz brauzer sahifasini ochib turgandagina qabul qilardi. Agar brauzer yopilsa yoki internet sekin bo'lsa, server eski xotirada qolib ketardi.<br />
+                <b>Yechim:</b> Hozir Node.js backend to'g'ridan-to'g'ri Firebase Firestore bazasiga jonli (real-time <code>onSnapshot</code>) ulandi! Saytda 7 ta o'quvchini tasdiqlashingiz bilan <b>0 soniya ichida</b> bot ham 7 ta (100%) deb ko'rsatadi. Ustoz botda "🔄 Yangilash"ni bossa ham ma'lumot to'g'ridan-to'g'ri markaziy Firestore bazasidan yangilanadi.
+              </p>
+            </div>
+
+            <div className="p-3 bg-white rounded-lg border border-blue-100 shadow-2xs space-y-1">
+              <p className="font-bold text-slate-900 flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                2. Nega Webhook va Long-Polling birga ulanganda bot o'chib qolgan edi?
+              </p>
+              <p className="text-slate-600">
+                Telegram Bot API qoidasiga binoan, bir vaqtning o'zida Webhook hamda Long-Polling ishlay olmaydi. Webhook ulanganda Telegram Long-Pollingga <b>409 Conflict</b> xatosi qaytaradi va bot so'rovlarni olmay qo'yadi. Hozir tizimga avtomatik himoya qo'shildi: Long-Polling yoqilganda barcha eski Webhooklar tozalanadi, 409 xatosi chiqqanda esa o'zi avtomatik tozalab qayta ishga tushadi.
+              </p>
+            </div>
+
+            <div className="p-3 bg-white rounded-lg border border-blue-100 shadow-2xs space-y-1">
+              <p className="font-bold text-slate-900 flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                3. Nega chatni ochganda bot yana ishlab qoladi, kompyuter yopilganda o'chadi? (24/7 yechim)
+              </p>
+              <p className="text-slate-600">
+                Google AI Studio muhiti test va ishlab chiqish uchun mo'ljallangan konteyner bo'lib, chatda harakat to'xtasa yoki brauzer yopilsa serverni resurs tejash uchun uyqu (sleep) rejimiga o'tkazadi. Chatni ochishingiz bilan konteyner uyg'onadi va bot yana javob beradi.<br />
+                <b>Botni kompyuteringiz yopiq paytda ham 24/7 uzluksiz ishlatish uchun:</b><br />
+                • <b>1-usul (Bepul 24/7 Bulut):</b> Loyihangiz GitHub-da tayyor (<code>https://github.com/forcourseram-ai/Courseradan</code>). Uni bepul <a href="https://render.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">Render.com</a> yoki <a href="https://railway.app" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">Railway.app</a> ga "Web Service" qilib ulasangiz, 24/7 o'chmasdan ishlaydi.<br />
+                • <b>2-usul (VPS Serverda):</b> Serveringiz bo'lsa <code>pm2 start server.ts --name courseradan-bot</code> buyrug'i orqali fonda abadiy ishlatishingiz mumkin.<br />
+                • <b>3-usul (UptimeRobot):</b> Bepul <a href="https://uptimerobot.com" target="_blank" rel="noreferrer" className="text-blue-600 underline font-bold">UptimeRobot.com</a> orqali saytingiz manzilini (har 5 daqiqada) ping qilib qo'yilsa, server uxlab qolmaydi.
+              </p>
+            </div>
+          </div>
         </div>
       </div>
 

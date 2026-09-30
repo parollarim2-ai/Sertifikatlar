@@ -3,6 +3,7 @@ import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage, Tele
 import { SessionsManagementTab } from './SessionsManagementTab';
 import { TelegramBotTab } from './TelegramBotTab';
 import { TeacherCertificatesTab } from './TeacherCertificatesTab';
+import { GmailGeneratorModal } from './GmailGeneratorModal';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
 import { 
   Users, 
@@ -40,7 +41,8 @@ import {
   Copy,
   AlertOctagon,
   Check,
-  GraduationCap
+  GraduationCap,
+  Zap
 } from 'lucide-react';
 
 export interface UnifiedItem {
@@ -87,6 +89,8 @@ interface AdminPanelProps {
   onUpdateTeacher?: (teacher: TeacherCertificate) => void;
   onDeleteTeacher?: (teacherId: string) => void;
   onAssignTeacherEmail?: (teacherId: string) => void;
+  onAddGeneratedEmails?: (newEmails: EmailAccount[]) => Promise<void> | void;
+  onToggleStudentPayment?: (studentId: string, currentPaidState: boolean) => void;
 }
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({
@@ -117,10 +121,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   onUpdateTeacher = () => {},
   onDeleteTeacher = () => {},
   onAssignTeacherEmail,
+  onAddGeneratedEmails,
+  onToggleStudentPayment,
 }) => {
   const [activeTab, setActiveTab] = useState<'classes' | 'teachers' | 'finance' | 'emails' | 'sessions' | 'telegram'>('classes');
   const [selectedClassId, setSelectedClassId] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [isGmailGeneratorOpen, setIsGmailGeneratorOpen] = useState(false);
   
   // Non-blocking quick toast without OK button
   const [quickToast, setQuickToast] = useState('');
@@ -1483,6 +1490,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               </div>
 
               <div className="flex items-center gap-2.5 flex-wrap">
+                {/* Button: Automatic Gmail Dot Trick Generator (1-3000 emails) */}
+                <button
+                  type="button"
+                  onClick={() => setIsGmailGeneratorOpen(true)}
+                  className="px-4 py-2 bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 hover:from-amber-600 hover:to-orange-600 text-white text-xs font-bold rounded-xl flex items-center gap-2 transition-all cursor-pointer shadow-xs"
+                  title="1 ta emaildan 3000 tagacha bo'sh nuqtali emaillarni avtomatik generatsiya qilish"
+                >
+                  <Zap className="w-4 h-4 text-yellow-200 fill-yellow-200" />
+                  <span>Gmail Dot Generatsiya (1-3000 ta)</span>
+                </button>
+
                 {/* Button: Assign emails to students who lack one */}
                 <button
                   type="button"
@@ -1883,6 +1901,22 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           </div>
         </div>
       )}
+
+      {/* Gmail Dot Trick Generator Modal */}
+      <GmailGeneratorModal
+        isOpen={isGmailGeneratorOpen}
+        onClose={() => setIsGmailGeneratorOpen(false)}
+        existingPool={emailPool}
+        students={students}
+        onAddGeneratedEmails={async (newEmails) => {
+          if (onAddGeneratedEmails) {
+            await onAddGeneratedEmails(newEmails);
+          } else {
+            onApplyEmailDistribution(students, [...emailPool, ...newEmails]);
+          }
+          setQuickToast(`✅ ${newEmails.length} ta yangi bo'sh Gmail zaxiraga qo'shildi!`);
+        }}
+      />
     </div>
   );
 };

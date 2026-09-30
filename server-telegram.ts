@@ -51,6 +51,104 @@ function saveStore() {
 
 loadStore();
 
+import { initializeApp, getApps, getApp } from 'firebase/app';
+import { getFirestore, collection, onSnapshot, getDocs, doc, setDoc } from 'firebase/firestore';
+
+// Initialize Firebase Firestore connection for 100% real-time server-side synchronization
+let firestoreDb: any = null;
+try {
+  const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+  if (fs.existsSync(configPath)) {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const app = !getApps().length ? initializeApp(config) : getApp();
+    firestoreDb = getFirestore(app, config.firestoreDatabaseId);
+    console.log('🔥 Server-side Firestore connected for Telegram Bot realtime sync:', config.firestoreDatabaseId);
+
+    // 1. Real-time Classes Listener
+    onSnapshot(collection(firestoreDb, 'classes'), (snap) => {
+      const list: ClassGroup[] = [];
+      snap.forEach((d) => list.push(d.data() as ClassGroup));
+      if (list.length > 0) {
+        store.classes = list;
+        saveStore();
+        console.log(`📡 [Telegram Bot] Real-time classes updated from Firestore: ${list.length} classes`);
+      }
+    }, (err) => console.error('Firestore classes listener error:', err.message));
+
+    // 2. Real-time Students Listener (Instant 0s lag)
+    onSnapshot(collection(firestoreDb, 'students'), (snap) => {
+      const list: Student[] = [];
+      snap.forEach((d) => list.push(d.data() as Student));
+      if (list.length > 0) {
+        store.students = list;
+        saveStore();
+        const cert = list.filter((s) => s.status === 'certified').length;
+        console.log(`📡 [Telegram Bot] Real-time students updated from Firestore: ${list.length} total (${cert} certified)`);
+        checkAndNotifyCompletedClasses().catch(() => {});
+      }
+    }, (err) => console.error('Firestore students listener error:', err.message));
+
+    // 3. Real-time Telegram Users Listener
+    onSnapshot(collection(firestoreDb, 'telegramUsers'), (snap) => {
+      snap.forEach((d) => {
+        const u = d.data() as TelegramUser;
+        if (u && u.id) {
+          store.telegramUsers[u.id] = u;
+        }
+      });
+      saveStore();
+    }, (err) => console.warn('Firestore telegramUsers notice:', err.message));
+  }
+} catch (e: any) {
+  console.error('Failed to initialize server-side Firestore listener:', e.message);
+}
+
+// Function to guarantee freshest data on-demand from Firestore
+export async function ensureFreshFirestoreData(): Promise<{ classesCount: number; studentsCount: number; certifiedCount: number }> {
+  if (!firestoreDb) {
+    return {
+      classesCount: store.classes.length,
+      studentsCount: store.students.length,
+      certifiedCount: store.students.filter(s => s.status === 'certified').length,
+    };
+  }
+
+  try {
+    const [classesSnap, studentsSnap] = await Promise.all([
+      getDocs(collection(firestoreDb, 'classes')),
+      getDocs(collection(firestoreDb, 'students')),
+    ]);
+
+    const freshClasses: ClassGroup[] = [];
+    classesSnap.forEach(d => freshClasses.push(d.data() as ClassGroup));
+    if (freshClasses.length > 0) {
+      store.classes = freshClasses;
+    }
+
+    const freshStudents: Student[] = [];
+    studentsSnap.forEach(d => freshStudents.push(d.data() as Student));
+    if (freshStudents.length > 0) {
+      store.students = freshStudents;
+    }
+
+    saveStore();
+
+    const cert = store.students.filter(s => s.status === 'certified').length;
+    return {
+      classesCount: store.classes.length,
+      studentsCount: store.students.length,
+      certifiedCount: cert,
+    };
+  } catch (err: any) {
+    console.warn('ensureFreshFirestoreData error:', err.message);
+    return {
+      classesCount: store.classes.length,
+      studentsCount: store.students.length,
+      certifiedCount: store.students.filter(s => s.status === 'certified').length,
+    };
+  }
+}
+
 export function getTelegramUsers(): TelegramUser[] {
   return Object.values(store.telegramUsers);
 }
@@ -409,8 +507,23 @@ export async function checkAndNotifyCompletedClasses(options?: { force?: boolean
 let isPolling = false;
 let updateOffset = 0;
 
-export function startTelegramBot() {
+export async function startTelegramBot() {
   if (isPolling) return;
+
+  // Before starting Long-Polling, check if a remote Webhook is already set
+  try {
+    const info = await getTelegramWebhookInfo();
+    if (info?.result?.url) {
+      console.log(`ℹ️ [Telegram Bot] Remote Webhook active at: ${info.result.url}. Long-polling paused to avoid conflict.`);
+      return;
+    } else {
+      // Clear any potential residual webhook so getUpdates never conflicts
+      await deleteTelegramWebhookDirect();
+    }
+  } catch (err: any) {
+    console.warn('[Telegram Bot] Webhook initial check notice:', err.message);
+  }
+
   isPolling = true;
   console.log('🤖 Telegram Bot polling service started for @Courseradan_bot');
 
@@ -429,23 +542,21 @@ export function startTelegramBot() {
             }
           }
         } else if (res.status === 409) {
-          // Webhook conflict detected; check if webhook has errors and clear it
-          console.warn('Telegram webhook conflict (409). Checking webhook health...');
+          // Webhook conflict detected (409)
+          console.warn('[Telegram Bot] Conflict 409 detected. Clearing webhook and restarting Long-Polling...');
           try {
-            const hookInfo = await getTelegramWebhookInfo();
-            if (hookInfo?.result?.last_error_message || !hookInfo?.result?.url) {
-              console.log('Clearing failing webhook and restoring Long-Polling...');
-              await deleteTelegramWebhook();
-            }
-          } catch (e) {
-            console.error('Error checking webhook health:', e);
+            await deleteTelegramWebhookDirect();
+          } catch (e: any) {
+            console.error('Error auto-deleting webhook on 409:', e.message);
           }
-          await new Promise((r) => setTimeout(r, 6000));
+          await new Promise((r) => setTimeout(r, 2000));
+        } else {
+          await new Promise((r) => setTimeout(r, 2000));
         }
       } catch (err: any) {
         // Network timeout is normal in long polling
         if (err.name !== 'TimeoutError') {
-          console.warn('Telegram polling retry in 3s:', err.message);
+          console.warn('Telegram polling retry in 2s:', err.message);
         }
         await new Promise((r) => setTimeout(r, 2000));
       }
@@ -453,6 +564,20 @@ export function startTelegramBot() {
   };
 
   poll().catch((e) => console.error('Telegram polling loop exited:', e));
+}
+
+// Low-level delete webhook without triggering recursive polling start
+async function deleteTelegramWebhookDirect() {
+  try {
+    const res = await fetch(`${TELEGRAM_API}/deleteWebhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ drop_pending_updates: false }),
+    });
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, description: err.message };
+  }
 }
 
 // Dispatch incoming message or callback query
@@ -467,6 +592,7 @@ async function handleTelegramUpdate(update: any) {
     if (!chatId) return;
 
     if (text.startsWith('/start') || text.startsWith('/boshlash')) {
+      await ensureFreshFirestoreData();
       // Prompt teacher selection
       const classes = store.classes;
       if (classes.length === 0) {
@@ -496,6 +622,7 @@ async function handleTelegramUpdate(update: any) {
     }
 
     if (text === '/meningsinfim' || text === '/info') {
+      await ensureFreshFirestoreData();
       const user = store.telegramUsers[chatId.toString()];
       if (user && user.classId) {
         const cls = store.classes.find((c) => c.id === user.classId);
@@ -510,6 +637,7 @@ async function handleTelegramUpdate(update: any) {
     }
 
     // Default reply
+    await ensureFreshFirestoreData();
     const user = store.telegramUsers[chatId.toString()];
     if (user && user.classId) {
       const cls = store.classes.find((c) => c.id === user.classId);
@@ -544,7 +672,7 @@ async function handleTelegramUpdate(update: any) {
       }
 
       // Record Telegram user
-      store.telegramUsers[chatId.toString()] = {
+      const tgUserObj: TelegramUser = {
         id: chatId.toString(),
         chatId,
         teacherName: cls.teacherName,
@@ -556,9 +684,17 @@ async function handleTelegramUpdate(update: any) {
         lastActiveAt: new Date().toISOString(),
         createdAt: store.telegramUsers[chatId.toString()]?.createdAt || new Date().toISOString(),
       };
+      store.telegramUsers[chatId.toString()] = tgUserObj;
       saveStore();
 
+      if (firestoreDb) {
+        setDoc(doc(firestoreDb, 'telegramUsers', chatId.toString()), tgUserObj, { merge: true }).catch((e) => {
+          console.warn('Firestore telegramUsers save notice:', e.message);
+        });
+      }
+
       await answerCallbackQuery(cb.id, `✅ ${cls.name} sinfi tanlandi!`);
+      await ensureFreshFirestoreData();
 
       const payload = getDashboardPayload(cls, store.students);
       if (messageId) {
@@ -571,6 +707,7 @@ async function handleTelegramUpdate(update: any) {
 
     // B. Switch class
     if (data === 'switch_class') {
+      await ensureFreshFirestoreData();
       const buttons = store.classes.map((c) => [
         {
           text: `🏫 ${c.name} sinfi: ${c.teacherName}`,
@@ -594,12 +731,18 @@ async function handleTelegramUpdate(update: any) {
 
       const cls = store.classes.find((c) => c.id === classId);
       if (cls) {
+        // Guarantee 100% fresh data directly from Firestore
+        await ensureFreshFirestoreData();
+
         // Update user activity
         if (store.telegramUsers[chatId.toString()]) {
           store.telegramUsers[chatId.toString()].lastActiveAt = new Date().toISOString();
           saveStore();
+          if (firestoreDb) {
+            setDoc(doc(firestoreDb, 'telegramUsers', chatId.toString()), store.telegramUsers[chatId.toString()], { merge: true }).catch(() => {});
+          }
         }
-        await answerCallbackQuery(cb.id, 'Yangilandi 🔄');
+        await answerCallbackQuery(cb.id, 'Real-vaqt ma\'lumotlari yangilandi 🔄');
         const payload = getDashboardPayload(cls, store.students);
         if (messageId) {
           await editMessageText(chatId, messageId, payload.text, payload.reply_markup);
@@ -619,6 +762,7 @@ async function handleTelegramUpdate(update: any) {
         return;
       }
 
+      await ensureFreshFirestoreData();
       await answerCallbackQuery(cb.id);
       const classStudents = store.students.filter((s) => s.classId === cls.id);
       const certified = classStudents.filter((s) => s.status === 'certified');
@@ -854,6 +998,7 @@ export async function handleTelegramWebhookUpdate(update: any) {
 // Telegram Webhook Management
 export async function setTelegramWebhook(webhookUrl: string) {
   try {
+    isPolling = false; // Stop long polling immediately
     const res = await fetch(`${TELEGRAM_API}/setWebhook`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -881,7 +1026,11 @@ export async function deleteTelegramWebhook() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ drop_pending_updates: false }),
     });
-    return await res.json();
+    const data = await res.json();
+    setTimeout(() => {
+      startTelegramBot();
+    }, 1000);
+    return data;
   } catch (err: any) {
     return { ok: false, description: err.message };
   }

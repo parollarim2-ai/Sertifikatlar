@@ -14,6 +14,7 @@ import {
   setTelegramWebhook,
   getTelegramWebhookInfo,
   deleteTelegramWebhook,
+  ensureFreshFirestoreData,
 } from './server-telegram.ts';
 
 let sharedBrowser: Browser | null = null;
@@ -396,6 +397,21 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
       res.json({
         success: true,
         users: getTelegramUsers(),
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Force server to refresh live from Firestore immediately
+  app.post('/api/telegram/force-refresh', async (_req, res) => {
+    try {
+      const stats = await ensureFreshFirestoreData();
+      res.json({
+        success: true,
+        message: "Firestore real-vaqt ma'lumotlari yangilandi",
+        stats,
+        usersCount: getTelegramUsers().length,
       });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });

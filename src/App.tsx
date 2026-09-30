@@ -430,6 +430,12 @@ export default function App() {
     await syncSaveEmailPool(updatedPool);
   };
 
+  const handleAddGeneratedEmails = async (newEmails: EmailAccount[]) => {
+    const updated = [...emailPool, ...newEmails];
+    setEmailPool(updated);
+    await syncSaveEmailPool(updated);
+  };
+
   const handleSaveClassAndStudents = async (
     targetClass: ClassGroup,
     newStudents: Student[],
@@ -675,6 +681,7 @@ export default function App() {
               onUpdateTeacher={handleUpdateTeacher}
               onDeleteTeacher={handleDeleteTeacher}
               onAssignTeacherEmail={handleAssignTeacherEmail}
+              onAddGeneratedEmails={handleAddGeneratedEmails}
             />
           </div>
         )}

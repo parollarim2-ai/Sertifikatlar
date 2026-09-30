@@ -48,6 +48,7 @@ interface TeacherPortalProps {
   onRegisterSession: (session: Partial<TeacherSession> & { deviceId: string }) => void;
   onMarkMessageAsRead: (messageId: string, deviceName?: string) => void;
   onOpenStudentModal?: (student: Student, focusField?: 'passport' | 'name' | 'email') => void;
+  onToggleStudentPayment?: (studentId: string, currentPaidState: boolean) => void;
 }
 
 export const TeacherPortal: React.FC<TeacherPortalProps> = ({
@@ -58,6 +59,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   onRegisterSession,
   onMarkMessageAsRead,
   onOpenStudentModal,
+  onToggleStudentPayment,
 }) => {
   // Device detection
   const currentDevice = useMemo(() => detectCurrentDevice(), []);
