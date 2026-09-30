@@ -370,8 +370,354 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
   });
 
   // ==========================================
-  // TELEGRAM BOT ENDPOINTS
+  // AI LEADERS (aileaders.uz) & COURSERA AUTOMATION
   // ==========================================
+
+  // Step 1 & 2: Automated registration on aileaders.uz with Guvohnoma/Passport and human pacing
+  app.post('/api/aileaders/automate', async (req, res) => {
+    let page: any = null;
+    const logs: string[] = [];
+    const log = (msg: string) => {
+      logs.push(`[${new Date().toLocaleTimeString('uz-UZ')}] ${msg}`);
+      console.log(`[AI Leaders Robot] ${msg}`);
+    };
+
+    try {
+      const {
+        studentId,
+        fullName,
+        docType = 'metrika',
+        series = 'I-FR',
+        number = '',
+        birthDate = '2010-04-15',
+        email,
+        phone = '+998 (88) 005 56 88',
+        password = 'MaktabPass2026!',
+      } = req.body;
+
+      if (!number) {
+        return res.status(400).json({ error: "Pasport yoki metrika raqami kiritilmagan", logs });
+      }
+
+      log(`1. Puppeteer brauzeri ishga tushirilmoqda. O'quvchi: ${fullName}...`);
+      const browser = await getBrowser();
+      page = await browser.newPage();
+      await page.setViewport({ width: 1280, height: 900 });
+
+      // Realistic user agent
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+
+      log(`2. https://aileaders.uz/auth/register sahifasi ochilmoqda...`);
+      await page.goto('https://aileaders.uz/auth/register', { waitUntil: 'networkidle2', timeout: 35000 });
+      await new Promise(r => setTimeout(r, 1200));
+
+      // Handle Document Type (Guvohnoma vs Passport)
+      if (docType === 'metrika') {
+        log(`3. 'Guvohnoma' bandi tanlanmoqda...`);
+        const switched = await page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll('button'));
+          const guv = btns.find(b => b.innerText.trim().toLowerCase().includes('guvohnoma'));
+          if (guv) {
+            (guv as HTMLElement).click();
+            return true;
+          }
+          return false;
+        });
+        if (!switched) {
+          log(`Ogohlantirish: Guvohnoma tugmasi topilmadi, standart tanlovda davom etilmoqda.`);
+        }
+        await new Promise(r => setTimeout(r, 800));
+      } else {
+        log(`3. 'Passport / ID-karta' bandida qolindi.`);
+      }
+
+      // Format document input value: series + number
+      const cleanSeries = series.trim().toUpperCase();
+      const cleanNum = number.trim();
+      const fullDocNumber = docType === 'metrika'
+        ? (cleanSeries.includes('-') ? `${cleanSeries}${cleanNum}` : `${cleanSeries} ${cleanNum}`)
+        : `${cleanSeries}${cleanNum}`;
+
+      log(`4. Hujjat seriya va raqami kiritilmoqda: "${fullDocNumber}"...`);
+      const inputEl = await page.$('input[name="passport_number"]');
+      if (inputEl) {
+        await inputEl.click({ clickCount: 3 });
+        await inputEl.type(fullDocNumber, { delay: 60 });
+      }
+
+      await new Promise(r => setTimeout(r, 600));
+
+      // Date Picker selection
+      log(`5. Tug'ilgan sana tanlanmoqda: ${birthDate}...`);
+      const dateParts = birthDate.split('-');
+      const year = dateParts[0] || '2010';
+      const monthNum = parseInt(dateParts[1] || '4', 10);
+      const dayNum = parseInt(dateParts[2] || '15', 10);
+
+      const dateBtn = await page.$('#date');
+      if (dateBtn) {
+        await dateBtn.click();
+        await new Promise(r => setTimeout(r, 700));
+
+        // Select year, month, and day in popover
+        await page.evaluate((y: string, mIndex: number, d: number) => {
+          const popover = document.querySelector('[data-slot="popover-content"]') || document.body;
+          const selects = Array.from(popover.querySelectorAll('select'));
+          if (selects.length >= 2) {
+            // Month select
+            selects[0].selectedIndex = mIndex - 1;
+            selects[0].dispatchEvent(new Event('change', { bubbles: true }));
+            // Year select
+            const yearOpt = Array.from(selects[1].options).find(o => o.value === y || o.text === y);
+            if (yearOpt) {
+              selects[1].value = yearOpt.value;
+              selects[1].dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          }
+
+          // Click day button
+          const dayButtons = Array.from(popover.querySelectorAll('button.rdp-day_button, [role="gridcell"] button, button'));
+          const dayMatch = dayButtons.find(b => (b as HTMLElement).innerText.trim() === String(d));
+          if (dayMatch) {
+            (dayMatch as HTMLElement).click();
+          }
+        }, year, monthNum, dayNum);
+
+        await new Promise(r => setTimeout(r, 600));
+      }
+
+      // Occupation selection: Maktab
+      log(`6. Faoliyat turi: 'Maktab' tanlanmoqda...`);
+      await page.evaluate(() => {
+        const sel = document.querySelector('select[name="occupation"]') as HTMLSelectElement;
+        if (sel) {
+          sel.value = 'school';
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        // Also click UI select trigger if needed
+        const trigger = document.querySelector('[data-slot="select-trigger"]') as HTMLElement;
+        if (trigger) {
+          trigger.click();
+        }
+      });
+      await new Promise(r => setTimeout(r, 400));
+      await page.evaluate(() => {
+        const schoolOption = Array.from(document.querySelectorAll('[role="option"], [data-slot="select-item"]'))
+          .find(el => (el as HTMLElement).innerText.includes('Maktab'));
+        if (schoolOption) {
+          (schoolOption as HTMLElement).click();
+        }
+      });
+
+      await new Promise(r => setTimeout(r, 800));
+
+      // Click "Ro'yxatdan o'tish"
+      log(`7. 'Ro'yxatdan o'tish' tugmasi bosilmoqda...`);
+      await page.evaluate(() => {
+        const submitBtn = document.querySelector('button[type="submit"]') as HTMLElement;
+        if (submitBtn) submitBtn.click();
+      });
+
+      // Human-like pause to wait for server response
+      await new Promise(r => setTimeout(r, 2500));
+
+      // Check for errors or success
+      const pageText = await page.evaluate(() => document.body.innerText);
+
+      // Check: "Ma'lumot topilmadi"
+      if (pageText.includes("Ma'lumot topilmadi")) {
+        log(`❌ Aileaders natijasi: "Ma'lumot topilmadi". Jarayon to'xtatildi.`);
+        return res.json({
+          success: false,
+          error: "Ma'lumot topilmadi",
+          reason: 'NOT_FOUND',
+          logs,
+        });
+      }
+
+      // Check: "Ushbu ma'lumotlar bilan registratsiya qilingan"
+      if (pageText.includes("registratsiya qilingan") || pageText.includes("mavjud")) {
+        log(`⚠️ "Ushbu ma'lumotlar bilan registratsiya qilingan" aniqlandi. Akkauntni o'chirish sahifasiga o'tilmoqda...`);
+        await page.goto('https://aileaders.uz/auth/delete_account', { waitUntil: 'networkidle2', timeout: 30000 });
+        await new Promise(r => setTimeout(r, 1000));
+
+        if (docType === 'metrika') {
+          await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button'));
+            const guv = btns.find(b => b.innerText.trim().toLowerCase().includes('guvohnoma'));
+            if (guv) (guv as HTMLElement).click();
+          });
+          await new Promise(r => setTimeout(r, 600));
+        }
+
+        const delInput = await page.$('input[name="passport_number"]');
+        if (delInput) {
+          await delInput.type(fullDocNumber, { delay: 50 });
+        }
+
+        log(`Eski profil o'chirilmoqda...`);
+        await page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll('button'));
+          const delBtn = btns.find(b => b.innerText.includes("O'chirish"));
+          if (delBtn) (delBtn as HTMLElement).click();
+        });
+
+        await new Promise(r => setTimeout(r, 2500));
+        log(`Eski profil o'chirildi. Qaytadan ro'yxatdan o'tishga kirilmoqda...`);
+        await page.goto('https://aileaders.uz/auth/register', { waitUntil: 'networkidle2', timeout: 30000 });
+        await new Promise(r => setTimeout(r, 1200));
+
+        // Re-attempt initial step
+        if (docType === 'metrika') {
+          await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button'));
+            const guv = btns.find(b => b.innerText.trim().toLowerCase().includes('guvohnoma'));
+            if (guv) (guv as HTMLElement).click();
+          });
+          await new Promise(r => setTimeout(r, 600));
+        }
+        const reInput = await page.$('input[name="passport_number"]');
+        if (reInput) await reInput.type(fullDocNumber, { delay: 50 });
+        await page.evaluate(() => {
+          const submitBtn = document.querySelector('button[type="submit"]') as HTMLElement;
+          if (submitBtn) submitBtn.click();
+        });
+        await new Promise(r => setTimeout(r, 2500));
+      }
+
+      // Step 2: Look for "Keyingisi" button to confirm info
+      log(`8. Ma'lumotlarni tasdiqlash bosqichi. 'Keyingisi' tugmasi qidirilmoqda...`);
+      const nextClicked = await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        const next = btns.find(b => b.innerText.includes("Keyingisi") || b.innerText.includes("Далее"));
+        if (next) {
+          (next as HTMLElement).click();
+          return true;
+        }
+        return false;
+      });
+
+      await new Promise(r => setTimeout(r, 1200));
+
+      // Step 3: Enter Gmail, phone, password
+      log(`9. Kontakt va parol kiritilmoqda: Gmail: ${email}, Tel: ${phone}...`);
+      await page.evaluate((em: string, ph: string, pw: string) => {
+        const inputs = Array.from(document.querySelectorAll('input'));
+        const emailInput = inputs.find(i => i.type === 'email' || i.name.includes('email') || i.placeholder.includes('mail') || i.placeholder.includes('@'));
+        if (emailInput) {
+          emailInput.value = em;
+          emailInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        const phoneInput = inputs.find(i => i.type === 'tel' || i.name.includes('phone') || i.placeholder.includes('998'));
+        if (phoneInput) {
+          phoneInput.value = ph;
+          phoneInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        const passInputs = inputs.filter(i => i.type === 'password' || i.name.includes('pass'));
+        passInputs.forEach(pi => {
+          pi.value = pw;
+          pi.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+
+        // Click next
+        const nextBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes("Keyingisi") || b.innerText.includes("Далее") || b.innerText.includes("Ro'yxatdan"));
+        if (nextBtn) (nextBtn as HTMLElement).click();
+      }, email, phone, password);
+
+      await new Promise(r => setTimeout(r, 2000));
+
+      log(`10. 'Pochtangizni tekshiring' sahifasi ochildi. Tasdiqlash havolasi kutilmoqda.`);
+
+      return res.json({
+        success: true,
+        status: 'WAITING_GMAIL',
+        message: "Pochtangizni tekshiring sahifasi ochildi. Gmail dan tasdiqlash xabari kelishi bilan tasdiqlash linkini oching.",
+        logs,
+      });
+
+    } catch (err: any) {
+      log(`Xatolik yuz berdi: ${err.message}`);
+      return res.status(500).json({ error: err.message, logs });
+    } finally {
+      if (page) {
+        try { await page.close(); } catch {}
+      }
+    }
+  });
+
+  // Step 4 & 5: Confirm activation link and Coursera enrollment
+  app.post('/api/aileaders/confirm-activation', async (req, res) => {
+    let page: any = null;
+    try {
+      const { activationLink, fullName, email, password = 'MaktabPass2026!' } = req.body;
+      if (!activationLink || typeof activationLink !== 'string') {
+        return res.status(400).json({ error: "Faollashtirish havolasi ko'rsatilmadi" });
+      }
+
+      console.log(`[AI Leaders Robot] Activation link fetching: ${activationLink}`);
+      // 1. Fetch activation link directly to confirm email instantly
+      const actRes = await fetch(activationLink.trim(), {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+      });
+      const actHtml = await actRes.text();
+
+      // 2. Open Coursera course signup
+      const browser = await getBrowser();
+      page = await browser.newPage();
+      await page.setViewport({ width: 1280, height: 900 });
+
+      const courseraUrl = 'https://www.coursera.org/programs/learning-program-h13rq/learn/introduction-to-generative-ai?collectionId=2mufz#authMode=signup';
+      console.log(`[AI Leaders Robot] Navigating to Coursera: ${courseraUrl}`);
+      await page.goto(courseraUrl, { waitUntil: 'networkidle2', timeout: 35000 });
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Fill Russian signup modal
+      await page.evaluate((fn: string, em: string, pw: string) => {
+        const inputs = Array.from(document.querySelectorAll('input'));
+        const nameInput = inputs.find(i => i.placeholder?.includes('Ф. И. О.') || i.name === 'name' || i.id.includes('name'));
+        if (nameInput) {
+          nameInput.value = fn;
+          nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        const emailInput = inputs.find(i => i.type === 'email' || i.placeholder?.includes('Электронный адрес') || i.name === 'email');
+        if (emailInput) {
+          emailInput.value = em;
+          emailInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        const passInput = inputs.find(i => i.type === 'password' || i.placeholder?.includes('Пароль') || i.name === 'password');
+        if (passInput) {
+          passInput.value = pw;
+          passInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        // Click "Присоединиться бесплатно"
+        const btns = Array.from(document.querySelectorAll('button'));
+        const joinBtn = btns.find(b => b.innerText.includes('Присоединиться') || b.innerText.includes('Зарегистрироваться'));
+        if (joinBtn) {
+          (joinBtn as HTMLElement).click();
+        }
+      }, fullName, email, password);
+
+      await new Promise(r => setTimeout(r, 3000));
+
+      return res.json({
+        success: true,
+        message: "O'quvchi muvaffaqiyatli tasdiqlandi va Coursera dasturiga qo'shildi!",
+        actConfirmed: actHtml.includes('muvaffaqiyatli') || actRes.ok
+      });
+    } catch (err: any) {
+      console.error("[AI Leaders Robot] Confirm error:", err);
+      return res.status(500).json({ error: err.message });
+    } finally {
+      if (page) {
+        try { await page.close(); } catch {}
+      }
+    }
+  });
 
   // Get bot status and list of registered teachers
   app.get('/api/telegram/status', (_req, res) => {

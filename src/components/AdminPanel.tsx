@@ -4,7 +4,9 @@ import { SessionsManagementTab } from './SessionsManagementTab';
 import { TelegramBotTab } from './TelegramBotTab';
 import { TeacherCertificatesTab } from './TeacherCertificatesTab';
 import { GmailGeneratorModal } from './GmailGeneratorModal';
+import { OperatorSpeedAnalyticsModal } from './OperatorSpeedAnalyticsModal';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
+import { analyzeOperatorSpeed, getStoredCertifyLogs } from '../utils/operatorSpeedTracker';
 import { 
   Users, 
   Award, 
@@ -42,7 +44,9 @@ import {
   AlertOctagon,
   Check,
   GraduationCap,
-  Zap
+  Zap,
+  Flame,
+  Trophy
 } from 'lucide-react';
 
 export interface UnifiedItem {
@@ -128,6 +132,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [selectedClassId, setSelectedClassId] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [isGmailGeneratorOpen, setIsGmailGeneratorOpen] = useState(false);
+  const [isSpeedModalOpen, setIsSpeedModalOpen] = useState(false);
+
+  // Real-time operator speed & activity analysis with 15-minute gap threshold
+  const operatorAnalysis = useMemo(() => analyzeOperatorSpeed(getStoredCertifyLogs(students)), [students]);
   
   // Non-blocking quick toast without OK button
   const [quickToast, setQuickToast] = useState('');
@@ -531,6 +539,73 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               <span>Chiqish</span>
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* Real-time Operator Speed & Activity Live Bar (15-min threshold, records, prediction) */}
+      <div 
+        onClick={() => setIsSpeedModalOpen(true)}
+        className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex flex-wrap items-center justify-between gap-3 shadow-xs hover:shadow-md ${
+          operatorAnalysis.isActive
+            ? 'bg-gradient-to-r from-amber-500/15 via-orange-500/10 to-amber-500/15 border-amber-300/80 hover:border-amber-400'
+            : 'bg-white border-slate-200/90 hover:border-slate-300'
+        }`}
+        title="Operator ish tezligi, kechagi bilan solishtirish, grafik va prognozni ko'rish uchun bosing"
+      >
+        <div className="flex items-center gap-3">
+          <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${
+            operatorAnalysis.isActive ? 'bg-amber-500 text-white shadow-xs animate-pulse' : 'bg-slate-100 text-slate-600'
+          }`}>
+            {operatorAnalysis.isActive ? <Flame className="w-5 h-5 fill-white" /> : <Clock className="w-5 h-5" />}
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
+                {operatorAnalysis.isActive ? (
+                  <>
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
+                    <span className="text-emerald-700">Faol Ish Seansi:</span>
+                    <span className="text-amber-800 font-extrabold">1 sertifikat ~ {operatorAnalysis.todayAverageFormatted}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-slate-700">Operator Ish Sur'ati:</span>
+                    <span className="text-slate-900 font-bold">
+                      {operatorAnalysis.todayAverageSeconds > 0 
+                        ? `Bugun: 1 ta / ${operatorAnalysis.todayAverageFormatted}` 
+                        : `O'rtacha: ${operatorAnalysis.overallAverageFormatted}`}
+                    </span>
+                  </>
+                )}
+              </span>
+              {operatorAnalysis.isActive && (
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-200/80 text-amber-950">
+                  {operatorAnalysis.streakCount} ta ketma-ket
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              {operatorAnalysis.isActive
+                ? `Oxirgi kiritish: ${operatorAnalysis.currentIntervalFormatted}. Tahlil va grafikni ko'rish uchun bosing ↗`
+                : `Oxirgi kiritish: ${operatorAnalysis.currentIntervalFormatted}. (15 daqiqadan oshgani sababli ish to'xtatilgan deb hisoblandi) • Grafikni ochish ↗`}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 sm:gap-3">
+          {operatorAnalysis.recordSeconds > 0 && (
+            <div className="hidden sm:flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg bg-amber-50 text-amber-900 border border-amber-200">
+              <Trophy className="w-3.5 h-3.5 text-amber-600" />
+              <span>Rekord: <strong>{operatorAnalysis.recordFormatted}</strong></span>
+            </div>
+          )}
+          <button
+            type="button"
+            className="text-xs font-bold px-3 py-1.5 rounded-xl bg-slate-900 text-white hover:bg-slate-800 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
+          >
+            <Zap className="w-3.5 h-3.5 text-amber-400" />
+            <span>Tezlik Grafigi & Prognoz</span>
+          </button>
         </div>
       </div>
 
@@ -1916,6 +1991,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           }
           setQuickToast(`✅ ${newEmails.length} ta yangi bo'sh Gmail zaxiraga qo'shildi!`);
         }}
+      />
+
+      {/* Operator Speed Analytics & Predictions Modal */}
+      <OperatorSpeedAnalyticsModal
+        isOpen={isSpeedModalOpen}
+        onClose={() => setIsSpeedModalOpen(false)}
+        analysis={operatorAnalysis}
       />
     </div>
   );

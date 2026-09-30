@@ -29,6 +29,7 @@ import {
   syncDeleteTeacherMessage,
   syncSaveSingleEmail
 } from './lib/firestoreService';
+import { recordCertifyEvent } from './utils/operatorSpeedTracker';
 import { 
   ShieldCheck, 
   Lock, 
@@ -272,15 +273,24 @@ export default function App() {
 
   // Student Actions
   const handleSaveStudent = async (student: Student) => {
-    setStudents(prev => {
-      const exists = prev.some(s => s.id === student.id);
-      if (exists) {
-        return prev.map(s => s.id === student.id ? student : s);
+    let studentToSave = { ...student };
+    if (studentToSave.certificateLink && studentToSave.certificateLink.trim().length > 5) {
+      studentToSave.status = 'certified';
+      if (!studentToSave.certifiedAt) {
+        studentToSave.certifiedAt = new Date().toISOString();
       }
-      return [...prev, student];
+      recordCertifyEvent(studentToSave.id, studentToSave.fullName, studentToSave.certifiedAt);
+    }
+
+    setStudents(prev => {
+      const exists = prev.some(s => s.id === studentToSave.id);
+      if (exists) {
+        return prev.map(s => s.id === studentToSave.id ? studentToSave : s);
+      }
+      return [...prev, studentToSave];
     });
     setActiveStudentModal(null);
-    await syncSaveStudent(student);
+    await syncSaveStudent(studentToSave);
   };
 
   const handleAddSingleStudent = async (student: Student, updatedPool?: EmailAccount[]) => {

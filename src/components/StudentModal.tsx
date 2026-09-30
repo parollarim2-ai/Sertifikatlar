@@ -3,6 +3,7 @@ import { Student, ClassGroup } from '../types';
 import { printCertificate } from '../utils/certificateGenerator';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
 import { recordCertifyEvent } from '../utils/operatorSpeedTracker';
+import { AiLeadersAutomationModal } from './AiLeadersAutomationModal';
 import { 
   X, 
   Clipboard, 
@@ -84,6 +85,7 @@ export const StudentModal: React.FC<StudentModalProps> = ({
   const [isProblemMode, setIsProblemMode] = useState(!!student?.hasError);
   const [allowDuplicateName, setAllowDuplicateName] = useState(false);
   const [quickCopiedField, setQuickCopiedField] = useState('');
+  const [isAiLeadersOpen, setIsAiLeadersOpen] = useState(false);
 
   const passportInputRef = useRef<HTMLInputElement>(null);
 
@@ -625,14 +627,26 @@ export const StudentModal: React.FC<StudentModalProps> = ({
             </div>
 
             {isAdmin && (
-              <button
-                type="button"
-                onClick={handlePasteClipboardLink}
-                className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-blue-700 hover:bg-blue-800 text-white shadow-xs flex items-center gap-2 transition-colors cursor-pointer"
-              >
-                <Clipboard className="w-4 h-4" />
-                <span>Havolani avtomatik buferdan qo'yish (Paste)</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handlePasteClipboardLink}
+                  className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-blue-700 hover:bg-blue-800 text-white shadow-xs flex items-center gap-2 transition-colors cursor-pointer"
+                >
+                  <Clipboard className="w-4 h-4" />
+                  <span>Havolani avtomatik buferdan qo'yish (Paste)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIsAiLeadersOpen(true)}
+                  className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-indigo-600 via-blue-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02]"
+                  title="aileaders.uz va Coursera saytida ro'yxatdan o'tkazish avtomati"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>⚡️ Sertifikat olish (AI Leaders & Coursera Avtomat)</span>
+                </button>
+              </div>
             )}
 
             <div className="flex items-center gap-2">
@@ -782,6 +796,20 @@ export const StudentModal: React.FC<StudentModalProps> = ({
           </div>
         </form>
       </div>
+
+      {/* AI Leaders & Coursera Automation Modal */}
+      {isAiLeadersOpen && (
+        <AiLeadersAutomationModal
+          isOpen={isAiLeadersOpen}
+          onClose={() => setIsAiLeadersOpen(false)}
+          student={formData}
+          classGroup={classGroup}
+          onSaveStudent={(upd) => {
+            setFormData(upd);
+            onSave(upd);
+          }}
+        />
+      )}
     </div>
   );
 };

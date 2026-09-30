@@ -1,11 +1,18 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { jsPDF } from 'jspdf';
 import type { ClassGroup, Student, TelegramUser } from './src/types/index.ts';
 
 const BOT_TOKEN = '8846557313:AAE5J1aRrvJJ2LLZCbD7WlI_JFzhSrmR_tA';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const DATA_FILE = path.resolve(process.cwd(), 'telegram-data.json');
+const CERT_CACHE_DIR = path.resolve(process.cwd(), '.cert_cache');
+try {
+  if (!fs.existsSync(CERT_CACHE_DIR)) {
+    fs.mkdirSync(CERT_CACHE_DIR, { recursive: true });
+  }
+} catch {}
 
 interface StoredData {
   classes: ClassGroup[];
@@ -320,79 +327,116 @@ function getDashboardPayload(classGroup: ClassGroup, students: Student[]) {
   return { text, reply_markup: { inline_keyboard } };
 }
 
-// Low-level helper to fetch the real, official Coursera certificate image
+// Low-level helper to fetch the real, official Coursera certificate image with disk caching
 async function fetchRealCertificateImage(certificateLink: string): Promise<Buffer | null> {
   if (!certificateLink || typeof certificateLink !== 'string') return null;
   const trimmed = certificateLink.trim();
+  if (trimmed.length < 5) return null;
 
-  // If already base64 image
-  if (trimmed.startsWith('data:image/')) {
-    const parts = trimmed.split(',');
-    return Buffer.from(parts[1], 'base64');
+  // 1. Check disk cache first for 0ms instant retrieval
+  const cacheKey = crypto.createHash('md5').update(trimmed).digest('hex');
+  const cachePath = path.join(CERT_CACHE_DIR, `${cacheKey}.jpg`);
+  if (fs.existsSync(cachePath)) {
+    try {
+      const cachedBuf = fs.readFileSync(cachePath);
+      if (cachedBuf.length > 5000) {
+        return cachedBuf;
+      }
+    } catch {}
   }
 
-  try {
-    const res = await fetch(trimmed, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      },
-      signal: AbortSignal.timeout(8000),
-    });
+  // 2. If already base64 image
+  if (trimmed.startsWith('data:image/')) {
+    const parts = trimmed.split(',');
+    const buf = Buffer.from(parts[1], 'base64');
+    try { fs.writeFileSync(cachePath, buf); } catch {}
+    return buf;
+  }
 
-    if (res.ok) {
-      const contentType = res.headers.get('content-type') || '';
-      if (contentType.startsWith('image/')) {
-        const arr = await res.arrayBuffer();
-        return Buffer.from(arr);
-      }
+  // 3. Fetch from Coursera with retry
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await fetch(trimmed, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        },
+        signal: AbortSignal.timeout(12000),
+      });
 
-      const html = await res.text();
-      // 1. og:image or twitter:image
-      const ogMatch = html.match(/<meta[^>]*property=["'](?:og:image|twitter:image(?::src)?)["'][^>]*content=["']([^"']+)["']/i) ||
-                      html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["'](?:og:image|twitter:image(?::src)?)["']/i);
-      let targetImgUrl = ogMatch ? ogMatch[1] : null;
-      if (targetImgUrl && targetImgUrl.includes('Grid_Coursera_Partners')) targetImgUrl = null;
-
-      // 2. Direct <img> tag for CERTIFICATE_LANDING_PAGE
-      if (!targetImgUrl) {
-        const imgMatch = html.match(/<img[^>]+src=["'](https:\/\/[^"']+coursera_assets[^"']+CERTIFICATE_LANDING_PAGE[^"']+)["']/i);
-        if (imgMatch) targetImgUrl = imgMatch[1];
-      }
-
-      // 3. Fallback id pattern in URL
-      if (!targetImgUrl) {
-        const idMatch = trimmed.match(/(?:verify|share)\/([A-Za-z0-9]+)/);
-        if (idMatch && idMatch[1]) {
-          targetImgUrl = `https://s3.amazonaws.com/coursera_assets/meta_images/generated/CERTIFICATE_LANDING_PAGE/CERTIFICATE_LANDING_PAGE~${idMatch[1]}/CERTIFICATE_LANDING_PAGE~${idMatch[1]}.jpeg`;
-        }
-      }
-
-      if (targetImgUrl) {
-        const imgRes = await fetch(targetImgUrl, { signal: AbortSignal.timeout(8000) });
-        if (imgRes.ok) {
-          const arr = await imgRes.arrayBuffer();
+      if (res.ok) {
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.startsWith('image/')) {
+          const arr = await res.arrayBuffer();
           const buf = Buffer.from(arr);
           if (buf.length > 5000) {
+            try { fs.writeFileSync(cachePath, buf); } catch {}
             return buf;
           }
         }
+
+        const html = await res.text();
+        let targetImgUrl: string | null = null;
+
+        // A. Extract official Coursera accomplishment ID directly from page HTML
+        const landingPageMatch = html.match(/CERTIFICATE_LANDING_PAGE~([A-Za-z0-9]+)/);
+        if (landingPageMatch && landingPageMatch[1]) {
+          targetImgUrl = `https://s3.amazonaws.com/coursera_assets/meta_images/generated/CERTIFICATE_LANDING_PAGE/CERTIFICATE_LANDING_PAGE~${landingPageMatch[1]}/CERTIFICATE_LANDING_PAGE~${landingPageMatch[1]}.jpeg`;
+        }
+
+        // B. og:image or twitter:image
+        if (!targetImgUrl) {
+          const ogMatch = html.match(/<meta[^>]*(?:property|name)=["'](?:og:image|twitter:image(?::src)?)["'][^>]*content=["']([^"']+)["']/i) ||
+                          html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*(?:property|name)=["'](?:og:image|twitter:image(?::src)?)["']/i);
+          if (ogMatch && ogMatch[1] && !ogMatch[1].includes('Grid_Coursera_Partners')) {
+            targetImgUrl = ogMatch[1].replace(/&amp;/g, '&');
+          }
+        }
+
+        // C. Direct <img> tag for CERTIFICATE_LANDING_PAGE
+        if (!targetImgUrl) {
+          const imgMatch = html.match(/<img[^>]+src=["'](https:\/\/[^"']+coursera_assets[^"']+CERTIFICATE_LANDING_PAGE[^"']+)["']/i);
+          if (imgMatch) targetImgUrl = imgMatch[1].replace(/&amp;/g, '&');
+        }
+
+        // D. Fallback id pattern in URL (e.g. verify/ABC123XYZ)
+        if (!targetImgUrl) {
+          const idMatch = trimmed.match(/verify\/([A-Za-z0-9]+)/);
+          if (idMatch && idMatch[1]) {
+            targetImgUrl = `https://s3.amazonaws.com/coursera_assets/meta_images/generated/CERTIFICATE_LANDING_PAGE/CERTIFICATE_LANDING_PAGE~${idMatch[1]}/CERTIFICATE_LANDING_PAGE~${idMatch[1]}.jpeg`;
+          }
+        }
+
+        if (targetImgUrl) {
+          const imgRes = await fetch(targetImgUrl, { signal: AbortSignal.timeout(10000) });
+          if (imgRes.ok) {
+            const arr = await imgRes.arrayBuffer();
+            const buf = Buffer.from(arr);
+            if (buf.length > 5000) {
+              try { fs.writeFileSync(cachePath, buf); } catch {}
+              return buf;
+            }
+          }
+        }
       }
+    } catch (err: any) {
+      console.warn(`[Telegram PDF] Attempt ${attempt} fetching certificate from ${trimmed}:`, err.message);
     }
-  } catch (err: any) {
-    console.warn(`[Telegram PDF] Notice fetching certificate from ${trimmed}:`, err.message);
   }
 
-  // Fallback: direct id match on S3
-  const idMatch = trimmed.match(/(?:verify|share)\/([A-Za-z0-9]+)/);
+  // Final fallback: check direct ID in URL for verify links
+  const idMatch = trimmed.match(/verify\/([A-Za-z0-9]+)/);
   if (idMatch && idMatch[1]) {
     try {
       const s3Url = `https://s3.amazonaws.com/coursera_assets/meta_images/generated/CERTIFICATE_LANDING_PAGE/CERTIFICATE_LANDING_PAGE~${idMatch[1]}/CERTIFICATE_LANDING_PAGE~${idMatch[1]}.jpeg`;
-      const s3Res = await fetch(s3Url, { signal: AbortSignal.timeout(6000) });
+      const s3Res = await fetch(s3Url, { signal: AbortSignal.timeout(8000) });
       if (s3Res.ok) {
         const arr = await s3Res.arrayBuffer();
         const buf = Buffer.from(arr);
-        if (buf.length > 5000) return buf;
+        if (buf.length > 5000) {
+          try { fs.writeFileSync(cachePath, buf); } catch {}
+          return buf;
+        }
       }
     } catch {}
   }
@@ -960,6 +1004,7 @@ async function handleTelegramUpdate(update: any) {
     // G. Download Unified Multi-Page PDF (Method 2)
     if (data.startsWith('download_pdf_')) {
       const classId = data.replace('download_pdf_', '');
+      await ensureFreshFirestoreData();
       const cls = store.classes.find((c) => c.id === classId);
       if (!cls) {
         await answerCallbackQuery(cb.id, 'Sinf topilmadi');
