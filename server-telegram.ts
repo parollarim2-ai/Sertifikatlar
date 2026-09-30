@@ -320,19 +320,112 @@ function getDashboardPayload(classGroup: ClassGroup, students: Student[]) {
   return { text, reply_markup: { inline_keyboard } };
 }
 
+// Low-level helper to fetch the real, official Coursera certificate image
+async function fetchRealCertificateImage(certificateLink: string): Promise<Buffer | null> {
+  if (!certificateLink || typeof certificateLink !== 'string') return null;
+  const trimmed = certificateLink.trim();
+
+  // If already base64 image
+  if (trimmed.startsWith('data:image/')) {
+    const parts = trimmed.split(',');
+    return Buffer.from(parts[1], 'base64');
+  }
+
+  try {
+    const res = await fetch(trimmed, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (res.ok) {
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.startsWith('image/')) {
+        const arr = await res.arrayBuffer();
+        return Buffer.from(arr);
+      }
+
+      const html = await res.text();
+      // 1. og:image or twitter:image
+      const ogMatch = html.match(/<meta[^>]*property=["'](?:og:image|twitter:image(?::src)?)["'][^>]*content=["']([^"']+)["']/i) ||
+                      html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["'](?:og:image|twitter:image(?::src)?)["']/i);
+      let targetImgUrl = ogMatch ? ogMatch[1] : null;
+      if (targetImgUrl && targetImgUrl.includes('Grid_Coursera_Partners')) targetImgUrl = null;
+
+      // 2. Direct <img> tag for CERTIFICATE_LANDING_PAGE
+      if (!targetImgUrl) {
+        const imgMatch = html.match(/<img[^>]+src=["'](https:\/\/[^"']+coursera_assets[^"']+CERTIFICATE_LANDING_PAGE[^"']+)["']/i);
+        if (imgMatch) targetImgUrl = imgMatch[1];
+      }
+
+      // 3. Fallback id pattern in URL
+      if (!targetImgUrl) {
+        const idMatch = trimmed.match(/(?:verify|share)\/([A-Za-z0-9]+)/);
+        if (idMatch && idMatch[1]) {
+          targetImgUrl = `https://s3.amazonaws.com/coursera_assets/meta_images/generated/CERTIFICATE_LANDING_PAGE/CERTIFICATE_LANDING_PAGE~${idMatch[1]}/CERTIFICATE_LANDING_PAGE~${idMatch[1]}.jpeg`;
+        }
+      }
+
+      if (targetImgUrl) {
+        const imgRes = await fetch(targetImgUrl, { signal: AbortSignal.timeout(8000) });
+        if (imgRes.ok) {
+          const arr = await imgRes.arrayBuffer();
+          const buf = Buffer.from(arr);
+          if (buf.length > 5000) {
+            return buf;
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[Telegram PDF] Notice fetching certificate from ${trimmed}:`, err.message);
+  }
+
+  // Fallback: direct id match on S3
+  const idMatch = trimmed.match(/(?:verify|share)\/([A-Za-z0-9]+)/);
+  if (idMatch && idMatch[1]) {
+    try {
+      const s3Url = `https://s3.amazonaws.com/coursera_assets/meta_images/generated/CERTIFICATE_LANDING_PAGE/CERTIFICATE_LANDING_PAGE~${idMatch[1]}/CERTIFICATE_LANDING_PAGE~${idMatch[1]}.jpeg`;
+      const s3Res = await fetch(s3Url, { signal: AbortSignal.timeout(6000) });
+      if (s3Res.ok) {
+        const arr = await s3Res.arrayBuffer();
+        const buf = Buffer.from(arr);
+        if (buf.length > 5000) return buf;
+      }
+    } catch {}
+  }
+
+  return null;
+}
+
 // Generate the unified multi-page PDF on server for Telegram delivery
 async function buildUnifiedClassPdf(classGroup: ClassGroup, students: Student[]): Promise<Buffer> {
   const certifiedStudents = students
     .filter((s) => s.status === 'certified' && s.classId === classGroup.id)
     .sort((a, b) => a.fullName.localeCompare(b.fullName, 'uz'));
 
+  const total = certifiedStudents.length;
+
+  // Pre-fetch all real certificate images in parallel batches (5 at a time)
+  const imageBuffers: (Buffer | null)[] = new Array(total).fill(null);
+  const BATCH_SIZE = 5;
+  for (let b = 0; b < total; b += BATCH_SIZE) {
+    const chunk = certifiedStudents.slice(b, b + BATCH_SIZE);
+    const chunkBuffers = await Promise.all(
+      chunk.map((st) => fetchRealCertificateImage(st.certificateLink || ''))
+    );
+    for (let j = 0; j < chunkBuffers.length; j++) {
+      imageBuffers[b + j] = chunkBuffers[j];
+    }
+  }
+
   const doc = new jsPDF({
     orientation: 'landscape',
     unit: 'mm',
     format: 'a4',
   });
-
-  const total = certifiedStudents.length;
 
   for (let i = 0; i < total; i++) {
     const student = certifiedStudents[i];
@@ -354,24 +447,7 @@ async function buildUnifiedClassPdf(classGroup: ClassGroup, students: Student[])
     doc.setFontSize(10);
     doc.text(`${classGroup.name} sinfi | Sinf rahbari: ${classGroup.teacherName}`, 285, 11, { align: 'right' });
 
-    // Fetch certificate image
-    let imgBuffer: Buffer | null = null;
-    if (student.certificateLink) {
-      try {
-        const idMatch = student.certificateLink.match(/verify\/([A-Za-z0-9]+)/);
-        if (idMatch && idMatch[1]) {
-          const s3Url = `https://s3.amazonaws.com/coursera_assets/meta_images/generated/CERTIFICATE_LANDING_PAGE/CERTIFICATE_LANDING_PAGE~${idMatch[1]}/CERTIFICATE_LANDING_PAGE~${idMatch[1]}.jpeg`;
-          const s3Res = await fetch(s3Url, { signal: AbortSignal.timeout(6000) });
-          if (s3Res.ok) {
-            const arr = await s3Res.arrayBuffer();
-            imgBuffer = Buffer.from(arr);
-          }
-        }
-      } catch (e) {
-        console.warn('Direct s3 fetch in bot pdf error:', e);
-      }
-    }
-
+    const imgBuffer = imageBuffers[i];
     const imageX = 15;
     const imageY = 22;
     const imageW = 267;

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Student, ClassGroup } from '../types';
 import { printCertificate } from '../utils/certificateGenerator';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
+import { recordCertifyEvent } from '../utils/operatorSpeedTracker';
 import { 
   X, 
   Clipboard, 
@@ -19,8 +20,31 @@ import {
   CheckCircle2,
   Copy,
   AlertOctagon,
-  ShieldAlert
+  ShieldAlert,
+  Clock
 } from 'lucide-react';
+
+function formatExactCertificateTime(isoString?: string): string {
+  if (!isoString) return "—";
+  try {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return isoString;
+    const timeStr = d.toLocaleTimeString('uz-UZ', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+    const dateStr = d.toLocaleDateString('uz-UZ', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
+    return `${timeStr} (sekundigacha) • ${dateStr}`;
+  } catch {
+    return isoString;
+  }
+}
 
 interface StudentModalProps {
   student: Student | null;
@@ -129,6 +153,7 @@ export const StudentModal: React.FC<StudentModalProps> = ({
             status: 'certified',
             hasError: false,
             errorReason: '',
+            certifiedAt: prev.certifiedAt || new Date().toISOString(),
             certificateDate: prev.certificateDate || new Date().toISOString().split('T')[0],
             certificateNumber: prev.certificateNumber || `B1MD-${(classGroup?.name || 'MKT').replace(/[^a-zA-Z0-9]/g, '')}-${student.id.slice(-4)}`,
           }));
@@ -149,6 +174,7 @@ export const StudentModal: React.FC<StudentModalProps> = ({
         status: 'certified',
         hasError: false,
         errorReason: '',
+        certifiedAt: prev.certifiedAt || new Date().toISOString(),
         certificateDate: prev.certificateDate || new Date().toISOString().split('T')[0],
       }));
       setPasteNotice("Havola kiritildi!");
@@ -193,6 +219,11 @@ export const StudentModal: React.FC<StudentModalProps> = ({
       updated.hasError = false;
       if (updated.certificateLink && updated.certificateLink.trim().length > 5) {
         updated.status = 'certified';
+        if (!updated.certifiedAt) {
+          updated.certifiedAt = new Date().toISOString();
+        }
+        // Record speed analytics event
+        recordCertifyEvent(updated.id, updated.fullName, updated.certifiedAt);
       } else {
         updated.status = 'pending';
       }
@@ -629,6 +660,28 @@ export const StudentModal: React.FC<StudentModalProps> = ({
                 </a>
               )}
             </div>
+
+            {/* Exact Timestamp with Seconds - ONLY FOR CERTIFIED STUDENTS */}
+            {formData.status === 'certified' && (
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200/90 text-emerald-950 flex items-center justify-between text-xs shadow-2xs mt-2.5">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-emerald-100 flex items-center justify-center text-emerald-700 flex-shrink-0">
+                    <Clock className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="font-bold text-emerald-900 block text-xs">
+                      Sertifikat kiritilgan aniq vaqti (sekundigacha):
+                    </span>
+                    <span className="font-mono text-emerald-800 text-[11px] font-semibold">
+                      {formatExactCertificateTime(formData.certifiedAt || formData.certificateDate || formData.createdAt)}
+                    </span>
+                  </div>
+                </div>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-200/80 text-emerald-900 text-[10px] font-black uppercase tracking-wider">
+                  ✅ Tasdiqlangan
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Problem Details Form if problem mode is active */}

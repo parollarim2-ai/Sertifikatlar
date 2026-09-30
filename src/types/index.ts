@@ -16,6 +16,7 @@ export interface Student {
   errorReason?: string;
   errorImage?: string; // base64 or URL
   createdAt: string;
+  certifiedAt?: string; // EXACT timestamp with seconds when certificate was entered
 }
 
 export interface ClassGroup {
