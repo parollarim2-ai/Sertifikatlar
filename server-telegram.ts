@@ -627,6 +627,11 @@ export async function checkAndNotifyCompletedClasses(options?: { force?: boolean
 let isPolling = false;
 let updateOffset = 0;
 
+export function stopTelegramBot() {
+  isPolling = false;
+  console.log('🛑 [Telegram Bot] Bot polling stopped gracefully.');
+}
+
 export async function startTelegramBot() {
   if (isPolling) return;
 
@@ -647,6 +652,8 @@ export async function startTelegramBot() {
   isPolling = true;
   console.log('🤖 Telegram Bot polling service started for @Courseradan_bot');
 
+  let consecutive409Count = 0;
+
   const poll = async () => {
     while (isPolling) {
       try {
@@ -654,6 +661,7 @@ export async function startTelegramBot() {
           signal: AbortSignal.timeout(25000),
         });
         if (res.ok) {
+          consecutive409Count = 0;
           const data: any = await res.json();
           if (data.ok && Array.isArray(data.result)) {
             for (const update of data.result) {
@@ -662,15 +670,21 @@ export async function startTelegramBot() {
             }
           }
         } else if (res.status === 409) {
-          // Webhook conflict detected (409)
-          console.warn('[Telegram Bot] Conflict 409 detected. Clearing webhook and restarting Long-Polling...');
-          try {
-            await deleteTelegramWebhookDirect();
-          } catch (e: any) {
-            console.error('Error auto-deleting webhook on 409:', e.message);
+          consecutive409Count++;
+          // Telegram 409 Conflict: another instance (e.g. during Cloud Run deployment rollout or scale shift)
+          // is currently running getUpdates. Back off calmly without spamming deleteWebhook and restarting every 2s.
+          const backoffSec = Math.min(30, 5 * Math.min(consecutive409Count, 6));
+          if (consecutive409Count <= 2 || consecutive409Count % 6 === 0) {
+            console.warn(`[Telegram Bot] 409 Conflict: another instance is active. Standing by (backoff ${backoffSec}s)...`);
           }
-          await new Promise((r) => setTimeout(r, 2000));
+          if (consecutive409Count === 3) {
+            try {
+              await deleteTelegramWebhookDirect();
+            } catch {}
+          }
+          await new Promise((r) => setTimeout(r, backoffSec * 1000));
         } else {
+          consecutive409Count = 0;
           await new Promise((r) => setTimeout(r, 2000));
         }
       } catch (err: any) {

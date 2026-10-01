@@ -6,6 +6,7 @@ import { GoogleGenAI } from '@google/genai';
 import puppeteer, { Browser } from 'puppeteer';
 import {
   startTelegramBot,
+  stopTelegramBot,
   getTelegramUsers,
   syncDataFromClient,
   sendTelegramMessageToTeacher,
@@ -447,41 +448,81 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
 
       await new Promise(r => setTimeout(r, 600));
 
-      // Date Picker selection
+      // Date Picker selection - support DD.MM.YYYY, YYYY-MM-DD, DD/MM/YYYY
       log(`5. Tug'ilgan sana tanlanmoqda: ${birthDate}...`);
-      const dateParts = birthDate.split('-');
-      const year = dateParts[0] || '2010';
-      const monthNum = parseInt(dateParts[1] || '4', 10);
-      const dayNum = parseInt(dateParts[2] || '15', 10);
+      let dayNum = 15;
+      let monthNum = 4;
+      let yearStr = '2010';
 
-      const dateBtn = await page.$('#date');
-      if (dateBtn) {
-        await dateBtn.click();
-        await new Promise(r => setTimeout(r, 700));
-
-        // Select year, month, and day in popover
-        await page.evaluate((y: string, mIndex: number, d: number) => {
-          const popover = document.querySelector('[data-slot="popover-content"]') || document.body;
-          const selects = Array.from(popover.querySelectorAll('select'));
-          if (selects.length >= 2) {
-            // Month select
-            selects[0].selectedIndex = mIndex - 1;
-            selects[0].dispatchEvent(new Event('change', { bubbles: true }));
-            // Year select
-            const yearOpt = Array.from(selects[1].options).find(o => o.value === y || o.text === y);
-            if (yearOpt) {
-              selects[1].value = yearOpt.value;
-              selects[1].dispatchEvent(new Event('change', { bubbles: true }));
-            }
+      const cleanBirth = String(birthDate || '').trim();
+      if (cleanBirth.includes('.')) {
+        const parts = cleanBirth.split('.');
+        if (parts.length >= 3) {
+          dayNum = parseInt(parts[0], 10) || 15;
+          monthNum = parseInt(parts[1], 10) || 4;
+          yearStr = parts[2].trim() || '2010';
+        }
+      } else if (cleanBirth.includes('/')) {
+        const parts = cleanBirth.split('/');
+        if (parts.length >= 3) {
+          dayNum = parseInt(parts[0], 10) || 15;
+          monthNum = parseInt(parts[1], 10) || 4;
+          yearStr = parts[2].trim() || '2010';
+        }
+      } else if (cleanBirth.includes('-')) {
+        const parts = cleanBirth.split('-');
+        if (parts.length >= 3) {
+          if (parts[0].length === 4) {
+            yearStr = parts[0].trim();
+            monthNum = parseInt(parts[1], 10) || 4;
+            dayNum = parseInt(parts[2], 10) || 15;
+          } else {
+            dayNum = parseInt(parts[0], 10) || 15;
+            monthNum = parseInt(parts[1], 10) || 4;
+            yearStr = parts[2].trim() || '2010';
           }
+        }
+      }
 
-          // Click day button
-          const dayButtons = Array.from(popover.querySelectorAll('button.rdp-day_button, [role="gridcell"] button, button'));
-          const dayMatch = dayButtons.find(b => (b as HTMLElement).innerText.trim() === String(d));
+      log(`   Sana tahlili: Kun=${dayNum}, Oy=${monthNum}, Yil=${yearStr}`);
+
+      // Click date button to open popover
+      const dateOpened = await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        const dBtn = btns.find(b => b.innerText.includes('Kun tanlang') || b.id === 'date');
+        if (dBtn) {
+          dBtn.click();
+          return true;
+        }
+        return false;
+      });
+
+      if (dateOpened) {
+        await new Promise(r => setTimeout(r, 600));
+
+        // Use native Puppeteer page.select to reliably trigger React state in react-day-picker
+        try {
+          await page.select('select.rdp-months_dropdown', String(monthNum - 1));
+          await new Promise(r => setTimeout(r, 300));
+          await page.select('select.rdp-years_dropdown', String(yearStr));
+          await new Promise(r => setTimeout(r, 400));
+        } catch (selErr: any) {
+          log(`Ogohlantirish: Dropdown select orqali tanlashda xatolik: ${selErr.message}`);
+        }
+
+        // Click day button that is active in current month
+        await page.evaluate((d: number) => {
+          const popover = document.querySelector('[data-slot="popover-content"], [role="dialog"], [data-radix-popper-content-wrapper]') || document.body;
+          const dayButtons = Array.from(popover.querySelectorAll('button'));
+          const dayMatch = dayButtons.find(b => {
+            const el = b as HTMLElement;
+            const isOutside = el.classList.contains('rdp-day_outside') || el.classList.contains('day-outside') || el.getAttribute('aria-hidden') === 'true';
+            return !isOutside && el.innerText.trim() === String(d);
+          });
           if (dayMatch) {
             (dayMatch as HTMLElement).click();
           }
-        }, year, monthNum, dayNum);
+        }, dayNum);
 
         await new Promise(r => setTimeout(r, 600));
       }
@@ -489,21 +530,17 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
       // Occupation selection: Maktab
       log(`6. Faoliyat turi: 'Maktab' tanlanmoqda...`);
       await page.evaluate(() => {
-        const sel = document.querySelector('select[name="occupation"]') as HTMLSelectElement;
-        if (sel) {
-          sel.value = 'school';
-          sel.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-        // Also click UI select trigger if needed
-        const trigger = document.querySelector('[data-slot="select-trigger"]') as HTMLElement;
+        const btns = Array.from(document.querySelectorAll('button'));
+        const trigger = btns.find(b => b.innerText.includes('Tanlang') || b.getAttribute('data-slot') === 'select-trigger');
         if (trigger) {
-          trigger.click();
+          (trigger as HTMLElement).click();
         }
       });
-      await new Promise(r => setTimeout(r, 400));
+      await new Promise(r => setTimeout(r, 600));
+
       await page.evaluate(() => {
-        const schoolOption = Array.from(document.querySelectorAll('[role="option"], [data-slot="select-item"]'))
-          .find(el => (el as HTMLElement).innerText.includes('Maktab'));
+        const items = Array.from(document.querySelectorAll('[role="option"], [data-slot="select-item"]'));
+        const schoolOption = items.find(el => (el as HTMLElement).innerText.trim().includes('Maktab'));
         if (schoolOption) {
           (schoolOption as HTMLElement).click();
         }
@@ -514,18 +551,19 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
       // Click "Ro'yxatdan o'tish"
       log(`7. 'Ro'yxatdan o'tish' tugmasi bosilmoqda...`);
       await page.evaluate(() => {
-        const submitBtn = document.querySelector('button[type="submit"]') as HTMLElement;
+        const btns = Array.from(document.querySelectorAll('button'));
+        const submitBtn = btns.find(b => b.innerText.trim().includes("Ro'yxatdan o'tish") && (b.type === 'submit' || !b.type || b.type === 'button'));
         if (submitBtn) submitBtn.click();
       });
 
-      // Human-like pause to wait for server response
-      await new Promise(r => setTimeout(r, 2500));
+      // Wait for server response and UI transition
+      await new Promise(r => setTimeout(r, 3500));
 
       // Check for errors or success
       const pageText = await page.evaluate(() => document.body.innerText);
 
-      // Check: "Ma'lumot topilmadi"
-      if (pageText.includes("Ma'lumot topilmadi")) {
+      // Check: "Ma'lumotlar topilmadi" or "Ma'lumot topilmadi"
+      if (pageText.includes("topilmadi") || pageText.includes("passport_not_found")) {
         log(`❌ Aileaders natijasi: "Ma'lumot topilmadi". Jarayon to'xtatildi.`);
         return res.json({
           success: false,
@@ -585,11 +623,11 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
         await new Promise(r => setTimeout(r, 2500));
       }
 
-      // Step 2: Look for "Keyingisi" button to confirm info
-      log(`8. Ma'lumotlarni tasdiqlash bosqichi. 'Keyingisi' tugmasi qidirilmoqda...`);
+      // Step 2: Look for "Keyingi" button to confirm info
+      log(`8. Ma'lumotlarni tasdiqlash bosqichi. 'Keyingi' tugmasi bosilmoqda...`);
       const nextClicked = await page.evaluate(() => {
         const btns = Array.from(document.querySelectorAll('button'));
-        const next = btns.find(b => b.innerText.includes("Keyingisi") || b.innerText.includes("Далее"));
+        const next = btns.find(b => b.innerText.trim() === 'Keyingi' || b.innerText.includes("Keyingi") || b.innerText.includes("Далее"));
         if (next) {
           (next as HTMLElement).click();
           return true;
@@ -597,38 +635,65 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
         return false;
       });
 
-      await new Promise(r => setTimeout(r, 1200));
+      if (!nextClicked) {
+        log(`Ogohlantirish: 'Keyingi' tugmasi topilmadi yoki sahifa hali yangilanmadi.`);
+      }
 
-      // Step 3: Enter Gmail, phone, password
+      await new Promise(r => setTimeout(r, 1500));
+
+      // Step 3: Enter exact form fields: email, number, password1, password2
       log(`9. Kontakt va parol kiritilmoqda: Gmail: ${email}, Tel: ${phone}...`);
-      await page.evaluate((em: string, ph: string, pw: string) => {
-        const inputs = Array.from(document.querySelectorAll('input'));
-        const emailInput = inputs.find(i => i.type === 'email' || i.name.includes('email') || i.placeholder.includes('mail') || i.placeholder.includes('@'));
-        if (emailInput) {
-          emailInput.value = em;
-          emailInput.dispatchEvent(new Event('input', { bubbles: true }));
-        }
+      
+      const emailInput = await page.$('input[name="email"]');
+      if (emailInput) {
+        await emailInput.click({ clickCount: 3 });
+        await emailInput.type(email.trim(), { delay: 30 });
+      }
 
-        const phoneInput = inputs.find(i => i.type === 'tel' || i.name.includes('phone') || i.placeholder.includes('998'));
-        if (phoneInput) {
-          phoneInput.value = ph;
-          phoneInput.dispatchEvent(new Event('input', { bubbles: true }));
-        }
+      // Extract raw 9-digit or phone digits
+      const digitsOnly = phone.replace(/\D/g, '');
+      const localPhone = digitsOnly.startsWith('998') ? digitsOnly.slice(3) : digitsOnly;
+      const phoneInput = await page.$('input[name="number"]');
+      if (phoneInput) {
+        await phoneInput.click({ clickCount: 3 });
+        await phoneInput.type(localPhone || '880055688', { delay: 30 });
+      }
 
-        const passInputs = inputs.filter(i => i.type === 'password' || i.name.includes('pass'));
-        passInputs.forEach(pi => {
-          pi.value = pw;
-          pi.dispatchEvent(new Event('input', { bubbles: true }));
-        });
+      const p1Input = await page.$('input[name="password1"]');
+      if (p1Input) {
+        await p1Input.click({ clickCount: 3 });
+        await p1Input.type(password, { delay: 30 });
+      }
 
-        // Click next
-        const nextBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes("Keyingisi") || b.innerText.includes("Далее") || b.innerText.includes("Ro'yxatdan"));
-        if (nextBtn) (nextBtn as HTMLElement).click();
-      }, email, phone, password);
+      const p2Input = await page.$('input[name="password2"]');
+      if (p2Input) {
+        await p2Input.click({ clickCount: 3 });
+        await p2Input.type(password, { delay: 30 });
+      }
 
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 600));
 
-      log(`10. 'Pochtangizni tekshiring' sahifasi ochildi. Tasdiqlash havolasi kutilmoqda.`);
+      // Click final "Keyingi" / "Ro'yxatdan o'tish" to trigger email dispatch
+      log(`10. Ro'yxatdan o'tish yakunlanmoqda (Tasdiqlash xati yuborilmoqda)...`);
+      await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        const finishBtn = btns.find(b => 
+          b.innerText.trim() === 'Keyingi' || 
+          b.innerText.includes("Keyingi") || 
+          b.innerText.includes("Ro'yxatdan o'tish") ||
+          b.type === 'submit'
+        );
+        if (finishBtn) (finishBtn as HTMLElement).click();
+      });
+
+      await new Promise(r => setTimeout(r, 3000));
+
+      const finalCheckText = await page.evaluate(() => document.body.innerText);
+      if (finalCheckText.includes("allaqachon") || finalCheckText.includes("mavjud")) {
+        log(`⚠️ Ushbu email yoki telefon bilan allaqachon ro'yxatdan o'tilgan.`);
+      }
+
+      log(`11. 'Pochtangizni tekshiring' sahifasi ochildi. Tasdiqlash havolasi yuborildi.`);
 
       return res.json({
         success: true,
@@ -899,13 +964,6 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
     }
   });
 
-  // Start the background Telegram Bot runner
-  try {
-    startTelegramBot();
-  } catch (botErr) {
-    console.warn("Could not start Telegram Bot:", botErr);
-  }
-
   // Mount Vite development middlewares in dev mode, or serve static dist in production
   const isDev = process.env.NODE_ENV !== 'production';
 
@@ -952,9 +1010,31 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
     });
   }
 
-  app.listen(port, '0.0.0.0', () => {
+  const server = app.listen(port, '0.0.0.0', () => {
     console.log(`Server running on http://0.0.0.0:${port} (NODE_ENV: ${process.env.NODE_ENV || 'not set'})`);
+    // Start background Telegram Bot runner AFTER port is successfully listening
+    try {
+      startTelegramBot();
+    } catch (botErr) {
+      console.warn("Could not start Telegram Bot:", botErr);
+    }
   });
+
+  // Graceful shutdown on Cloud Run rollout / scale-down
+  const shutdown = () => {
+    console.log('Received shutdown signal, terminating gracefully...');
+    try {
+      stopTelegramBot();
+    } catch {}
+    server.close(() => {
+      console.log('HTTP server closed.');
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 startServer().catch(err => {

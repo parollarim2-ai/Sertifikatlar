@@ -67,19 +67,31 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
     series = sMatch ? sMatch[0].toUpperCase() : 'AA';
   }
 
-  const studentEmail = student.assignedEmail || 'akramxonsai.d.o.v0.2@gmail.com';
+  const [targetEmail, setTargetEmail] = useState<string>(student.assignedEmail || 'akramxonsai.d.o.v0.2@gmail.com');
+
+  // Compute the physical primary Gmail inbox (Google routes all dot-aliases to the dotless address)
+  const baseInbox = React.useMemo(() => {
+    const raw = (targetEmail || '').trim().toLowerCase();
+    const at = raw.indexOf('@');
+    if (at <= 0) return raw;
+    const user = raw.slice(0, at).replace(/\./g, '');
+    const dom = raw.slice(at + 1);
+    return `${user}@${dom}`;
+  }, [targetEmail]);
+
   const defaultPhone = '+998 (88) 005 56 88';
   const defaultPassword = 'MaktabPass2026!';
 
   useEffect(() => {
     if (isOpen) {
+      setTargetEmail(student.assignedEmail || 'akramxonsai.d.o.v0.2@gmail.com');
       setLogs([]);
       setCurrentStep(0);
       setErrorMessage('');
       setSuccessNotice('');
       setIsRunning(false);
     }
-  }, [isOpen]);
+  }, [isOpen, student.assignedEmail]);
 
   if (!isOpen) return null;
 
@@ -107,6 +119,8 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
       addLog(`🌐 https://aileaders.uz/auth/register saytiga ulanmoqda...`);
       setCurrentStep(1);
 
+      const emailToSend = targetEmail.trim() || student.assignedEmail || 'akramxonsaidov02@gmail.com';
+
       const res = await fetch('/api/aileaders/automate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -117,7 +131,7 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
           series,
           number: digits,
           birthDate: student.birthDate || '2010-04-15',
-          email: studentEmail,
+          email: emailToSend,
           phone: defaultPhone,
           password: defaultPassword,
           activationLink: activationLinkInput.trim() || undefined,
@@ -125,6 +139,14 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
       });
 
       const data = await res.json();
+
+      // If email was entered or edited, persist it to student
+      if (emailToSend !== student.assignedEmail) {
+        onSaveStudent({
+          ...student,
+          assignedEmail: emailToSend,
+        });
+      }
 
       if (!res.ok || data.error) {
         if (data.reason === 'NOT_FOUND' || data.error?.includes("Ma'lumot topilmadi")) {
@@ -151,7 +173,7 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
 
       if (data.status === 'WAITING_GMAIL') {
         setCurrentStep(4);
-        addLog("⏳ Gmail xabari kutilmoqda (noreply... / Привет). Havolani quyiga qo'yishingiz mumkin.");
+        addLog(`⏳ Tasdiqlash xabari "${baseInbox}" pochtasiga yuborildi. Havolani quyiga qo'ying.`);
         setIsRunning(false);
         return;
       }
@@ -176,6 +198,7 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
     addLog(`🔗 Tasdiqlash havolasi ochilmoqda: ${activationLinkInput.trim()}...`);
 
     try {
+      const emailToSend = targetEmail.trim() || student.assignedEmail || 'akramxonsaidov02@gmail.com';
       const res = await fetch('/api/aileaders/confirm-activation', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -183,7 +206,7 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
           activationLink: activationLinkInput.trim(),
           studentId: student.id,
           fullName: student.fullName,
-          email: studentEmail,
+          email: emailToSend,
           password: defaultPassword,
         }),
       });
@@ -307,28 +330,71 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
           </div>
 
           {/* Contact and credentials */}
-          <div className="p-3.5 rounded-xl bg-blue-50/60 border border-blue-200 space-y-2 text-xs">
+          <div className="p-4 rounded-xl bg-blue-50/70 border border-blue-200 space-y-3 text-xs">
             <div className="font-bold text-blue-950 flex items-center justify-between">
-              <span>Biriktirilgan Ma'lumotlar:</span>
-              <span className="text-[10px] font-normal text-blue-700">Avtomatik kiritiladi</span>
+              <span>Biriktirilgan Ma'lumotlar (Saytga kiritiladi):</span>
+              <span className="text-[10px] font-normal text-blue-700">Tahrirlash mumkin</span>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <div className="bg-white p-2 rounded border border-blue-200 flex items-center justify-between">
-                <span className="font-mono text-slate-800 truncate" title={studentEmail}>{studentEmail}</span>
-                <button type="button" onClick={() => handleCopy(studentEmail, "Gmail")} className="p-1 hover:bg-slate-100 rounded text-blue-600 cursor-pointer">
-                  <Copy className="w-3 h-3" />
+
+            {/* Editable Gmail Input with Base Inbox Indicator */}
+            <div className="bg-white p-3 rounded-xl border border-blue-200 space-y-2">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                <label className="text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
+                  <Mail className="w-3.5 h-3.5 text-blue-600" />
+                  <span>Saytga kiritiladigan Gmail manzili:</span>
+                </label>
+                <div className="text-[11px] text-slate-500 font-mono flex items-center gap-1">
+                  <span>Asosiy quti:</span>
+                  <span className="font-bold text-blue-900 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200">{baseInbox}</span>
+                </div>
+              </div>
+              
+              <div className="flex gap-2">
+                <input
+                  type="email"
+                  value={targetEmail}
+                  onChange={(e) => setTargetEmail(e.target.value)}
+                  placeholder="masalan: akramxonsaidov02@gmail.com"
+                  className="flex-1 px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:border-blue-600 focus:bg-white"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleCopy(targetEmail, "Gmail")}
+                  className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                  title="Nusxalash"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Nusxalash</span>
                 </button>
               </div>
-              <div className="bg-white p-2 rounded border border-blue-200 flex items-center justify-between">
-                <span className="font-mono text-slate-800">{defaultPhone}</span>
-                <button type="button" onClick={() => handleCopy(defaultPhone, "Telefon")} className="p-1 hover:bg-slate-100 rounded text-blue-600 cursor-pointer">
-                  <Copy className="w-3 h-3" />
+
+              {/* Crucial Account Clarification Notice */}
+              <div className="p-2.5 rounded-lg bg-amber-50/80 border border-amber-200 text-[11px] text-amber-950 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                <div className="leading-snug">
+                  <span className="font-bold">Eslatma:</span> Siz ushbu tizimni boshqa Google profili orqali ishlatayotgan bo'lsangiz ham, tasdiqlash xabari aynan yuqoridagi <b>{targetEmail}</b> manziliga (asosiy <b>{baseInbox}</b> pochta qutisiga) jo'natiladi! Iltimos, xabarni aynan shu pochtadan qidiring.
+                </div>
+              </div>
+            </div>
+
+            {/* Phone and Password */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div className="bg-white p-2.5 rounded-xl border border-blue-200 flex items-center justify-between">
+                <div>
+                  <div className="text-[10px] text-slate-500 font-bold uppercase">Telefon raqam:</div>
+                  <div className="font-mono font-bold text-slate-800 text-xs">{defaultPhone}</div>
+                </div>
+                <button type="button" onClick={() => handleCopy(defaultPhone, "Telefon")} className="p-1.5 hover:bg-slate-100 rounded-lg text-blue-600 cursor-pointer">
+                  <Copy className="w-3.5 h-3.5" />
                 </button>
               </div>
-              <div className="bg-white p-2 rounded border border-blue-200 flex items-center justify-between">
-                <span className="font-mono text-slate-800">{defaultPassword}</span>
-                <button type="button" onClick={() => handleCopy(defaultPassword, "Parol")} className="p-1 hover:bg-slate-100 rounded text-blue-600 cursor-pointer">
-                  <Copy className="w-3 h-3" />
+              <div className="bg-white p-2.5 rounded-xl border border-blue-200 flex items-center justify-between">
+                <div>
+                  <div className="text-[10px] text-slate-500 font-bold uppercase">Parol:</div>
+                  <div className="font-mono font-bold text-slate-800 text-xs">{defaultPassword}</div>
+                </div>
+                <button type="button" onClick={() => handleCopy(defaultPassword, "Parol")} className="p-1.5 hover:bg-slate-100 rounded-lg text-blue-600 cursor-pointer">
+                  <Copy className="w-3.5 h-3.5" />
                 </button>
               </div>
             </div>
@@ -391,13 +457,26 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
 
           {/* Gmail Activation Link Input */}
           <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-300 space-y-2.5">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
               <label className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
                 <Mail className="w-3.5 h-3.5 text-amber-700" />
-                <span>Gmail dan kelgan faollashtirish havolasi (Aktivatsiya):</span>
+                <span>Pochtangizga kelgan faollashtirish havolasi (Aktivatsiya):</span>
               </label>
-              <span className="text-[10px] text-amber-800">noreply / Привет {student.fullName.split(' ')[0]}</span>
+              <a
+                href={`https://mail.google.com/mail/u/0/#search/noreply`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[11px] font-bold text-blue-700 hover:text-blue-900 flex items-center gap-1 underline"
+              >
+                <span>Gmail'da qidirish (noreply)</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
             </div>
+
+            <div className="text-[11px] text-amber-900 bg-amber-100/60 p-2 rounded-lg">
+              Xabar <b>noreply</b> dan <b>"Привет {student.fullName.split(' ')[0]}"</b> sarlavhasi bilan keladi. Xat ichidagi <code>https://aileaders.uz/auth/activate/...</code> havolasini quyidagi katakka qo'ying:
+            </div>
+
             <div className="flex gap-2">
               <input
                 type="url"
@@ -410,14 +489,12 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
                 type="button"
                 onClick={handleActivateWithLink}
                 disabled={!activationLinkInput.trim() || isRunning}
-                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                className="px-4 py-2 bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-all shadow-xs cursor-pointer flex items-center gap-1.5"
               >
-                Tasdiqlash
+                <Zap className="w-3.5 h-3.5" />
+                <span>Tasdiqlash & Coursera</span>
               </button>
             </div>
-            <p className="text-[11px] text-amber-900">
-              Pochtaga kelgan xat ichidagi havolani shu yerga qo'ysangiz, tizim darhol tasdiqlab, Courseraga ulaydi.
-            </p>
           </div>
 
           {/* Live Progress Logs Console */}
