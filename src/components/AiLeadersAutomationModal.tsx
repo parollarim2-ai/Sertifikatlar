@@ -50,6 +50,7 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
   const [currentStep, setCurrentStep] = useState<number>(0);
   const [logs, setLogs] = useState<string[]>([]);
   const [activationLinkInput, setActivationLinkInput] = useState('');
+  const [courseraLinkInput, setCourseraLinkInput] = useState('');
   const [quickCopied, setQuickCopied] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [successNotice, setSuccessNotice] = useState('');
@@ -90,6 +91,8 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
       setErrorMessage('');
       setSuccessNotice('');
       setIsRunning(false);
+      setActivationLinkInput('');
+      setCourseraLinkInput('');
     }
   }, [isOpen, student.assignedEmail]);
 
@@ -117,7 +120,6 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
 
     try {
       addLog(`🌐 https://aileaders.uz/auth/register saytiga ulanmoqda...`);
-      setCurrentStep(1);
 
       const emailToSend = targetEmail.trim() || student.assignedEmail || 'akramxonsaidov02@gmail.com';
 
@@ -152,7 +154,6 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
         if (data.reason === 'NOT_FOUND' || data.error?.includes("Ma'lumot topilmadi")) {
           setErrorMessage("Qizil xatolik: 'Ma'lumot topilmadi'. O'quvchiga avtomatik xato belgilanmoqda.");
           addLog("❌ Aileaders: 'Ma'lumot topilmadi'. Tizimda o'quvchi xato deb belgilandi.");
-          // Update student status to error
           onSaveStudent({
             ...student,
             hasError: true,
@@ -172,14 +173,14 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
       }
 
       if (data.status === 'WAITING_GMAIL') {
-        setCurrentStep(4);
-        addLog(`⏳ Tasdiqlash xabari "${baseInbox}" pochtasiga yuborildi. Havolani quyiga qo'ying.`);
+        setCurrentStep(2);
+        addLog(`⏳ Aileaders tasdiqlash xati "${baseInbox}" pochtasiga yuborildi. Havolani quyiga qo'ying.`);
         setIsRunning(false);
         return;
       }
 
       if (data.success) {
-        setCurrentStep(5);
+        setCurrentStep(4);
         setSuccessNotice("✅ O'quvchi muvaffaqiyatli ro'yxatdan o'tkazildi!");
         addLog("🎉 O'quvchi Aileaders va Coursera dasturiga muvaffaqiyatli ulandi!");
       }
@@ -191,11 +192,16 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
     }
   };
 
-  // One-click activation link submit
-  const handleActivateWithLink = async () => {
-    if (!activationLinkInput.trim()) return;
+  // Step 2 -> Step 3: Confirm Aileaders activation link and launch Coursera enrollment
+  const handleActivateWithLink = async (skipLink: boolean = false) => {
+    if (!skipLink && !activationLinkInput.trim()) return;
     setIsRunning(true);
-    addLog(`🔗 Tasdiqlash havolasi ochilmoqda: ${activationLinkInput.trim()}...`);
+    setErrorMessage('');
+    if (skipLink) {
+      addLog(`🌐 To'g'ridan-to'g'ri Coursera dasturiga o'tilmoqda...`);
+    } else {
+      addLog(`🔗 Aileaders havolasi tasdiqlanmoqda va Courseraga o'tilmoqda: ${activationLinkInput.trim()}...`);
+    }
 
     try {
       const emailToSend = targetEmail.trim() || student.assignedEmail || 'akramxonsaidov02@gmail.com';
@@ -203,7 +209,7 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          activationLink: activationLinkInput.trim(),
+          activationLink: skipLink ? undefined : activationLinkInput.trim(),
           studentId: student.id,
           fullName: student.fullName,
           email: emailToSend,
@@ -212,16 +218,77 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
       });
 
       const data = await res.json();
-      if (data.success) {
-        setCurrentStep(5);
+      if (data.logs && Array.isArray(data.logs)) {
+        data.logs.forEach((l: string) => addLog(l));
+      }
+
+      if (data.status === 'WAITING_COURSERA_CONFIRMATION') {
+        setCurrentStep(3); // Waiting for Coursera email confirmation
+        setSuccessNotice("📬 Coursera tasdiqlash xati yuborildi! Pochtadagi 'Подтвердите адрес электронной почты' tugmasini bosing va pastdagi 'Tasdiqladim' tugmasini bosing.");
+        addLog("📬 Courseradan xat yuborildi. Pochtadagi 'Подтвердите адрес электронной почты' tugmasini bosing.");
+      } else if (data.success) {
+        setCurrentStep(4);
         setSuccessNotice("✅ Pochta muvaffaqiyatli tasdiqlandi va Coursera ro'yxatdan o'tkazildi!");
         addLog("✅ Pochta tasdiqlandi. Coursera dasturiga qo'shildi!");
+        onSaveStudent({
+          ...student,
+          assignedEmail: emailToSend,
+          assignedPassword: defaultPassword,
+          status: 'certified',
+          certifiedAt: new Date().toISOString(),
+        });
       } else {
         setErrorMessage(data.error || "Tasdiqlashda xatolik");
         addLog(`❌ ${data.error}`);
       }
     } catch (e: any) {
       setErrorMessage(e.message);
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  // Step 3 -> Step 4: Final Coursera verification confirmation ("Да, подтверждение выполнено" & "Все понятно")
+  const handleConfirmCourseraVerification = async () => {
+    setIsRunning(true);
+    setErrorMessage('');
+    addLog(`⏳ Coursera tasdiqlanmoqda ('Да, подтверждение выполнено' va 'Все понятно')...`);
+
+    try {
+      const emailToSend = targetEmail.trim() || student.assignedEmail || 'akramxonsaidov02@gmail.com';
+      const res = await fetch('/api/coursera/confirm-verification', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          studentId: student.id,
+          email: emailToSend,
+          courseraLink: courseraLinkInput.trim() || undefined,
+          password: defaultPassword,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.logs && Array.isArray(data.logs)) {
+        data.logs.forEach((l: string) => addLog(l));
+      }
+
+      if (data.success) {
+        setCurrentStep(4);
+        setSuccessNotice("🎉 Tabriklaymiz! O'quvchi Coursera dasturiga muvaffaqiyatli a'zo qilindi!");
+        addLog("🎉 O'quvchi Coursera dasturiga to'liq a'zo bo'ldi!");
+        onSaveStudent({
+          ...student,
+          assignedEmail: emailToSend,
+          assignedPassword: defaultPassword,
+          status: 'certified',
+          certifiedAt: new Date().toISOString(),
+        });
+      } else {
+        setErrorMessage(data.error || "Coursera tasdiqlashda xatolik");
+        addLog(`❌ ${data.error}`);
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message);
     } finally {
       setIsRunning(false);
     }
@@ -455,47 +522,188 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
             </div>
           )}
 
-          {/* Gmail Activation Link Input */}
-          <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-300 space-y-2.5">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
-              <label className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
-                <Mail className="w-3.5 h-3.5 text-amber-700" />
-                <span>Pochtangizga kelgan faollashtirish havolasi (Aktivatsiya):</span>
-              </label>
-              <a
-                href={`https://mail.google.com/mail/u/0/#search/noreply`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-[11px] font-bold text-blue-700 hover:text-blue-900 flex items-center gap-1 underline"
-              >
-                <span>Gmail'da qidirish (noreply)</span>
-                <ExternalLink className="w-3 h-3" />
-              </a>
-            </div>
+          {/* Step 2: Aileaders Activation Link Input */}
+          {(currentStep <= 2 || currentStep === 0) && (
+            <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-300 space-y-2.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                <label className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
+                  <Mail className="w-3.5 h-3.5 text-amber-700" />
+                  <span>1. Aileaders faollashtirish havolasi (Aktivatsiya):</span>
+                </label>
+                <a
+                  href={`https://mail.google.com/mail/u/0/#search/noreply`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[11px] font-bold text-blue-700 hover:text-blue-900 flex items-center gap-1 underline"
+                >
+                  <span>Gmail'da qidirish (noreply)</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
 
-            <div className="text-[11px] text-amber-900 bg-amber-100/60 p-2 rounded-lg">
-              Xabar <b>noreply</b> dan <b>"Привет {student.fullName.split(' ')[0]}"</b> sarlavhasi bilan keladi. Xat ichidagi <code>https://aileaders.uz/auth/activate/...</code> havolasini quyidagi katakka qo'ying:
-            </div>
+              <div className="text-[11px] text-amber-900 bg-amber-100/60 p-2 rounded-lg">
+                Xabar <b>noreply</b> dan <b>"Привет {student.fullName.split(' ')[0]}"</b> sarlavhasi bilan keladi. Xat ichidagi <code>https://aileaders.uz/auth/activate/...</code> havolasini quyidagi katakka qo'ying:
+              </div>
 
-            <div className="flex gap-2">
-              <input
-                type="url"
-                value={activationLinkInput}
-                onChange={e => setActivationLinkInput(e.target.value)}
-                placeholder="https://aileaders.uz/auth/activate/..."
-                className="flex-1 px-3 py-2 text-xs bg-white border border-amber-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:border-amber-600"
-              />
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="url"
+                  value={activationLinkInput}
+                  onChange={e => setActivationLinkInput(e.target.value)}
+                  placeholder="https://aileaders.uz/auth/activate/..."
+                  className="flex-1 px-3 py-2 text-xs bg-white border border-amber-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:border-amber-600"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleActivateWithLink(false)}
+                  disabled={!activationLinkInput.trim() || isRunning}
+                  className="px-4 py-2 bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-all shadow-xs cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>Tasdiqlash & Courseraga O'tish</span>
+                </button>
+              </div>
+
+              {/* Direct Coursera Bypass option */}
+              <div className="pt-1.5 flex items-center justify-between border-t border-amber-200/80 text-[11px]">
+                <span className="text-amber-900">Aileaders pochtasi allaqachon tasdiqlanganmi?</span>
+                <button
+                  type="button"
+                  onClick={() => handleActivateWithLink(true)}
+                  disabled={isRunning}
+                  className="font-bold text-blue-700 hover:text-blue-900 underline cursor-pointer"
+                >
+                  To'g'ridan-to'g'ri Courserani boshlash ➔
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Step 3: Coursera Verification Confirmation Step */}
+          {currentStep === 3 && (
+            <div className="p-4 rounded-xl bg-blue-50 border-2 border-blue-400 shadow-md space-y-3 animate-scale-up">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-blue-600 text-white flex items-center justify-center font-bold text-xs">
+                    C
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-blue-950 text-xs sm:text-sm">2-bosqich: Coursera Pochtani Tasdiqlash</h4>
+                    <p className="text-[11px] text-blue-700">Coursera xati {targetEmail} manziliga yuborildi</p>
+                  </div>
+                </div>
+                <a
+                  href="https://mail.google.com/mail/u/0/#search/Coursera"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[11px] font-bold text-blue-800 bg-blue-100 hover:bg-blue-200 px-2.5 py-1 rounded-lg flex items-center gap-1 transition-colors"
+                >
+                  <span>Gmail (Coursera)</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+
+              <div className="p-3 bg-white rounded-xl border border-blue-200 space-y-2 text-xs text-slate-800">
+                <div className="font-semibold text-blue-900 flex items-center gap-1.5">
+                  <Check className="w-4 h-4 text-emerald-600" />
+                  <span>Robot Courserada anketani to'ldirib, tasdiqlash xatini jo'natdi!</span>
+                </div>
+                <ol className="list-decimal list-inside space-y-1.5 text-slate-700 text-[11px] pl-1">
+                  <li>
+                    <b>Gmail pochtangizni oching</b> (Xat <b>"Coursera"</b> nomidan keladi).
+                  </li>
+                  <li>
+                    Xat ichidagi ko'k rangli <b>"Подтвердите адрес электронной почты"</b> tugmasini bosing.
+                  </li>
+                  <li>
+                    Pochtada tasdiqlaganingizdan so'ng, pastdagi ko'k <b>"✅ Tasdiqladim (Davom ettirish)"</b> tugmasini bosing!
+                  </li>
+                </ol>
+                <div className="text-[10px] text-slate-500 italic pt-1 border-t border-slate-100">
+                  ℹ️ Siz tugmani bosganingizdan so'ng robot <b>"Да, подтверждение выполнено"</b> hamda <b>"Все понятно"</b> tugmalarini avtomatik bosadi.
+                </div>
+              </div>
+
+              {/* Optional Coursera Link Input */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-semibold text-slate-600 block">
+                  Coursera xatidagi havola (ixtiyoriy, agar nusxalagan bo'lsangiz):
+                </label>
+                <input
+                  type="url"
+                  value={courseraLinkInput}
+                  onChange={e => setCourseraLinkInput(e.target.value)}
+                  placeholder="https://www.coursera.org/account/verify-email?token=... (ixtiyoriy)"
+                  className="w-full px-3 py-1.5 text-xs bg-white border border-blue-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:border-blue-600"
+                />
+              </div>
+
+              {/* Main Action Button */}
               <button
                 type="button"
-                onClick={handleActivateWithLink}
-                disabled={!activationLinkInput.trim() || isRunning}
-                className="px-4 py-2 bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-all shadow-xs cursor-pointer flex items-center gap-1.5"
+                onClick={handleConfirmCourseraVerification}
+                disabled={isRunning}
+                className="w-full py-3 px-4 bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 hover:from-blue-700 hover:to-indigo-700 text-white font-bold text-xs sm:text-sm rounded-xl shadow-md transition-all cursor-pointer flex items-center justify-center gap-2"
               >
-                <Zap className="w-3.5 h-3.5" />
-                <span>Tasdiqlash & Coursera</span>
+                {isRunning ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Coursera tasdiqlanmoqda ('Да, подтверждение выполнено')...</span>
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-4 h-4" />
+                    <span>✅ Tasdiqladim (Davom ettirish)</span>
+                  </>
+                )}
               </button>
             </div>
-          </div>
+          )}
+
+          {/* Step 4: Finished Complete Card */}
+          {currentStep === 4 && (
+            <div className="p-4 rounded-xl bg-emerald-50 border-2 border-emerald-300 text-emerald-950 space-y-3 animate-scale-up">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-full bg-emerald-600 text-white flex items-center justify-center font-bold">
+                  ✓
+                </div>
+                <div>
+                  <h4 className="font-bold text-emerald-950 text-sm">O'quvchi muvaffaqiyatli ro'yxatdan o'tdi!</h4>
+                  <p className="text-xs text-emerald-700">Aileaders va Coursera dasturiga to'liq a'zo qilindi.</p>
+                </div>
+              </div>
+
+              <div className="p-3 bg-white rounded-xl border border-emerald-200 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                <div>
+                  <span className="text-[10px] text-slate-500 font-bold uppercase block">Coursera Login (Email):</span>
+                  <span className="font-mono font-bold text-slate-900">{targetEmail}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-500 font-bold uppercase block">Coursera Parol:</span>
+                  <span className="font-mono font-bold text-slate-900">{defaultPassword}</span>
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="flex-1 py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs cursor-pointer transition-colors"
+                >
+                  Yopish
+                </button>
+                <a
+                  href="https://www.coursera.org"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="py-2.5 px-4 bg-white border border-emerald-300 hover:bg-emerald-50 text-emerald-900 font-bold text-xs rounded-xl flex items-center gap-1.5 transition-colors"
+                >
+                  <span>Courseraga Kirish</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              </div>
+            </div>
+          )}
 
           {/* Live Progress Logs Console */}
           {logs.length > 0 && (
