@@ -88,6 +88,33 @@
         "readDeviceName": { "type": "string" }
       },
       "required": ["classId", "title", "content", "isRead"]
+    },
+    "telegramUsers": {
+      "title": "TelegramUser",
+      "description": "Telegram bot users (class teachers)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "chatId": { "type": "number" },
+        "teacherName": { "type": "string" },
+        "classId": { "type": "string" },
+        "className": { "type": "string" },
+        "username": { "type": "string" },
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "lastActiveAt": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "chatId"]
+    },
+    "testDoc": {
+      "title": "TestDoc",
+      "description": "System test connection document",
+      "type": "object",
+      "properties": {
+        "status": { "type": "string" },
+        "timestamp": { "type": "string" }
+      }
     }
   },
   "firestore": {
@@ -110,6 +137,14 @@
     "/teacherMessages/{messageId}": {
       "schema": "teacherMessages",
       "description": "Direct messages sent to teachers"
+    },
+    "/telegramUsers/{userId}": {
+      "schema": "telegramUsers",
+      "description": "Collection of registered Telegram users"
+    },
+    "/test/{docId}": {
+      "schema": "testDoc",
+      "description": "Test connection document path"
     }
   }
 }

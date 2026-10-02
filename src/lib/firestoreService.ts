@@ -6,7 +6,7 @@ import {
   onSnapshot,
   writeBatch
 } from 'firebase/firestore';
-import { db } from './firebase';
+import { db, auth } from './firebase';
 import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage } from '../types';
 
 export const CLASSES_COLLECTION = 'classes';
@@ -14,6 +14,56 @@ export const STUDENTS_COLLECTION = 'students';
 export const EMAIL_POOL_COLLECTION = 'emailPool';
 export const SESSIONS_COLLECTION = 'sessions';
 export const TEACHER_MESSAGES_COLLECTION = 'teacherMessages';
+
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  };
+}
+
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errMessage = error instanceof Error ? error.message : String(error);
+  const errInfo: FirestoreErrorInfo = {
+    error: errMessage,
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  if (errMessage.includes('Missing or insufficient permissions') || errMessage.includes('permission-denied')) {
+    throw new Error(JSON.stringify(errInfo));
+  }
+}
 
 // Real-time listener for classes
 export function subscribeToClasses(onUpdate: (classes: ClassGroup[]) => void) {
@@ -26,10 +76,10 @@ export function subscribeToClasses(onUpdate: (classes: ClassGroup[]) => void) {
       });
       onUpdate(items);
     }, (error) => {
-      console.warn("Firestore classes listener error (using local state fallback):", error);
+      handleFirestoreError(error, OperationType.GET, CLASSES_COLLECTION);
     });
   } catch (err) {
-    console.warn("Firestore subscribe classes initialization failed:", err);
+    handleFirestoreError(err, OperationType.GET, CLASSES_COLLECTION);
     return () => {};
   }
 }
@@ -45,10 +95,10 @@ export function subscribeToStudents(onUpdate: (students: Student[]) => void) {
       });
       onUpdate(items);
     }, (error) => {
-      console.warn("Firestore students listener error (using local state fallback):", error);
+      handleFirestoreError(error, OperationType.GET, STUDENTS_COLLECTION);
     });
   } catch (err) {
-    console.warn("Firestore subscribe students initialization failed:", err);
+    handleFirestoreError(err, OperationType.GET, STUDENTS_COLLECTION);
     return () => {};
   }
 }
@@ -64,10 +114,10 @@ export function subscribeToEmailPool(onUpdate: (emails: EmailAccount[]) => void)
       });
       onUpdate(items);
     }, (error) => {
-      console.warn("Firestore emails listener error (using local state fallback):", error);
+      handleFirestoreError(error, OperationType.GET, EMAIL_POOL_COLLECTION);
     });
   } catch (err) {
-    console.warn("Firestore subscribe emailPool initialization failed:", err);
+    handleFirestoreError(err, OperationType.GET, EMAIL_POOL_COLLECTION);
     return () => {};
   }
 }
@@ -83,10 +133,10 @@ export function subscribeToSessions(onUpdate: (sessions: TeacherSession[]) => vo
       });
       onUpdate(items);
     }, (error) => {
-      console.warn("Firestore sessions listener error (using local state fallback):", error);
+      handleFirestoreError(error, OperationType.GET, SESSIONS_COLLECTION);
     });
   } catch (err) {
-    console.warn("Firestore subscribe sessions initialization failed:", err);
+    handleFirestoreError(err, OperationType.GET, SESSIONS_COLLECTION);
     return () => {};
   }
 }
@@ -102,10 +152,10 @@ export function subscribeToDeviceSession(deviceId: string, onUpdate: (session: T
         onUpdate(null);
       }
     }, (error) => {
-      console.warn("Firestore device session listener error:", error);
+      handleFirestoreError(error, OperationType.GET, `${SESSIONS_COLLECTION}/${deviceId}`);
     });
   } catch (err) {
-    console.warn("Firestore subscribe device session initialization failed:", err);
+    handleFirestoreError(err, OperationType.GET, `${SESSIONS_COLLECTION}/${deviceId}`);
     return () => {};
   }
 }
@@ -121,10 +171,10 @@ export function subscribeToTeacherMessages(onUpdate: (messages: TeacherMessage[]
       });
       onUpdate(items);
     }, (error) => {
-      console.warn("Firestore teacherMessages listener error (using local state fallback):", error);
+      handleFirestoreError(error, OperationType.GET, TEACHER_MESSAGES_COLLECTION);
     });
   } catch (err) {
-    console.warn("Firestore subscribe teacherMessages initialization failed:", err);
+    handleFirestoreError(err, OperationType.GET, TEACHER_MESSAGES_COLLECTION);
     return () => {};
   }
 }
@@ -135,7 +185,7 @@ export async function syncSaveClass(classGroup: ClassGroup) {
     const docRef = doc(db, CLASSES_COLLECTION, classGroup.id);
     await setDoc(docRef, classGroup, { merge: true });
   } catch (e) {
-    console.warn("Firestore syncSaveClass error:", e);
+    handleFirestoreError(e, OperationType.WRITE, `${CLASSES_COLLECTION}/${classGroup.id}`);
   }
 }
 
@@ -144,7 +194,7 @@ export async function syncDeleteClass(classId: string) {
   try {
     await deleteDoc(doc(db, CLASSES_COLLECTION, classId));
   } catch (e) {
-    console.warn("Firestore syncDeleteClass error:", e);
+    handleFirestoreError(e, OperationType.DELETE, `${CLASSES_COLLECTION}/${classId}`);
   }
 }
 
@@ -154,7 +204,7 @@ export async function syncSaveStudent(student: Student) {
     const docRef = doc(db, STUDENTS_COLLECTION, student.id);
     await setDoc(docRef, student, { merge: true });
   } catch (e) {
-    console.warn("Firestore syncSaveStudent error:", e);
+    handleFirestoreError(e, OperationType.WRITE, `${STUDENTS_COLLECTION}/${student.id}`);
   }
 }
 
@@ -172,7 +222,7 @@ export async function syncSaveBatchStudents(students: Student[]) {
       await batch.commit();
     }
   } catch (e) {
-    console.warn("Firestore batch write error, writing sequentially fallback:", e);
+    handleFirestoreError(e, OperationType.WRITE, STUDENTS_COLLECTION);
     for (const st of students) {
       await syncSaveStudent(st);
     }
@@ -184,18 +234,18 @@ export async function syncDeleteStudent(studentId: string) {
   try {
     await deleteDoc(doc(db, STUDENTS_COLLECTION, studentId));
   } catch (e) {
-    console.warn("Firestore syncDeleteStudent error:", e);
+    handleFirestoreError(e, OperationType.DELETE, `${STUDENTS_COLLECTION}/${studentId}`);
   }
 }
 
 // Save single email account immediately to avoid batch overhead
 export async function syncSaveSingleEmail(emailItem: EmailAccount) {
+  const safeId = emailItem.email.replace(/[@.]/g, '_');
   try {
-    const safeId = emailItem.email.replace(/[@.]/g, '_');
     const docRef = doc(db, EMAIL_POOL_COLLECTION, safeId);
     await setDoc(docRef, emailItem, { merge: true });
   } catch (e) {
-    console.warn("Firestore syncSaveSingleEmail error:", e);
+    handleFirestoreError(e, OperationType.WRITE, `${EMAIL_POOL_COLLECTION}/${safeId}`);
   }
 }
 
@@ -214,7 +264,7 @@ export async function syncSaveEmailPool(emails: EmailAccount[]) {
       await batch.commit();
     }
   } catch (e) {
-    console.warn("Firestore syncSaveEmailPool error:", e);
+    handleFirestoreError(e, OperationType.WRITE, EMAIL_POOL_COLLECTION);
   }
 }
 
@@ -241,17 +291,18 @@ export async function syncUpdateDeviceActivity(data: {
       lastActiveAt: data.lastActiveAt || new Date().toISOString(),
     }, { merge: true });
   } catch (e) {
-    console.warn("Firestore syncUpdateDeviceActivity error:", e);
+    handleFirestoreError(e, OperationType.WRITE, `${SESSIONS_COLLECTION}/${data.deviceId}`);
   }
 }
 
 // Save or update session
 export async function syncSaveSession(session: TeacherSession) {
+  const docId = session.id || session.deviceId;
   try {
-    const docRef = doc(db, SESSIONS_COLLECTION, session.id || session.deviceId);
+    const docRef = doc(db, SESSIONS_COLLECTION, docId);
     await setDoc(docRef, session, { merge: true });
   } catch (e) {
-    console.warn("Firestore syncSaveSession error:", e);
+    handleFirestoreError(e, OperationType.WRITE, `${SESSIONS_COLLECTION}/${docId}`);
   }
 }
 
@@ -268,7 +319,7 @@ export async function syncSetDeviceBlockStatus(deviceId: string, isBlocked: bool
       updatedAt: new Date().toISOString(),
     }, { merge: true });
   } catch (e) {
-    console.warn("Firestore syncSetDeviceBlockStatus error:", e);
+    handleFirestoreError(e, OperationType.WRITE, `${SESSIONS_COLLECTION}/${deviceId}`);
   }
 }
 
@@ -277,7 +328,7 @@ export async function syncDeleteSession(sessionId: string) {
   try {
     await deleteDoc(doc(db, SESSIONS_COLLECTION, sessionId));
   } catch (e) {
-    console.warn("Firestore syncDeleteSession error:", e);
+    handleFirestoreError(e, OperationType.DELETE, `${SESSIONS_COLLECTION}/${sessionId}`);
   }
 }
 
@@ -287,7 +338,7 @@ export async function syncSendTeacherMessage(message: TeacherMessage) {
     const docRef = doc(db, TEACHER_MESSAGES_COLLECTION, message.id);
     await setDoc(docRef, message, { merge: true });
   } catch (e) {
-    console.warn("Firestore syncSendTeacherMessage error:", e);
+    handleFirestoreError(e, OperationType.WRITE, `${TEACHER_MESSAGES_COLLECTION}/${message.id}`);
   }
 }
 
@@ -301,7 +352,7 @@ export async function syncMarkMessageAsRead(messageId: string, readDeviceName?: 
       readDeviceName: readDeviceName || 'Ustoz qurilmasi'
     }, { merge: true });
   } catch (e) {
-    console.warn("Firestore syncMarkMessageAsRead error:", e);
+    handleFirestoreError(e, OperationType.WRITE, `${TEACHER_MESSAGES_COLLECTION}/${messageId}`);
   }
 }
 
@@ -310,6 +361,6 @@ export async function syncDeleteTeacherMessage(messageId: string) {
   try {
     await deleteDoc(doc(db, TEACHER_MESSAGES_COLLECTION, messageId));
   } catch (e) {
-    console.warn("Firestore syncDeleteTeacherMessage error:", e);
+    handleFirestoreError(e, OperationType.DELETE, `${TEACHER_MESSAGES_COLLECTION}/${messageId}`);
   }
 }

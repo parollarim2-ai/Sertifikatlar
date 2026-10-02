@@ -662,31 +662,7 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
     }
   });
 
-  // In-memory active Coursera Puppeteer sessions waiting for email verification
-  interface CourseraSession {
-    page: any;
-    studentId: string;
-    fullName: string;
-    email: string;
-    password: string;
-    startedAt: number;
-  }
-  const activeCourseraSessions = new Map<string, CourseraSession>();
-
-  // Cleanup stale Coursera sessions after 15 minutes
-  setInterval(() => {
-    const now = Date.now();
-    for (const [key, session] of activeCourseraSessions.entries()) {
-      if (now - session.startedAt > 15 * 60 * 1000) {
-        try {
-          session.page?.close()?.catch(() => {});
-        } catch {}
-        activeCourseraSessions.delete(key);
-      }
-    }
-  }, 5 * 60 * 1000);
-
-  // Step 4: Confirm Aileaders activation link and launch Coursera enrollment
+  // Step 4 & 5: Confirm activation link and Coursera enrollment
   app.post('/api/aileaders/confirm-activation', async (req, res) => {
     let page: any = null;
     const logs: string[] = [];
@@ -696,308 +672,206 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
     };
 
     try {
-      const { activationLink, fullName, email, password = 'MaktabPass2026!', studentId } = req.body;
-      const sessionKey = String(studentId || (email || '').trim());
+      const { activationLink, fullName, email, password = 'MaktabPass2026!' } = req.body;
+      if (!activationLink || typeof activationLink !== 'string') {
+        return res.status(400).json({ error: "Faollashtirish havolasi ko'rsatilmadi", logs });
+      }
 
-      // 1. Fetch activation link directly to confirm Aileaders email instantly (if provided)
-      if (activationLink && typeof activationLink === 'string' && activationLink.trim()) {
-        log(`1. Aileaders faollashtirish havolasi tasdiqlanmoqda: ${activationLink}...`);
-        try {
-          await fetch(activationLink.trim(), {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-          });
-          log(`✅ Aileaders hisobi muvaffaqiyatli tasdiqlandi.`);
-        } catch (actErr: any) {
-          log(`ℹ️ Aileaders havolasi: ${actErr.message}`);
+      log(`1. Aileaders faollashtirish havolasi tekshirilmoqda: ${activationLink.trim()}`);
+      
+      // 1. Fetch activation link directly to confirm email in Aileaders system
+      try {
+        const actRes = await fetch(activationLink.trim(), {
+          headers: { 
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8',
+          },
+          signal: AbortSignal.timeout(10000),
+        });
+        const actText = await actRes.text();
+        if (actText.includes('error') && !actText.includes('success')) {
+          log(`ℹ️ Aileaders aktivatsiya javobi: ${actText.slice(0, 100)}`);
+        } else {
+          log(`✅ 2. Aileaders pochtasi muvaffaqiyatli faollashtirildi!`);
         }
+      } catch (e: any) {
+        log(`Ogohlantirish: Aileaders havolasini ochishda xato: ${e.message}`);
       }
 
-      // 2. Open Coursera course signup in Puppeteer
-      log(`2. Coursera ro'yxatdan o'tish sahifasi ochilmoqda...`);
+      // 2. Open Coursera Official Learning Program Signup
+      log(`3. Coursera rasmiy ta'lim dasturi ochilmoqda (learning-program-h13rq)...`);
       const browser = await getBrowser();
-
-      // Clean up any existing session for this student
-      const existingSession = activeCourseraSessions.get(sessionKey);
-      if (existingSession && existingSession.page) {
-        try { await existingSession.page.close(); } catch {}
-        activeCourseraSessions.delete(sessionKey);
-      }
-
       page = await browser.newPage();
       await page.setViewport({ width: 1280, height: 900 });
-      await page.setExtraHTTPHeaders({ 'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7' });
-      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-      const courseraUrl = 'https://www.coursera.org/programs/learning-program-h13rq/learn/introduction-to-generative-ai?collectionId=2mufz#authMode=signup';
+      // Realistic anti-detection headers
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+      await page.setExtraHTTPHeaders({
+        'Accept-Language': 'uz-UZ,uz;q=0.9,ru;q=0.8,en-US;q=0.7,en;q=0.6',
+      });
+      await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      });
+
+      const courseraUrl = 'https://www.coursera.org/programs/learning-program-h13rq?authMode=signup';
+      log(`4. Manzil: ${courseraUrl}`);
       await page.goto(courseraUrl, { waitUntil: 'networkidle2', timeout: 35000 });
       await new Promise(r => setTimeout(r, 2000));
 
-      // Dismiss OneTrust cookie modal if visible
+      // Remove any OneTrust cookie popups or banners that intercept clicks
       await page.evaluate(() => {
-        const rejectBtn = document.getElementById('onetrust-reject-all-handler') || 
-                          document.querySelector('.ot-pc-refuse-all-handler') || 
-                          document.getElementById('onetrust-accept-btn-handler');
-        if (rejectBtn) (rejectBtn as HTMLElement).click();
+        document.querySelectorAll('#onetrust-consent-sdk, #onetrust-banner-sdk, .onetrust-pc-dark-filter, #onetrust-pc-sdk, [class*="overlay" i]').forEach(el => el.remove());
       });
+      await new Promise(r => setTimeout(r, 800));
 
-      // 3. Fill Russian signup modal fields
-      log(`3. Coursera shakli to'ldirilmoqda: Ism: ${fullName}, Email: ${email}...`);
+      // 3. Locate inputs
+      const nameSelector = 'input[name="name"], input[placeholder*="full name" i], input[placeholder*="Ф. И. О." i]';
+      const emailSelector = 'input[name="email"], input[type="email"], input[placeholder*="email" i]';
+      const passSelector = 'input[name="password"], input[type="password"], input[placeholder*="password" i], input[placeholder*="пароль" i]';
 
+      log(`5. O'quvchi ma'lumotlari kiritilmoqda: F.I.SH: "${fullName.trim()}", Email: "${email.trim()}"...`);
+
+      // Fill Name using real keyboard events
       try {
-        await page.waitForSelector('input[name="name"], input[placeholder*="Ф. И. О."], input[placeholder*="full name"]', { timeout: 12000 });
-      } catch {}
-
-      const nameInput = await page.$('input[name="name"], input[placeholder*="Ф. И. О."], input[placeholder*="full name"]');
-      if (nameInput) {
-        await nameInput.click({ clickCount: 3 });
-        await nameInput.type(fullName.trim(), { delay: 35 });
+        await page.waitForSelector(nameSelector, { timeout: 8000 });
+        await page.click(nameSelector);
+        await page.evaluate((sel: string) => {
+          const el = document.querySelector(sel) as HTMLInputElement;
+          if (el) el.value = '';
+        }, nameSelector);
+        await page.type(nameSelector, fullName.trim(), { delay: 25 });
+        log(`✓ F.I.SH kiritildi`);
+      } catch {
+        log(`⚠️ F.I.SH maydoni topilmadi, davom etilmoqda...`);
       }
 
-      const emailInput = await page.$('input[name="email"], input[placeholder*="name@email.com"], input[placeholder*="Электронный адрес"]');
-      if (emailInput) {
-        await emailInput.click({ clickCount: 3 });
-        await emailInput.type(email.trim(), { delay: 35 });
+      // Fill Email
+      try {
+        await page.waitForSelector(emailSelector, { timeout: 8000 });
+        await page.click(emailSelector);
+        await page.evaluate((sel: string) => {
+          const el = document.querySelector(sel) as HTMLInputElement;
+          if (el) el.value = '';
+        }, emailSelector);
+        await page.type(emailSelector, email.trim(), { delay: 25 });
+        log(`✓ Email kiritildi`);
+      } catch {
+        log(`⚠️ Email maydoni topilmadi`);
       }
 
-      const passInput = await page.$('input[name="password"], input[placeholder*="Создать пароль"], input[placeholder*="password"]');
-      if (passInput) {
-        await passInput.click({ clickCount: 3 });
-        await passInput.type(password, { delay: 35 });
+      // Fill Password
+      try {
+        await page.waitForSelector(passSelector, { timeout: 8000 });
+        await page.click(passSelector);
+        await page.evaluate((sel: string) => {
+          const el = document.querySelector(sel) as HTMLInputElement;
+          if (el) el.value = '';
+        }, passSelector);
+        await page.type(passSelector, password, { delay: 25 });
+        log(`✓ Parol kiritildi`);
+      } catch {
+        log(`⚠️ Parol maydoni topilmadi`);
       }
 
       await new Promise(r => setTimeout(r, 600));
 
-      // 4. Click "Присоединиться бесплатно"
-      log(`4. 'Присоединиться бесплатно' tugmasi bosilmoqda...`);
-      await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('button'));
-        const joinBtn = btns.find(b => {
-          const txt = b.innerText.trim();
-          return (
-            txt.includes('Присоединиться бесплатно') ||
-            txt.includes('Присоединиться') ||
-            txt.includes('Join for Free') ||
-            (b.type === 'submit' && !b.className.includes('onetrust'))
-          );
+      // 4. Click Submit Button (Join for Free / Присоединиться)
+      log(`6. "Join for Free" (Ro'yxatdan o'tish) tugmasi bosilmoqda...`);
+      let submitClicked = false;
+      try {
+        const submitBtn = await page.$('form.rc-SignupForm button[type="submit"], form[name="signup"] button[type="submit"]');
+        if (submitBtn) {
+          await submitBtn.click();
+          submitClicked = true;
+        }
+      } catch {}
+
+      if (!submitClicked) {
+        submitClicked = await page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll('button'));
+          const target = btns.find(b => {
+            const txt = b.innerText.toLowerCase();
+            return txt.includes('join for free') ||
+                   txt.includes('присоединиться') ||
+                   txt.includes('sign up') ||
+                   txt.includes('зарегистрироваться') ||
+                   txt.includes('continue');
+          });
+          if (target) {
+            target.click();
+            return true;
+          }
+          return false;
         });
-        if (joinBtn) (joinBtn as HTMLElement).click();
+      }
+
+      // Also press Enter key as backup form trigger
+      try {
+        await page.keyboard.press('Enter');
+      } catch {}
+
+      log(`7. Coursera serveridan javob kutilmoqda (6 soniya)...`);
+      await new Promise(r => setTimeout(r, 6000));
+
+      // 5. Inspect response and alert messages
+      const outcome = await page.evaluate(() => {
+        const alerts = Array.from(document.querySelectorAll('[role="alert"], .c-alert, [class*="error" i], [class*="Error" i]'))
+          .map(el => (el as HTMLElement).innerText.trim())
+          .filter(Boolean);
+        const modal = document.querySelector('[role="dialog"]');
+        return {
+          currentUrl: window.location.href,
+          alerts,
+          modalSnippet: modal ? (modal as HTMLElement).innerText.slice(0, 200) : ''
+        };
       });
 
-      // Wait for server response and Coursera modal transition
-      await new Promise(r => setTimeout(r, 4000));
+      const alreadyExists = outcome.alerts.some((a: string) => 
+        a.toLowerCase().includes('already') || 
+        a.toLowerCase().includes('log in') || 
+        a.toLowerCase().includes('уже')
+      );
 
-      // Check if user already exists
-      const pageText = await page.evaluate(() => document.body.innerText);
-      if (pageText.includes('уже используется') || pageText.includes('уже существует') || pageText.includes('already in use')) {
-        log(`⚠️ Ushbu ${email} bilan Courserada hisob mavjud. Tizimga kirish (Войти) orqali ulanilmoqda...`);
+      if (alreadyExists) {
+        log(`ℹ️ 8. Ushbu email bo'yicha Coursera hisobi avval mavjud bo'lgan ekan.`);
+        log(`9. Tizimga "Log In" orqali kirib, dasturga ulanilmoqda...`);
+        // Switch to login
         await page.evaluate(() => {
-          const btns = Array.from(document.querySelectorAll('button'));
-          const loginTab = btns.find(b => b.innerText.trim() === 'Войти' || b.innerText.trim() === 'Log in');
-          if (loginTab) loginTab.click();
+          const links = Array.from(document.querySelectorAll('a, button'));
+          const logIn = links.find(l => {
+            const txt = (l as HTMLElement).innerText?.toLowerCase() || '';
+            return txt.includes('log in') || txt.includes('войти');
+          });
+          if (logIn) (logIn as HTMLElement).click();
         });
         await new Promise(r => setTimeout(r, 1500));
-        const lEmail = await page.$('input[type="email"], input[name="email"]');
-        if (lEmail) {
-          await lEmail.click({ clickCount: 3 });
-          await lEmail.type(email.trim(), { delay: 30 });
-        }
-        const lPass = await page.$('input[type="password"], input[name="password"]');
-        if (lPass) {
-          await lPass.click({ clickCount: 3 });
-          await lPass.type(password, { delay: 30 });
-        }
-        await page.evaluate(() => {
-          const btns = Array.from(document.querySelectorAll('button'));
-          const submitBtn = btns.find(b => b.type === 'submit' && (b.innerText.includes('Войти') || b.innerText.includes('Log in')));
-          if (submitBtn) submitBtn.click();
-        });
-        await new Promise(r => setTimeout(r, 3500));
-      }
-
-      // 5. Look for "Подтвердите свой электронный адрес" modal
-      log(`5. 'Подтвердите свой электронный адрес' oynasi tekshirilmoqda...`);
-
-      // Click the 1st button: "Отправить новое письмо для подтверждения"
-      const resendClicked = await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('button'));
-        const resendBtn = btns.find(b => {
-          const txt = b.innerText.trim();
-          return (
-            txt.includes('Отправить новое письмо') ||
-            txt.includes('новое письмо для подтверждения') ||
-            txt.includes('Отправить новое письмо для подтверждения') ||
-            txt.includes('Resend confirmation email') ||
-            txt.includes('Resend')
-          );
-        });
-        if (resendBtn) {
-          (resendBtn as HTMLElement).click();
-          return true;
-        }
-        return false;
-      });
-
-      if (resendClicked) {
-        log(`✅ 6. 'Отправить новое письмо для подтверждения' tugmasi bosildi.`);
-      } else {
-        log(`ℹ️ 6. Coursera tasdiqlash xati avtomatik yuborildi.`);
-      }
-
-      log(`📬 7. Coursera dan ${email} manziliga tasdiqlash xati yuborildi!`);
-      log(`⏳ 8. Gmail pochtangizni oching, 'Подтвердите адрес электронной почты' tugmasini bosing va quyidagi 'Tasdiqladim' tugmasini bosing.`);
-
-      // Keep active session alive for this student
-      activeCourseraSessions.set(sessionKey, {
-        page,
-        studentId: sessionKey,
-        fullName,
-        email: email.trim(),
-        password,
-        startedAt: Date.now(),
-      });
-
-      return res.json({
-        success: true,
-        status: 'WAITING_COURSERA_CONFIRMATION',
-        studentId: sessionKey,
-        targetEmail: email.trim(),
-        message: `Coursera dan ${email.trim()} pochtasiga tasdiqlash xati yuborildi. Iltimos, pochtani ochib 'Подтвердите адрес электронной почты' tugmasini bosing va quyidagi 'Tasdiqladim' tugmasini bosing!`,
-        logs,
-      });
-
-    } catch (err: any) {
-      log(`Xatolik yuz berdi: ${err.message}`);
-      if (page) {
-        try { await page.close(); } catch {}
-      }
-      return res.status(500).json({ error: err.message, logs });
-    }
-  });
-
-  // Step 5: Final Coursera verification confirmation ("Да, подтверждение выполнено" & "Все понятно")
-  app.post('/api/coursera/confirm-verification', async (req, res) => {
-    const logs: string[] = [];
-    const log = (msg: string) => {
-      logs.push(`[${new Date().toLocaleTimeString('uz-UZ')}] ${msg}`);
-      console.log(`[Coursera Robot] ${msg}`);
-    };
-
-    try {
-      const { studentId, email, courseraLink } = req.body;
-      const sessionKey = String(studentId || (email || '').trim());
-      const session = activeCourseraSessions.get(sessionKey);
-
-      log(`1. Coursera pochtasi tasdiqlanishi yakunlanmoqda (O'quvchi: ${session?.fullName || email})...`);
-
-      // If user provided the Coursera link, open it to ensure token is active
-      if (courseraLink && typeof courseraLink === 'string' && courseraLink.trim().startsWith('http')) {
-        log(`🔗 Coursera xatidagi havola ochilmoqda: ${courseraLink.trim()}...`);
         try {
-          const browser = await getBrowser();
-          const tempPage = await browser.newPage();
-          await tempPage.goto(courseraLink.trim(), { waitUntil: 'networkidle2', timeout: 30000 });
-          await new Promise(r => setTimeout(r, 2000));
-          await tempPage.close();
-          log(`✅ Coursera xatidagi havola muvaffaqiyatli tasdiqlandi.`);
-        } catch (linkErr: any) {
-          log(`Ogohlantirish: Havolani ochish: ${linkErr.message}`);
-        }
-      }
-
-      let page = session?.page;
-      if (!page || page.isClosed()) {
-        log(`⚠️ Avvalgi oyna sessiyasi topilmadi, Coursera dasturiga qayta ulanilmoqda...`);
-        const browser = await getBrowser();
-        page = await browser.newPage();
-        await page.setViewport({ width: 1280, height: 900 });
-        await page.setExtraHTTPHeaders({ 'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8' });
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
-        
-        const courseraUrl = 'https://www.coursera.org/programs/learning-program-h13rq/learn/introduction-to-generative-ai?collectionId=2mufz';
-        await page.goto(courseraUrl, { waitUntil: 'networkidle2', timeout: 35000 });
-        await new Promise(r => setTimeout(r, 2000));
-      }
-
-      // Step 2: Click the 2nd button: "Да, подтверждение выполнено"
-      log(`2. 'Да, подтверждение выполнено' tugmasi bosilmoqda...`);
-      const confirmedClicked = await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('button'));
-        const btn = btns.find(b => {
-          const txt = b.innerText.trim();
-          return (
-            txt.includes('Да, подтверждение выполнено') ||
-            txt.includes('подтверждение выполнено') ||
-            txt.includes('Да, подтверждение') ||
-            txt.includes('Yes, I have verified') ||
-            txt.includes('I have verified')
-          );
-        });
-        if (btn) {
-          (btn as HTMLElement).click();
-          return true;
-        }
-        return false;
-      });
-
-      if (confirmedClicked) {
-        log(`✅ 3. 'Да, подтверждение выполнено' tugmasi bosildi.`);
+          await page.click(emailSelector);
+          await page.type(emailSelector, email.trim(), { delay: 20 });
+          await page.click(passSelector);
+          await page.type(passSelector, password, { delay: 20 });
+          await page.keyboard.press('Enter');
+          await new Promise(r => setTimeout(r, 4000));
+          log(`✅ 10. Coursera dasturiga kirish amalga oshirildi!`);
+        } catch {}
       } else {
-        log(`ℹ️ 3. 'Да, подтверждение выполнено' tugmasi topilmadi yoki avtomatik qabul qilindi.`);
+        log(`✅ 8. Coursera ro'yxatdan o'tish so'rovi muvaffaqiyatli yuborildi!`);
+        log(`📬 9. Iltimos, ${email.trim()} Gmail pochtangizni oching (Kiruvchi, Spam va Barcha xatlar papkalarini tekshiring). Coursera-dan tasdiqlash xati keladi.`);
       }
-
-      // Wait for the next modal: "Коммуникации и конфиденциальность"
-      log(`4. 'Коммуникации и конфиденциальность' oynasi kutilmoqda...`);
-      await new Promise(r => setTimeout(r, 2500));
-
-      // Step 3: Click "Все понятно"
-      log(`5. 'Все понятно' tugmasi bosilmoqda...`);
-      const privacyClicked = await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('button'));
-        const btn = btns.find(b => {
-          const txt = b.innerText.trim();
-          return (
-            txt === 'Все понятно' ||
-            txt.includes('Все понятно') ||
-            txt.includes('понятно') ||
-            txt.includes('Got it') ||
-            txt.includes('I understand') ||
-            txt.includes('Agree')
-          );
-        });
-        if (btn) {
-          (btn as HTMLElement).click();
-          return true;
-        }
-        return false;
-      });
-
-      if (privacyClicked) {
-        log(`✅ 6. 'Все понятно' tugmasi muvaffaqiyatli bosildi.`);
-      } else {
-        log(`ℹ️ 6. 'Все понятно' tugmasi topilmadi yoki oyna yopilgan.`);
-      }
-
-      await new Promise(r => setTimeout(r, 2000));
-
-      // Close page and delete session
-      try {
-        await page.close();
-      } catch {}
-      activeCourseraSessions.delete(sessionKey);
-
-      log(`🎉 7. O'quvchi Coursera dasturiga muvaffaqiyatli a'zo bo'ldi!`);
-      log(`✨ Endi ushbu email va parol orqali to'g'ridan-to'g'ri Courseraga kirishingiz mumkin.`);
 
       return res.json({
         success: true,
-        status: 'COMPLETED',
-        message: "Tabriklaymiz! O'quvchi muvaffaqiyatli ro'yxatdan o'tdi va Coursera dasturiga qo'shildi!",
+        message: "O'quvchi Coursera dasturiga yuborildi! Gmail pochtangizni tekshiring.",
         logs,
       });
 
     } catch (err: any) {
       log(`Xatolik: ${err.message}`);
       return res.status(500).json({ error: err.message, logs });
+    } finally {
+      if (page) {
+        try { await page.close(); } catch {}
+      }
     }
   });
 

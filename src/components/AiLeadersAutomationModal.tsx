@@ -22,6 +22,13 @@ import {
 } from 'lucide-react';
 import { Student, ClassGroup } from '../types';
 import { extractPassportDigits } from '../utils/studentValidator';
+import { 
+  googleSignIn, 
+  getAccessToken, 
+  logoutGoogle, 
+  initAuth, 
+  scanGmailForActivation 
+} from '../services/googleAuth';
 
 interface AiLeadersAutomationModalProps {
   isOpen: boolean;
@@ -50,10 +57,15 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
   const [currentStep, setCurrentStep] = useState<number>(0);
   const [logs, setLogs] = useState<string[]>([]);
   const [activationLinkInput, setActivationLinkInput] = useState('');
-  const [courseraLinkInput, setCourseraLinkInput] = useState('');
   const [quickCopied, setQuickCopied] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [successNotice, setSuccessNotice] = useState('');
+
+  // Google Workspace / Gmail Auth State
+  const [googleUser, setGoogleUser] = useState<any>(null);
+  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
+  const [isScanningGmail, setIsScanningGmail] = useState(false);
+  const [gmailNotice, setGmailNotice] = useState<string>('');
 
   // Extract series and number
   const rawId = (student.passportOrId || '').trim();
@@ -85,16 +97,29 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
 
   useEffect(() => {
     if (isOpen) {
-      setTargetEmail(student.assignedEmail || 'akramxonsai.d.o.v0.2@gmail.com');
+      setTargetEmail(student.assignedEmail || 'akramxonsaidov02@gmail.com');
       setLogs([]);
       setCurrentStep(0);
       setErrorMessage('');
       setSuccessNotice('');
+      setGmailNotice('');
       setIsRunning(false);
-      setActivationLinkInput('');
-      setCourseraLinkInput('');
     }
   }, [isOpen, student.assignedEmail]);
+
+  useEffect(() => {
+    const unsubscribe = initAuth(
+      (user) => {
+        setGoogleUser(user);
+      },
+      () => {
+        setGoogleUser(null);
+      }
+    );
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, []);
 
   if (!isOpen) return null;
 
@@ -120,6 +145,7 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
 
     try {
       addLog(`🌐 https://aileaders.uz/auth/register saytiga ulanmoqda...`);
+      setCurrentStep(1);
 
       const emailToSend = targetEmail.trim() || student.assignedEmail || 'akramxonsaidov02@gmail.com';
 
@@ -154,6 +180,7 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
         if (data.reason === 'NOT_FOUND' || data.error?.includes("Ma'lumot topilmadi")) {
           setErrorMessage("Qizil xatolik: 'Ma'lumot topilmadi'. O'quvchiga avtomatik xato belgilanmoqda.");
           addLog("❌ Aileaders: 'Ma'lumot topilmadi'. Tizimda o'quvchi xato deb belgilandi.");
+          // Update student status to error
           onSaveStudent({
             ...student,
             hasError: true,
@@ -173,14 +200,14 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
       }
 
       if (data.status === 'WAITING_GMAIL') {
-        setCurrentStep(2);
-        addLog(`⏳ Aileaders tasdiqlash xati "${baseInbox}" pochtasiga yuborildi. Havolani quyiga qo'ying.`);
+        setCurrentStep(4);
+        addLog(`⏳ Tasdiqlash xabari "${baseInbox}" pochtasiga yuborildi. Havolani quyiga qo'ying.`);
         setIsRunning(false);
         return;
       }
 
       if (data.success) {
-        setCurrentStep(4);
+        setCurrentStep(5);
         setSuccessNotice("✅ O'quvchi muvaffaqiyatli ro'yxatdan o'tkazildi!");
         addLog("🎉 O'quvchi Aileaders va Coursera dasturiga muvaffaqiyatli ulandi!");
       }
@@ -192,16 +219,39 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
     }
   };
 
-  // Step 2 -> Step 3: Confirm Aileaders activation link and launch Coursera enrollment
-  const handleActivateWithLink = async (skipLink: boolean = false) => {
-    if (!skipLink && !activationLinkInput.trim()) return;
+  // Connect to Google Account (allows choosing akramxonsaidov02@gmail.com)
+  const handleConnectGoogle = async () => {
+    setIsGoogleLoading(true);
+    setErrorMessage('');
+    try {
+      const res = await googleSignIn();
+      setGoogleUser(res.user);
+      addLog(`✅ Google pochtasi ulandi: ${res.user.email}`);
+    } catch (err: any) {
+      if (err?.code === 'auth/popup-closed-by-user' || err?.code === 'auth/cancelled-popup-request') {
+        setGmailNotice("ℹ️ Google kirish oynasi yopildi. Ulanish uchun 'Google orqali Gmail-ni ulash' tugmasini qayta bosing.");
+      } else {
+        setErrorMessage(`Google ulanishda xato: ${err.message}`);
+        addLog(`❌ Google ulanishda xato: ${err.message}`);
+      }
+    } finally {
+      setIsGoogleLoading(false);
+    }
+  };
+
+  const handleDisconnectGoogle = async () => {
+    await logoutGoogle();
+    setGoogleUser(null);
+    addLog(`ℹ️ Google pochtasidan chiqildi`);
+  };
+
+  // Reusable activation submitter
+  const triggerActivationWithLink = async (linkToUse: string) => {
+    if (!linkToUse || !linkToUse.trim()) return;
     setIsRunning(true);
     setErrorMessage('');
-    if (skipLink) {
-      addLog(`🌐 To'g'ridan-to'g'ri Coursera dasturiga o'tilmoqda...`);
-    } else {
-      addLog(`🔗 Aileaders havolasi tasdiqlanmoqda va Courseraga o'tilmoqda: ${activationLinkInput.trim()}...`);
-    }
+    setSuccessNotice('');
+    addLog(`🔗 Tasdiqlash havolasi ochilmoqda: ${linkToUse.trim()}...`);
 
     try {
       const emailToSend = targetEmail.trim() || student.assignedEmail || 'akramxonsaidov02@gmail.com';
@@ -209,7 +259,7 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          activationLink: skipLink ? undefined : activationLinkInput.trim(),
+          activationLink: linkToUse.trim(),
           studentId: student.id,
           fullName: student.fullName,
           email: emailToSend,
@@ -222,75 +272,70 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
         data.logs.forEach((l: string) => addLog(l));
       }
 
-      if (data.status === 'WAITING_COURSERA_CONFIRMATION') {
-        setCurrentStep(3); // Waiting for Coursera email confirmation
-        setSuccessNotice("📬 Coursera tasdiqlash xati yuborildi! Pochtadagi 'Подтвердите адрес электронной почты' tugmasini bosing va pastdagi 'Tasdiqladim' tugmasini bosing.");
-        addLog("📬 Courseradan xat yuborildi. Pochtadagi 'Подтвердите адрес электронной почты' tugmasini bosing.");
-      } else if (data.success) {
-        setCurrentStep(4);
-        setSuccessNotice("✅ Pochta muvaffaqiyatli tasdiqlandi va Coursera ro'yxatdan o'tkazildi!");
-        addLog("✅ Pochta tasdiqlandi. Coursera dasturiga qo'shildi!");
-        onSaveStudent({
-          ...student,
-          assignedEmail: emailToSend,
-          assignedPassword: defaultPassword,
-          status: 'certified',
-          certifiedAt: new Date().toISOString(),
-        });
+      if (data.success) {
+        setCurrentStep(5);
+        setSuccessNotice("✅ O'quvchi Coursera dasturiga yuborildi! Gmail pochtangizni tekshiring.");
+        addLog("🎉 Coursera so'rovi to'liq bajarildi! Gmail pochtangizni oching.");
       } else {
         setErrorMessage(data.error || "Tasdiqlashda xatolik");
         addLog(`❌ ${data.error}`);
       }
     } catch (e: any) {
       setErrorMessage(e.message);
+      addLog(`❌ Server xatosi: ${e.message}`);
     } finally {
       setIsRunning(false);
     }
   };
 
-  // Step 3 -> Step 4: Final Coursera verification confirmation ("Да, подтверждение выполнено" & "Все понятно")
-  const handleConfirmCourseraVerification = async () => {
-    setIsRunning(true);
-    setErrorMessage('');
-    addLog(`⏳ Coursera tasdiqlanmoqda ('Да, подтверждение выполнено' va 'Все понятно')...`);
+  // Manual one-click activation link submit
+  const handleActivateWithLink = async () => {
+    await triggerActivationWithLink(activationLinkInput);
+  };
+
+  // Automated Gmail Scanner: Reads activation email directly from Google API
+  const handleAutoScanGmail = async (autoSubmit: boolean = true) => {
+    let token = await getAccessToken();
+    if (!token) {
+      try {
+        const res = await googleSignIn();
+        setGoogleUser(res.user);
+        token = res.accessToken;
+      } catch (err: any) {
+        if (err.code !== 'auth/popup-closed-by-user') {
+          setErrorMessage(`Google ulanishda xato: ${err.message}`);
+        }
+        return;
+      }
+    }
+
+    setIsScanningGmail(true);
+    setGmailNotice('');
+    addLog(`📬 ${googleUser?.email || 'Gmail'} pochtasi Aileaders va Coursera xatlari uchun tekshirilmoqda...`);
 
     try {
-      const emailToSend = targetEmail.trim() || student.assignedEmail || 'akramxonsaidov02@gmail.com';
-      const res = await fetch('/api/coursera/confirm-verification', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          studentId: student.id,
-          email: emailToSend,
-          courseraLink: courseraLinkInput.trim() || undefined,
-          password: defaultPassword,
-        }),
-      });
-
-      const data = await res.json();
-      if (data.logs && Array.isArray(data.logs)) {
-        data.logs.forEach((l: string) => addLog(l));
-      }
-
-      if (data.success) {
-        setCurrentStep(4);
-        setSuccessNotice("🎉 Tabriklaymiz! O'quvchi Coursera dasturiga muvaffaqiyatli a'zo qilindi!");
-        addLog("🎉 O'quvchi Coursera dasturiga to'liq a'zo bo'ldi!");
-        onSaveStudent({
-          ...student,
-          assignedEmail: emailToSend,
-          assignedPassword: defaultPassword,
-          status: 'certified',
-          certifiedAt: new Date().toISOString(),
-        });
+      const result = await scanGmailForActivation(token);
+      if (result.found && result.activationLink) {
+        addLog(`🎯 Aileaders faollashtirish havolasi topildi: ${result.activationLink}`);
+        setActivationLinkInput(result.activationLink);
+        setGmailNotice(`✅ Xat topildi: "${result.subject || 'Faollashtirish xabari'}"`);
+        
+        if (autoSubmit) {
+          addLog(`⚡️ Havola avtomatik tasdiqlash uchun yuborilmoqda...`);
+          await triggerActivationWithLink(result.activationLink);
+        }
+      } else if (result.found && result.courseraLink) {
+        addLog(`🎓 Coursera tasdiqlash havolasi topildi: ${result.courseraLink}`);
+        setGmailNotice(`✅ Coursera xati topildi: "${result.subject || ''}"`);
       } else {
-        setErrorMessage(data.error || "Coursera tasdiqlashda xatolik");
-        addLog(`❌ ${data.error}`);
+        addLog(`ℹ️ ${result.message || 'Xat hali pochtaga yetib kelmagan ko\'rinadi.'}`);
+        setGmailNotice(result.message || "Xat topilmadi. Birozdan so'ng qayta urinib ko'ring.");
       }
     } catch (err: any) {
+      addLog(`❌ Gmail tekshirishda xatolik: ${err.message}`);
       setErrorMessage(err.message);
     } finally {
-      setIsRunning(false);
+      setIsScanningGmail(false);
     }
   };
 
@@ -522,188 +567,199 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
             </div>
           )}
 
-          {/* Step 2: Aileaders Activation Link Input */}
-          {(currentStep <= 2 || currentStep === 0) && (
-            <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-300 space-y-2.5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
-                <label className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
-                  <Mail className="w-3.5 h-3.5 text-amber-700" />
-                  <span>1. Aileaders faollashtirish havolasi (Aktivatsiya):</span>
-                </label>
-                <a
-                  href={`https://mail.google.com/mail/u/0/#search/noreply`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-[11px] font-bold text-blue-700 hover:text-blue-900 flex items-center gap-1 underline"
-                >
-                  <span>Gmail'da qidirish (noreply)</span>
-                  <ExternalLink className="w-3 h-3" />
-                </a>
+          {/* Google Workspace / Gmail Auto-Reader Card */}
+          <div className="p-4 rounded-xl bg-gradient-to-br from-indigo-50 via-sky-50 to-blue-50 border-2 border-indigo-200 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-indigo-600 animate-pulse"></span>
+                <span className="text-xs font-black uppercase tracking-wider text-indigo-950">
+                  ✨ 1-Usul: Gmail-ni Avtomatik Tekshirish (Parolsiz)
+                </span>
               </div>
-
-              <div className="text-[11px] text-amber-900 bg-amber-100/60 p-2 rounded-lg">
-                Xabar <b>noreply</b> dan <b>"Привет {student.fullName.split(' ')[0]}"</b> sarlavhasi bilan keladi. Xat ichidagi <code>https://aileaders.uz/auth/activate/...</code> havolasini quyidagi katakka qo'ying:
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-2">
-                <input
-                  type="url"
-                  value={activationLinkInput}
-                  onChange={e => setActivationLinkInput(e.target.value)}
-                  placeholder="https://aileaders.uz/auth/activate/..."
-                  className="flex-1 px-3 py-2 text-xs bg-white border border-amber-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:border-amber-600"
-                />
-                <button
-                  type="button"
-                  onClick={() => handleActivateWithLink(false)}
-                  disabled={!activationLinkInput.trim() || isRunning}
-                  className="px-4 py-2 bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-all shadow-xs cursor-pointer flex items-center justify-center gap-1.5"
-                >
-                  <Zap className="w-3.5 h-3.5" />
-                  <span>Tasdiqlash & Courseraga O'tish</span>
-                </button>
-              </div>
-
-              {/* Direct Coursera Bypass option */}
-              <div className="pt-1.5 flex items-center justify-between border-t border-amber-200/80 text-[11px]">
-                <span className="text-amber-900">Aileaders pochtasi allaqachon tasdiqlanganmi?</span>
-                <button
-                  type="button"
-                  onClick={() => handleActivateWithLink(true)}
-                  disabled={isRunning}
-                  className="font-bold text-blue-700 hover:text-blue-900 underline cursor-pointer"
-                >
-                  To'g'ridan-to'g'ri Courserani boshlash ➔
-                </button>
-              </div>
+              {googleUser && (
+                <span className="text-[10px] font-bold bg-emerald-600 text-white px-2 py-0.5 rounded-full flex items-center gap-1">
+                  <Check className="w-3 h-3" />
+                  <span>Ulangan</span>
+                </span>
+              )}
             </div>
-          )}
 
-          {/* Step 3: Coursera Verification Confirmation Step */}
-          {currentStep === 3 && (
-            <div className="p-4 rounded-xl bg-blue-50 border-2 border-blue-400 shadow-md space-y-3 animate-scale-up">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-7 h-7 rounded-lg bg-blue-600 text-white flex items-center justify-center font-bold text-xs">
-                    C
-                  </div>
-                  <div>
-                    <h4 className="font-bold text-blue-950 text-xs sm:text-sm">2-bosqich: Coursera Pochtani Tasdiqlash</h4>
-                    <p className="text-[11px] text-blue-700">Coursera xati {targetEmail} manziliga yuborildi</p>
-                  </div>
+            {!googleUser ? (
+              <div className="bg-white/80 p-3.5 rounded-xl border border-indigo-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="text-[11px] text-slate-700 space-y-1">
+                  <p className="font-semibold text-slate-900">
+                    Google parolini kiritishingiz shart emas!
+                  </p>
+                  <p className="text-slate-600 leading-relaxed">
+                    Quyidagi tugma orqali <b>akramxonsaidov02@gmail.com</b> hisobingizni ulasangiz, robot pochtangizga kelgan Aileaders yoki Coursera tasdiq xatini o'zi qidirib topadi va 1 soniyada tasdiqlab beradi.
+                  </p>
                 </div>
-                <a
-                  href="https://mail.google.com/mail/u/0/#search/Coursera"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-[11px] font-bold text-blue-800 bg-blue-100 hover:bg-blue-200 px-2.5 py-1 rounded-lg flex items-center gap-1 transition-colors"
+
+                <button
+                  type="button"
+                  onClick={handleConnectGoogle}
+                  disabled={isGoogleLoading}
+                  className="px-4 py-2.5 bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 rounded-xl font-bold text-xs shadow-sm hover:shadow transition-all flex items-center justify-center gap-2.5 flex-shrink-0 cursor-pointer"
                 >
-                  <span>Gmail (Coursera)</span>
-                  <ExternalLink className="w-3 h-3" />
-                </a>
+                  <svg className="w-4 h-4" viewBox="0 0 48 48">
+                    <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
+                    <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
+                    <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z" />
+                    <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z" />
+                  </svg>
+                  <span>{isGoogleLoading ? 'Ulanmoqda...' : 'Google orqali Gmail-ni ulash'}</span>
+                </button>
               </div>
+            ) : (
+              <div className="bg-white/90 p-3.5 rounded-xl border border-emerald-300 space-y-2.5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="text-xs">
+                    <span className="text-slate-500 font-medium">Ulangan hisob: </span>
+                    <span className="font-bold text-emerald-950 font-mono">{googleUser.email}</span>
+                  </div>
 
-              <div className="p-3 bg-white rounded-xl border border-blue-200 space-y-2 text-xs text-slate-800">
-                <div className="font-semibold text-blue-900 flex items-center gap-1.5">
-                  <Check className="w-4 h-4 text-emerald-600" />
-                  <span>Robot Courserada anketani to'ldirib, tasdiqlash xatini jo'natdi!</span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleAutoScanGmail(true)}
+                      disabled={isScanningGmail || isRunning}
+                      className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold shadow-xs transition-all flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {isScanningGmail ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Pochta tekshirilmoqda...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="w-3.5 h-3.5" />
+                          <span>Pochtadan Xatni O'zi Topib Tasdiqlasin</span>
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleDisconnectGoogle}
+                      className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer"
+                      title="Boshqa hisobga o'tish"
+                    >
+                      Almashtirish
+                    </button>
+                  </div>
                 </div>
-                <ol className="list-decimal list-inside space-y-1.5 text-slate-700 text-[11px] pl-1">
-                  <li>
-                    <b>Gmail pochtangizni oching</b> (Xat <b>"Coursera"</b> nomidan keladi).
-                  </li>
-                  <li>
-                    Xat ichidagi ko'k rangli <b>"Подтвердите адрес электронной почты"</b> tugmasini bosing.
-                  </li>
-                  <li>
-                    Pochtada tasdiqlaganingizdan so'ng, pastdagi ko'k <b>"✅ Tasdiqladim (Davom ettirish)"</b> tugmasini bosing!
-                  </li>
-                </ol>
-                <div className="text-[10px] text-slate-500 italic pt-1 border-t border-slate-100">
-                  ℹ️ Siz tugmani bosganingizdan so'ng robot <b>"Да, подтверждение выполнено"</b> hamda <b>"Все понятно"</b> tugmalarini avtomatik bosadi.
-                </div>
-              </div>
 
-              {/* Optional Coursera Link Input */}
-              <div className="space-y-1">
-                <label className="text-[10px] font-semibold text-slate-600 block">
-                  Coursera xatidagi havola (ixtiyoriy, agar nusxalagan bo'lsangiz):
-                </label>
-                <input
-                  type="url"
-                  value={courseraLinkInput}
-                  onChange={e => setCourseraLinkInput(e.target.value)}
-                  placeholder="https://www.coursera.org/account/verify-email?token=... (ixtiyoriy)"
-                  className="w-full px-3 py-1.5 text-xs bg-white border border-blue-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:border-blue-600"
-                />
+                {gmailNotice && (
+                  <div className="text-[11px] p-2 rounded-lg bg-emerald-50 text-emerald-900 border border-emerald-200 font-medium">
+                    {gmailNotice}
+                  </div>
+                )}
               </div>
+            )}
+          </div>
 
-              {/* Main Action Button */}
+          {/* Manual Gmail Activation Link Input */}
+          <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-300 space-y-2.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+              <label className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5 text-amber-700" />
+                <span>📝 2-Usul: Havolani Qo'lda Kiritish (Aktivatsiya):</span>
+              </label>
+              <a
+                href={`https://mail.google.com/mail/u/0/#search/noreply`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[11px] font-bold text-blue-700 hover:text-blue-900 flex items-center gap-1 underline"
+              >
+                <span>Gmail'da qidirish (noreply)</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
+
+            <div className="text-[11px] text-amber-900 bg-amber-100/60 p-2 rounded-lg">
+              Xabar <b>noreply</b> dan <b>"Привет {student.fullName.split(' ')[0]}"</b> sarlavhasi bilan keladi. Xat ichidagi <code>https://aileaders.uz/auth/activate/...</code> havolasini quyidagi katakka qo'ying:
+            </div>
+
+            <div className="flex gap-2">
+              <input
+                type="url"
+                value={activationLinkInput}
+                onChange={e => setActivationLinkInput(e.target.value)}
+                placeholder="https://aileaders.uz/auth/activate/..."
+                className="flex-1 px-3 py-2 text-xs bg-white border border-amber-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:border-amber-600"
+              />
               <button
                 type="button"
-                onClick={handleConfirmCourseraVerification}
-                disabled={isRunning}
-                className="w-full py-3 px-4 bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 hover:from-blue-700 hover:to-indigo-700 text-white font-bold text-xs sm:text-sm rounded-xl shadow-md transition-all cursor-pointer flex items-center justify-center gap-2"
+                onClick={handleActivateWithLink}
+                disabled={!activationLinkInput.trim() || isRunning}
+                className="px-4 py-2 bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-all shadow-xs cursor-pointer flex items-center gap-1.5"
               >
-                {isRunning ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Coursera tasdiqlanmoqda ('Да, подтверждение выполнено')...</span>
-                  </>
-                ) : (
-                  <>
-                    <Check className="w-4 h-4" />
-                    <span>✅ Tasdiqladim (Davom ettirish)</span>
-                  </>
-                )}
+                <Zap className="w-3.5 h-3.5" />
+                <span>Tasdiqlash & Coursera</span>
               </button>
             </div>
-          )}
+          </div>
 
-          {/* Step 4: Finished Complete Card */}
-          {currentStep === 4 && (
-            <div className="p-4 rounded-xl bg-emerald-50 border-2 border-emerald-300 text-emerald-950 space-y-3 animate-scale-up">
+          {/* Coursera Direct Fast-Track & 1-Click Join Card */}
+          <div className="p-4 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border-2 border-blue-300 space-y-3">
+            <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-full bg-emerald-600 text-white flex items-center justify-center font-bold">
-                  ✓
-                </div>
-                <div>
-                  <h4 className="font-bold text-emerald-950 text-sm">O'quvchi muvaffaqiyatli ro'yxatdan o'tdi!</h4>
-                  <p className="text-xs text-emerald-700">Aileaders va Coursera dasturiga to'liq a'zo qilindi.</p>
-                </div>
+                <span className="w-2.5 h-2.5 rounded-full bg-blue-600 animate-ping"></span>
+                <span className="text-xs font-black uppercase tracking-wider text-blue-950">
+                  ⚡️ 2-Usul: Coursera Dasturiga To'g'ridan-To'g'ri Ulanish
+                </span>
               </div>
-
-              <div className="p-3 bg-white rounded-xl border border-emerald-200 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                <div>
-                  <span className="text-[10px] text-slate-500 font-bold uppercase block">Coursera Login (Email):</span>
-                  <span className="font-mono font-bold text-slate-900">{targetEmail}</span>
-                </div>
-                <div>
-                  <span className="text-[10px] text-slate-500 font-bold uppercase block">Coursera Parol:</span>
-                  <span className="font-mono font-bold text-slate-900">{defaultPassword}</span>
-                </div>
-              </div>
-
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="flex-1 py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs cursor-pointer transition-colors"
-                >
-                  Yopish
-                </button>
-                <a
-                  href="https://www.coursera.org"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="py-2.5 px-4 bg-white border border-emerald-300 hover:bg-emerald-50 text-emerald-900 font-bold text-xs rounded-xl flex items-center gap-1.5 transition-colors"
-                >
-                  <span>Courseraga Kirish</span>
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
-              </div>
+              <span className="text-[10px] font-bold bg-blue-600 text-white px-2 py-0.5 rounded-full">
+                100% Kafolatlangan
+              </span>
             </div>
-          )}
+
+            <p className="text-[11px] text-blue-900 leading-relaxed">
+              Coursera serverlari ba'zan robotlarni tekshiruvdan o'tkazishi sababli, quyidagi tugma orqali to'g'ridan-to'g'ri o'zingizning brauzeringizda <b>learning-program-h13rq</b> dasturini ochishingiz mumkin. Brauzeringizda ushbu Gmail ochiq bo'lsa, <b>"Continue with Google"</b> tugmasi orqali 1 soniyada ro'yxatdan o'tadi va Coursera tasdiq xati Gmail'ingizga darhol tushadi:
+            </p>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <a
+                href="https://www.coursera.org/programs/learning-program-h13rq?authMode=signup"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex-1 py-2.5 px-4 bg-blue-700 hover:bg-blue-800 text-white rounded-xl text-xs font-bold shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <ExternalLink className="w-4 h-4" />
+                <span>Coursera Rasmiy Dasturini Ochish →</span>
+              </a>
+
+              <button
+                type="button"
+                onClick={() => handleCopy(student.fullName, "F.I.SH")}
+                className="py-2.5 px-3 bg-white hover:bg-slate-100 text-slate-800 border border-blue-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                title="F.I.SH nusxalash"
+              >
+                <Copy className="w-3.5 h-3.5 text-blue-600" />
+                <span>F.I.SH</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleCopy(targetEmail, "Gmail")}
+                className="py-2.5 px-3 bg-white hover:bg-slate-100 text-slate-800 border border-blue-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                title="Gmail nusxalash"
+              >
+                <Copy className="w-3.5 h-3.5 text-blue-600" />
+                <span>Gmail</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleCopy(defaultPassword, "Parol")}
+                className="py-2.5 px-3 bg-white hover:bg-slate-100 text-slate-800 border border-blue-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                title="Parol nusxalash"
+              >
+                <Copy className="w-3.5 h-3.5 text-blue-600" />
+                <span>Parol</span>
+              </button>
+            </div>
+          </div>
 
           {/* Live Progress Logs Console */}
           {logs.length > 0 && (

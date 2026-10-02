@@ -59,9 +59,14 @@ function saveStore() {
 loadStore();
 
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getFirestore, collection, onSnapshot, getDocs, doc, setDoc } from 'firebase/firestore';
+import { getFirestore, collection, getDocs, doc, setDoc, setLogLevel } from 'firebase/firestore';
 
-// Initialize Firebase Firestore connection for 100% real-time server-side synchronization
+// Suppress internal gRPC connection debugging logs on Node.js
+try {
+  setLogLevel('error');
+} catch {}
+
+// Initialize Firebase Firestore connection for resilient server-side synchronization
 let firestoreDb: any = null;
 try {
   const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
@@ -69,48 +74,30 @@ try {
     const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     const app = !getApps().length ? initializeApp(config) : getApp();
     firestoreDb = getFirestore(app, config.firestoreDatabaseId);
-    console.log('🔥 Server-side Firestore connected for Telegram Bot realtime sync:', config.firestoreDatabaseId);
+    console.log('🔥 Server-side Firestore connected for Telegram Bot sync:', config.firestoreDatabaseId);
 
-    // 1. Real-time Classes Listener
-    onSnapshot(collection(firestoreDb, 'classes'), (snap) => {
-      const list: ClassGroup[] = [];
-      snap.forEach((d) => list.push(d.data() as ClassGroup));
-      if (list.length > 0) {
-        store.classes = list;
-        saveStore();
-        console.log(`📡 [Telegram Bot] Real-time classes updated from Firestore: ${list.length} classes`);
+    // Initial data fetch from Firestore on boot
+    ensureFreshFirestoreData().then((stats) => {
+      console.log(`📡 [Telegram Bot] Synchronized with Firestore: ${stats.classesCount} classes, ${stats.studentsCount} students (${stats.certifiedCount} certified)`);
+    }).catch((err) => {
+      console.warn('Initial Firestore sync notice:', err.message);
+    });
+
+    // Periodic synchronization every 30 seconds ensures fresh data without fragile idle gRPC streams
+    setInterval(async () => {
+      try {
+        await ensureFreshFirestoreData();
+        await checkAndNotifyCompletedClasses().catch(() => {});
+      } catch (err: any) {
+        // Silently tolerate transient network glitches
       }
-    }, (err) => console.error('Firestore classes listener error:', err.message));
-
-    // 2. Real-time Students Listener (Instant 0s lag)
-    onSnapshot(collection(firestoreDb, 'students'), (snap) => {
-      const list: Student[] = [];
-      snap.forEach((d) => list.push(d.data() as Student));
-      if (list.length > 0) {
-        store.students = list;
-        saveStore();
-        const cert = list.filter((s) => s.status === 'certified').length;
-        console.log(`📡 [Telegram Bot] Real-time students updated from Firestore: ${list.length} total (${cert} certified)`);
-        checkAndNotifyCompletedClasses().catch(() => {});
-      }
-    }, (err) => console.error('Firestore students listener error:', err.message));
-
-    // 3. Real-time Telegram Users Listener
-    onSnapshot(collection(firestoreDb, 'telegramUsers'), (snap) => {
-      snap.forEach((d) => {
-        const u = d.data() as TelegramUser;
-        if (u && u.id) {
-          store.telegramUsers[u.id] = u;
-        }
-      });
-      saveStore();
-    }, (err) => console.warn('Firestore telegramUsers notice:', err.message));
+    }, 30000);
   }
 } catch (e: any) {
-  console.error('Failed to initialize server-side Firestore listener:', e.message);
+  console.error('Failed to initialize server-side Firestore connection:', e.message);
 }
 
-// Function to guarantee freshest data on-demand from Firestore
+// Function to guarantee freshest data on-demand from Firestore without persistent stream leaks
 export async function ensureFreshFirestoreData(): Promise<{ classesCount: number; studentsCount: number; certifiedCount: number }> {
   if (!firestoreDb) {
     return {
@@ -121,9 +108,10 @@ export async function ensureFreshFirestoreData(): Promise<{ classesCount: number
   }
 
   try {
-    const [classesSnap, studentsSnap] = await Promise.all([
+    const [classesSnap, studentsSnap, usersSnap] = await Promise.all([
       getDocs(collection(firestoreDb, 'classes')),
       getDocs(collection(firestoreDb, 'students')),
+      getDocs(collection(firestoreDb, 'telegramUsers')).catch(() => null),
     ]);
 
     const freshClasses: ClassGroup[] = [];
@@ -138,6 +126,15 @@ export async function ensureFreshFirestoreData(): Promise<{ classesCount: number
       store.students = freshStudents;
     }
 
+    if (usersSnap) {
+      usersSnap.forEach(d => {
+        const u = d.data() as TelegramUser;
+        if (u && u.id) {
+          store.telegramUsers[u.id] = u;
+        }
+      });
+    }
+
     saveStore();
 
     const cert = store.students.filter(s => s.status === 'certified').length;
@@ -147,7 +144,7 @@ export async function ensureFreshFirestoreData(): Promise<{ classesCount: number
       certifiedCount: cert,
     };
   } catch (err: any) {
-    console.warn('ensureFreshFirestoreData error:', err.message);
+    console.warn('ensureFreshFirestoreData notice:', err.message);
     return {
       classesCount: store.classes.length,
       studentsCount: store.students.length,
