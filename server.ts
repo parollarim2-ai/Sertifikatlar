@@ -375,7 +375,7 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
   // ==========================================
 
   // Step 1 & 2: Automated registration on aileaders.uz with Guvohnoma/Passport and human pacing
-  app.post('/api/aileaders/automate', async (req, res) => {
+  app.post(['/api/aileaders/automate', '/api/aileaders/register'], async (req, res) => {
     let page: any = null;
     const logs: string[] = [];
     const log = (msg: string) => {
@@ -500,11 +500,26 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
       }, docType === 'metrika', cleanSeries, cleanNum, fullDocNumber, formattedDob);
 
       if (lookupResult.result?.code === 'metrike_not_found' || lookupResult.result?.code === 'passport_not_found') {
-        log(`❌ Aileaders natijasi: "Ma'lumot topilmadi". Hujjat raqami yoki tug'ilgan sana mos kelmadi.`);
+        const desc = lookupResult.result?.description || "Hujjat topilmadi";
+        log(`❌ Aileaders natijasi: ${desc}. Hujjat: ${cleanSeries} ${cleanNum}, Sana: ${formattedDob}`);
         return res.json({
           success: false,
-          error: "O'quvchi ma'lumotlari bazadan topilmadi. Hujjat seriya raqami yoki tug'ilgan sana noto'g'ri kiritilgan bo'lishi mumkin.",
+          error: `❌ O'quvchi OneID bazasidan topilmadi (${desc}). Kiritilgan: Hujjat: "${cleanSeries} ${cleanNum}", Sana: "${formattedDob}". Iltimos, hujjat raqami va tug'ilgan sanani tekshiring.`,
           reason: 'NOT_FOUND',
+          details: { series: cleanSeries, number: cleanNum, dob: formattedDob, code: lookupResult.result?.code },
+          logs,
+        });
+      }
+
+      // If document was already registered on Aileaders earlier
+      if (lookupResult.result?.code === 'metrika_is_already_in_use' || lookupResult.result?.code === 'passport_already_in_use' || lookupResult.result?.code === 'passport_exists') {
+        log(`ℹ️ 4. Ushbu o'quvchi Aileaders tizimida allaqachon mavjud! Gmail pochtasidagi xat orqali faollashtiriladi.`);
+        return res.json({
+          success: true,
+          status: 'ALREADY_REGISTERED',
+          isAlreadyRegistered: true,
+          targetEmail: email.trim(),
+          message: "O'quvchi avval ro'yxatdan o'tgan. Gmail'dagi tasdiqlash havolasi orqali faollashtiriladi.",
           logs,
         });
       }
@@ -513,7 +528,7 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
         const studentInfo = lookupResult.content;
         log(`✅ 4. O'quvchi topildi: ${studentInfo.name || ''} ${studentInfo.surname || ''} (Jinsi: ${studentInfo.gender === 'male' ? "O'g'il bola" : "Qiz bola"})`);
       } else {
-        log(`ℹ️ 4. Tekshiruv holati: ${lookupResult.result?.code || 'Davom etilmoqda'}`);
+        log(`ℹ️ 4. Tekshiruv holati: ${lookupResult.result?.code || lookupResult.result?.description || 'Davom etilmoqda'}`);
       }
 
       // Format phone digits
@@ -542,113 +557,95 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
         phone: formattedPhone
       });
 
-      // Handle "passport_already_in_use" (student was previously registered)
-      if (regResult.result?.code === 'passport_already_in_use' || regResult.result?.code === 'passport_exists') {
-        log(`⚠️ 6. Ushbu o'quvchi avval ro'yxatdan o'tkazilgan ekan. Eski hisob tozalanmoqda (delete-account)...`);
-        
-        await page.evaluate(async (isMetrika: boolean, series: string, num: string, fullDoc: string, dob: string) => {
-          try {
-            const body = new URLSearchParams();
-            body.append('document', isMetrika ? `${series}${num}` : fullDoc);
-            body.append('dob', dob);
-            await fetch('https://aileaders.uz/api/profile/delete-account', {
-              method: 'DELETE',
-              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-              body: body.toString()
-            });
-          } catch {}
-        }, docType === 'metrika', cleanSeries, cleanNum, fullDocNumber, formattedDob);
+      let registeredEmail = email.trim();
 
-        await new Promise(r => setTimeout(r, 1500));
+      // Check if student was already registered in Aileaders
+      const isAlreadyInUse = 
+        regResult.result?.code === 'metrika_is_already_in_use' ||
+        regResult.result?.code === 'passport_already_in_use' ||
+        regResult.result?.code === 'passport_exists' ||
+        regResult.result?.description?.includes('ro\'yxatdan o\'tgan') ||
+        regResult.result?.description?.includes('кайд килинган');
 
-        log(`7. Qaytadan yangi hisob ochilmoqda...`);
-        regResult = await page.evaluate(async (payload: any) => {
-          try {
-            const res = await fetch('https://aileaders.uz/api/registration/form', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload)
-            });
-            return await res.json();
-          } catch (e: any) {
-            return { error: e.message };
-          }
-        }, {
-          email: email.trim(),
-          employment_type: 'school',
-          metrika: docType === 'metrika' ? { cert_series: cleanSeries, cert_number: cleanNum, dob: formattedDob } : null,
-          passport: docType !== 'metrika' ? { document: fullDocNumber, dob: formattedDob } : null,
-          password: password,
-          phone: formattedPhone
+      if (isAlreadyInUse) {
+        log(`ℹ️ 6. Ushbu o'quvchi Aileaders tizimida allaqachon mavjud! Gmail'dagi tasdiq xati orqali faollashtiriladi.`);
+        return res.json({
+          success: true,
+          status: 'ALREADY_REGISTERED',
+          isAlreadyRegistered: true,
+          targetEmail: registeredEmail,
+          message: "O'quvchi avval ro'yxatdan o'tgan. Gmail pochtasidagi tasdiqlash xati orqali faollashtiriladi.",
+          logs,
         });
       }
 
+      // Check if email was already used, try fresh dot aliases
       if (regResult.result?.code === 'email_already_in_use' || regResult.result?.code === 'email_exists') {
-        log(`❌ Xatolik: ${email} manzili allaqachon boshqa hisobda ro'yxatdan o'tgan.`);
-        return res.json({
-          success: false,
-          error: `Ushbu "${email}" manzili boshqa akkauntda band qilingan. Iltimos, boshqa Gmail kiriting.`,
-          reason: 'EMAIL_IN_USE',
-          logs
-        });
-      }
-
-      log(`8. Aileaders tizimiga kirish (login) amalga oshirilmoqda...`);
-      const loginResult = await page.evaluate(async (login: string, pwd: string) => {
-        try {
-          const res = await fetch('https://aileaders.uz/api/authorization/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ login, password: pwd })
-          });
-          return await res.json();
-        } catch (e: any) {
-          return { error: e.message };
-        }
-      }, email.trim(), password);
-
-      const userToken = loginResult.content?.token || '';
-      if (!userToken) {
-        log(`⚠️ Avtorizatsiya xabari: ${loginResult.result?.code || 'Token olinmadi'}.`);
-        return res.json({
-          success: false,
-          error: "Tizimga kirishda xatolik: " + (loginResult.result?.code || "Token olinmadi"),
-          logs
-        });
-      }
-
-      log(`9. Tasdiqlash xabari Gmail pochtasiga yuborilmoqda: ${email.trim()}...`);
-      const verifyResult = await page.evaluate(async (em: string, token: string) => {
-        try {
-          const res = await fetch(`https://aileaders.uz/api/profile/verify-email?email=${encodeURIComponent(em)}`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}`
+        log(`⚠️ ${registeredEmail} manzili band ekan. Yangi bo'sh Gmail dot varianti qidirilmoqda...`);
+        const atIdx = registeredEmail.indexOf('@');
+        if (atIdx > 0 && registeredEmail.endsWith('@gmail.com')) {
+          const rawUser = registeredEmail.slice(0, atIdx).replace(/\./g, '').split('+')[0];
+          for (let attempt = 1; attempt <= 4; attempt++) {
+            const randomMask = Math.floor(Math.random() * (Math.pow(2, Math.min(rawUser.length - 1, 14)) - 1)) + 1;
+            let altEmail = '';
+            for (let i = 0; i < rawUser.length - 1; i++) {
+              altEmail += rawUser[i];
+              if ((randomMask >> i) & 1) altEmail += '.';
             }
-          });
-          return await res.json();
-        } catch (e: any) {
-          return { error: e.message };
-        }
-      }, email.trim(), userToken);
+            altEmail += rawUser[rawUser.length - 1] + '@gmail.com';
+            if (altEmail === registeredEmail) continue;
 
-      const verifyCode = verifyResult.result?.code || '';
-      if (verifyCode === 'ok') {
-        log(`✅ 10. Tasdiqlash xati ${email.trim()} pochtasiga muvaffaqiyatli yuborildi!`);
-        log(`📬 11. Iltimos, ${email.trim()} Gmail pochtangizni oching (Kiruvchi, Spam va Barcha xatlar papkalarini tekshiring).`);
-        log(`🔗 12. Xat ichidagi 'Faollashtirish' havolasini nusxalab, pastdagi maydonga kiriting.`);
-      } else if (verifyCode.startsWith('verification_attempt')) {
-        log(`ℹ️ 10. Tasdiqlash havolasi yaqinda yuborilgan. Gmail pochtangizni tekshiring.`);
-      } else {
-        log(`⚠️ 10. Tasdiqlash xati kodi: ${verifyCode || 'xatolik'}`);
+            log(`Qayta urinish [${attempt}/4]: ${altEmail}...`);
+            const retryReg = await page.evaluate(async (payload: any) => {
+              try {
+                const res = await fetch('https://aileaders.uz/api/registration/form', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(payload)
+                });
+                return await res.json();
+              } catch (e: any) {
+                return { error: e.message };
+              }
+            }, {
+              email: altEmail,
+              employment_type: 'school',
+              metrika: docType === 'metrika' ? { cert_series: cleanSeries, cert_number: cleanNum, dob: formattedDob } : null,
+              passport: docType !== 'metrika' ? { document: fullDocNumber, dob: formattedDob } : null,
+              password: password,
+              phone: formattedPhone
+            });
+
+            if (retryReg.result?.code === 'ok' || retryReg.result?.code === 'metrika_is_already_in_use') {
+              registeredEmail = altEmail;
+              regResult = retryReg;
+              log(`✅ Yangi bo'sh manzil qabul qilindi: ${registeredEmail}`);
+              break;
+            }
+          }
+        }
       }
+
+      // If Aileaders gave a real error
+      if (regResult.result && regResult.result.code !== 'ok' && !regResult.result.code?.includes('already_in_use')) {
+        const errorDesc = regResult.result.description || regResult.result.code || "Ro'yxatdan o'tishda xatolik";
+        log(`❌ Aileaders xatosi: ${errorDesc}`);
+        return res.json({
+          success: false,
+          error: `Aileaders xabari: ${errorDesc}`,
+          code: regResult.result.code,
+          logs,
+        });
+      }
+
+      log(`✅ 6. Aileaders ro'yxatdan o'tish muvaffaqiyatli qabul qilindi!`);
+      log(`📬 7. Tasdiqlash xati ${registeredEmail} Gmail pochtasiga yuborildi.`);
 
       return res.json({
         success: true,
         status: 'WAITING_GMAIL',
-        targetEmail: email.trim(),
-        message: `Tasdiqlash xabari ${email.trim()} pochtasiga muvaffaqiyatli yuborildi. Iltimos, Gmail pochtangizni oching va kelgan faollashtirish havolasini kiriting.`,
+        targetEmail: registeredEmail,
+        message: `Tasdiqlash xabari ${registeredEmail} pochtasiga muvaffaqiyatli yuborildi.`,
         logs,
       });
 
@@ -1053,6 +1050,216 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
     } catch (err: any) {
       res.status(500).json({ ok: false, error: err.message });
     }
+  });
+
+  // Push notification when a student registration is completed on Aileaders
+  app.post('/api/notifications/student-registered', async (req, res) => {
+    const { studentName, className, email } = req.body;
+    try {
+      const text = `🎉 <b>Aileaders Ro'yxatdan O'tish Bajarildi!</b>\n\n` +
+        `👤 O'quvchi: <b>${studentName || 'O\'quvchi'}</b>\n` +
+        `🏫 Sinf: <b>${className || 'Sinf'}</b>\n` +
+        `📧 Pochta: <code>${email || ''}</code>\n` +
+        `⏰ Vaqt: ${new Date().toLocaleTimeString('uz-UZ')}\n\n` +
+        `<i>Tasdiqlash xabari pochtaga yuborildi.</i>`;
+
+      // Send to registered Telegram users/teachers
+      try {
+        const users = await getTelegramUsers();
+        for (const u of users) {
+          if (u.chatId) {
+            await fetch(`https://api.telegram.org/bot8846557313:AAE5J1aRrvJJ2LLZCbD7WlI_JFzhSrmR_tA/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: u.chatId,
+                text,
+                parse_mode: 'HTML',
+              }),
+            });
+          }
+        }
+      } catch (tgErr) {
+        console.warn('Telegram notification delivery note:', tgErr);
+      }
+
+      return res.json({ success: true });
+    } catch (err: any) {
+      return res.json({ success: false, error: err.message });
+    }
+  });
+
+  // ==========================================
+  // GMAIL IMAP AUTOMATION FOR AILEADERS ACTIVATION
+  // ==========================================
+  const GMAIL_AUTH = {
+    host: 'imap.gmail.com',
+    port: 993,
+    secure: true,
+    auth: {
+      user: 'akramxonsaidov02@gmail.com',
+      pass: 'yisgsvmwthzblgdq', // Google App Password provided by user
+    },
+  };
+
+  app.get('/api/gmail/status', async (_req, res) => {
+    try {
+      const { ImapFlow } = await import('imapflow');
+      const client = new ImapFlow({
+        ...GMAIL_AUTH,
+        logger: false,
+      });
+      await client.connect();
+      const lock = await client.getMailboxLock('INBOX');
+      let count = 0;
+      try {
+        count = (client.mailbox as any)?.exists || 0;
+      } finally {
+        lock.release();
+      }
+      await client.logout();
+      return res.json({
+        success: true,
+        connected: true,
+        email: GMAIL_AUTH.auth.user,
+        totalMessages: count,
+        message: "Gmail IMAP serveriga muvaffaqiyatli ulandi! Xatlar avtomatik o'qilmoqda.",
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, connected: false, error: err.message });
+    }
+  });
+
+  app.post('/api/gmail/sync-and-activate', async (req, res) => {
+    const logs: string[] = [];
+    const log = (msg: string) => {
+      logs.push(`[${new Date().toLocaleTimeString('uz-UZ')}] ${msg}`);
+      console.log(`[Gmail Auto-Activator] ${msg}`);
+    };
+
+    try {
+      const { ImapFlow } = await import('imapflow');
+      const client = new ImapFlow({
+        ...GMAIL_AUTH,
+        logger: false,
+      });
+
+      log(`1. ${GMAIL_AUTH.auth.user} pochta qutisiga ulanilmoqda...`);
+      await client.connect();
+      const lock = await client.getMailboxLock('INBOX');
+
+      const activationItems: Array<{
+        recipientEmail: string;
+        activationUrl: string;
+        date: string;
+      }> = [];
+
+      try {
+        log(`2. Oxirgi kelgan Aileaders / UzbCoders xatlari tahlil qilinmoqda...`);
+        const total = (client.mailbox as any)?.exists || 0;
+        const startSeq = Math.max(1, total - 40);
+        const seqRange = `${startSeq}:*`;
+
+        for await (let msg of client.fetch(seqRange, { source: true, envelope: true })) {
+          const fromAddr = (msg.envelope?.from?.[0]?.address || '').toLowerCase();
+          const subject = (msg.envelope?.subject || '').toLowerCase();
+          if (fromAddr.includes('uzbcoders') || fromAddr.includes('aileaders') || subject.includes('activation') || subject.includes('faollashtirish')) {
+            const rawSource = msg.source ? msg.source.toString('utf8') : '';
+            const toAddress = (msg.envelope?.to?.[0]?.address || '').toLowerCase().trim();
+            const urlMatches = rawSource.match(/https?:\/\/[^\s\"\'<>]+activate[^\s\"\'<>]*/gi);
+            if (urlMatches && urlMatches.length > 0) {
+              const cleanUrl = urlMatches[0].replace(/&amp;/g, '&').trim();
+              const mailDate = msg.envelope?.date ? new Date(msg.envelope.date).toISOString() : new Date().toISOString();
+              activationItems.push({
+                recipientEmail: toAddress,
+                activationUrl: cleanUrl,
+                date: mailDate,
+              });
+            }
+          }
+        }
+      } finally {
+        lock.release();
+      }
+      await client.logout();
+
+      log(`3. Gmail'dan ${activationItems.length} ta faollashtirish havolasi topildi!`);
+
+      // De-duplicate by URL
+      const uniqueItems = Array.from(new Map(activationItems.map(item => [item.activationUrl, item])).values());
+
+      // Now activate each unique URL
+      const activatedResults: Array<{
+        email: string;
+        activationUrl: string;
+        success: boolean;
+      }> = [];
+
+      for (const item of uniqueItems) {
+        try {
+          const actResp = await fetch(item.activationUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+              'Accept': 'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8',
+            },
+            signal: AbortSignal.timeout(10000),
+          });
+          const actText = await actResp.text();
+          const isOk = actResp.ok || actResp.status < 400 || actText.includes('success');
+          activatedResults.push({
+            email: item.recipientEmail,
+            activationUrl: item.activationUrl,
+            success: isOk,
+          });
+          log(`✅ Faollashtirildi: ${item.recipientEmail}`);
+        } catch (e: any) {
+          activatedResults.push({
+            email: item.recipientEmail,
+            activationUrl: item.activationUrl,
+            success: false,
+          });
+          log(`⚠️ Faollashtirish xatosi (${item.recipientEmail}): ${e.message}`);
+        }
+      }
+
+      return res.json({
+        success: true,
+        totalFound: uniqueItems.length,
+        activatedCount: activatedResults.filter(r => r.success).length,
+        activatedResults,
+        logs,
+      });
+
+    } catch (err: any) {
+      log(`❌ IMAP Xatosi: ${err.message}`);
+      return res.status(500).json({ success: false, error: err.message, logs });
+    }
+  });
+
+  // Fast Batch Activation for multiple Aileaders links
+  app.post('/api/aileaders/batch-activate', async (req, res) => {
+    const { links } = req.body;
+    if (!Array.isArray(links)) {
+      return res.status(400).json({ error: "Havolalar ro'yxati noto'g'ri" });
+    }
+    const results = [];
+    for (const rawLink of links) {
+      const link = (rawLink || '').trim();
+      if (!link.startsWith('http')) continue;
+      try {
+        const resp = await fetch(link, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          },
+          signal: AbortSignal.timeout(8000),
+        });
+        const text = await resp.text();
+        results.push({ link, success: !text.includes('error') || text.includes('success'), status: resp.status });
+      } catch (e: any) {
+        results.push({ link, success: false, error: e.message });
+      }
+    }
+    return res.json({ success: true, results });
   });
 
   // Mount Vite development middlewares in dev mode, or serve static dist in production

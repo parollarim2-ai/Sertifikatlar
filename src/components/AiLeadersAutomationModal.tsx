@@ -21,7 +21,7 @@ import {
   Code
 } from 'lucide-react';
 import { Student, ClassGroup } from '../types';
-import { extractPassportDigits } from '../utils/studentValidator';
+import { extractPassportDigits, detectStudentDocType, extractDocSeriesAndNumber } from '../utils/studentValidator';
 import { 
   googleSignIn, 
   getAccessToken, 
@@ -45,12 +45,8 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
   classGroup,
   onSaveStudent,
 }) => {
-  // Determine if student has Metrika or Passport
-  const initialDocType = student.passportOrId?.toUpperCase().includes('I-') || 
-                         student.passportOrId?.toUpperCase().startsWith('I') ||
-                         !student.passportOrId?.match(/^[A-Z]{2}\d{7}$/)
-                           ? 'metrika'
-                           : 'passport';
+  // Determine if student has Metrika or Passport automatically by grade (<=9 is always metrika)
+  const initialDocType = detectStudentDocType(classGroup?.name, student.passportOrId);
 
   const [docType, setDocType] = useState<'metrika' | 'passport'>(initialDocType);
   const [isRunning, setIsRunning] = useState(false);
@@ -69,18 +65,10 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
 
   // Extract series and number
   const rawId = (student.passportOrId || '').trim();
-  const digits = extractPassportDigits(rawId) || rawId.replace(/\D/g, '').slice(-7);
-  let series = '';
-  if (docType === 'metrika') {
-    const sMatch = rawId.match(/^[A-Za-z0-9\-]+/);
-    series = sMatch ? sMatch[0].replace(/\d+$/, '').trim() : 'I-FR';
-    if (!series || series.length < 2) series = 'I-FR';
-  } else {
-    const sMatch = rawId.match(/^[A-Za-z]{2}/);
-    series = sMatch ? sMatch[0].toUpperCase() : 'AA';
-  }
+  const { series, number: digits } = extractDocSeriesAndNumber(docType, rawId);
 
-  const [targetEmail, setTargetEmail] = useState<string>(student.assignedEmail || 'akramxonsai.d.o.v0.2@gmail.com');
+  const defaultGlobalEmail = localStorage.getItem('aileaders_global_email') || 'akramxonsaidov02@gmail.com';
+  const [targetEmail, setTargetEmail] = useState<string>(student.assignedEmail || defaultGlobalEmail);
 
   // Compute the physical primary Gmail inbox (Google routes all dot-aliases to the dotless address)
   const baseInbox = React.useMemo(() => {
@@ -97,7 +85,8 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
 
   useEffect(() => {
     if (isOpen) {
-      setTargetEmail(student.assignedEmail || 'akramxonsaidov02@gmail.com');
+      const stored = localStorage.getItem('aileaders_global_email') || 'akramxonsaidov02@gmail.com';
+      setTargetEmail(student.assignedEmail || stored);
       setLogs([]);
       setCurrentStep(0);
       setErrorMessage('');

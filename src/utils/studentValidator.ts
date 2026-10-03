@@ -125,3 +125,57 @@ export function extractPassportDigits(raw?: string): string {
 
   return trimmed;
 }
+
+/**
+ * Automatically determines whether student should be registered as 'metrika' or 'passport'
+ * based on class grade. If class grade <= 9, it is ALWAYS 'metrika'.
+ */
+export function detectStudentDocType(className?: string, studentPassport?: string): 'metrika' | 'passport' {
+  if (className) {
+    const match = className.match(/^(\d{1,2})/);
+    if (match) {
+      const grade = parseInt(match[1], 10);
+      if (grade <= 9) {
+        return 'metrika';
+      } else if (grade >= 10) {
+        return 'passport';
+      }
+    }
+  }
+
+  if (studentPassport) {
+    const clean = studentPassport.trim().toUpperCase();
+    if (clean.startsWith('I') || clean.includes('-') || !clean.match(/^[A-Z]{2}\d{7}$/)) {
+      return 'metrika';
+    }
+    return 'passport';
+  }
+
+  return 'metrika';
+}
+
+/**
+ * Extracts normalized series and 7-digit number from student document string
+ */
+export function extractDocSeriesAndNumber(docType: 'metrika' | 'passport', rawId: string): { series: string; number: string } {
+  const trimmed = (rawId || '').trim();
+  const digits = extractPassportDigits(trimmed) || trimmed.replace(/\D/g, '').slice(-7);
+
+  if (docType === 'metrika') {
+    // Look for Roman numeral series like I-FR, II-TO, I-TN, or IFR
+    const match = trimmed.match(/^([I|V|X]+-[A-Z]+|[I|V|X]+[A-Z]+|[A-Za-z\-]+)/i);
+    let series = match ? match[0].toUpperCase() : 'I-FR';
+    // Format IFR to I-FR if needed
+    if (series.startsWith('I') && !series.includes('-') && series.length >= 3) {
+      series = `I-${series.slice(1)}`;
+    }
+    if (!series || series.length < 2) series = 'I-FR';
+    return { series, number: digits };
+  } else {
+    // 2-letter uppercase series like AA, AB, AC
+    const match = trimmed.match(/^[A-Za-z]{2}/);
+    const series = match ? match[0].toUpperCase() : 'AA';
+    return { series, number: digits };
+  }
+}
+

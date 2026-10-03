@@ -5,6 +5,7 @@ import { TelegramBotTab } from './TelegramBotTab';
 import { TeacherCertificatesTab } from './TeacherCertificatesTab';
 import { GmailGeneratorModal } from './GmailGeneratorModal';
 import { OperatorSpeedAnalyticsModal } from './OperatorSpeedAnalyticsModal';
+import { ClassBatchAutomationModal } from './ClassBatchAutomationModal';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
 import { analyzeOperatorSpeed, getStoredCertifyLogs } from '../utils/operatorSpeedTracker';
 import { 
@@ -95,6 +96,7 @@ interface AdminPanelProps {
   onAssignTeacherEmail?: (teacherId: string) => void;
   onAddGeneratedEmails?: (newEmails: EmailAccount[]) => Promise<void> | void;
   onToggleStudentPayment?: (studentId: string, currentPaidState: boolean) => void;
+  onSaveStudent?: (student: Student) => Promise<void> | void;
 }
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({
@@ -127,12 +129,20 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   onAssignTeacherEmail,
   onAddGeneratedEmails,
   onToggleStudentPayment,
+  onSaveStudent,
 }) => {
   const [activeTab, setActiveTab] = useState<'classes' | 'teachers' | 'finance' | 'emails' | 'sessions' | 'telegram'>('classes');
   const [selectedClassId, setSelectedClassId] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [isGmailGeneratorOpen, setIsGmailGeneratorOpen] = useState(false);
   const [isSpeedModalOpen, setIsSpeedModalOpen] = useState(false);
+  const [isClassBatchModalOpen, setIsClassBatchModalOpen] = useState(false);
+  const [batchTargetClass, setBatchTargetClass] = useState<ClassGroup | null>(null);
+
+  const handleOpenClassBatch = (cg: ClassGroup) => {
+    setBatchTargetClass(cg);
+    setIsClassBatchModalOpen(true);
+  };
 
   // Real-time operator speed & activity analysis with 15-minute gap threshold
   const operatorAnalysis = useMemo(() => analyzeOperatorSpeed(getStoredCertifyLogs(students)), [students]);
@@ -955,6 +965,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         )}
                       </div>
                     )}
+
+                    {/* Button 0: Whole Class Batch Aileaders Registration */}
+                    <button
+                      type="button"
+                      onClick={() => handleOpenClassBatch(currentClass)}
+                      className="px-4 py-2.5 bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-black text-xs rounded-xl shadow-lg border border-white/25 flex items-center gap-2 transition-all cursor-pointer transform hover:scale-[1.03] active:scale-[0.98]"
+                      title="Ushbu sinfdagi barcha o'quvchilarni Aileaders'dan bir boshidan avtomatik ro'yxatdan o'tkazish"
+                    >
+                      <Zap className="w-4 h-4 text-yellow-300 fill-yellow-300 animate-pulse" />
+                      <span>⚡️ Butun sinfni Aileaders'dan ro'yxatdan o'tkazish</span>
+                    </button>
 
                     {/* Button 1: Send Message to Teacher */}
                     <button
@@ -1999,6 +2020,26 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         onClose={() => setIsSpeedModalOpen(false)}
         analysis={operatorAnalysis}
       />
+
+      {/* Whole Class Batch Aileaders Registration Modal */}
+      {isClassBatchModalOpen && batchTargetClass && (
+        <ClassBatchAutomationModal
+          isOpen={isClassBatchModalOpen}
+          onClose={() => {
+            setIsClassBatchModalOpen(false);
+            setBatchTargetClass(null);
+          }}
+          classGroup={batchTargetClass}
+          students={students}
+          onUpdateStudent={async (st) => {
+            if (onSaveStudent) {
+              await onSaveStudent(st);
+            } else {
+              onAddSingleStudent(st);
+            }
+          }}
+        />
+      )}
     </div>
   );
 };

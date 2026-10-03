@@ -692,6 +692,7 @@ export default function App() {
               onDeleteTeacher={handleDeleteTeacher}
               onAssignTeacherEmail={handleAssignTeacherEmail}
               onAddGeneratedEmails={handleAddGeneratedEmails}
+              onSaveStudent={handleSaveStudent}
             />
           </div>
         )}
