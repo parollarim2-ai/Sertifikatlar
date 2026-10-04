@@ -17,8 +17,6 @@ export interface Student {
   errorImage?: string; // base64 or URL
   createdAt: string;
   certifiedAt?: string; // EXACT timestamp with seconds when certificate was entered
-  courseraVerified?: boolean;
-  courseraRegisteredAt?: string;
 }
 
 export interface ClassGroup {

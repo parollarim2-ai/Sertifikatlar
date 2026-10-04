@@ -44,8 +44,6 @@ interface StudentBatchState {
   errorMessage?: string;
   activationLink?: string;
   logs: string[];
-  courseraStatus?: 'pending' | 'processing' | 'verified' | 'waiting_email' | 'error';
-  courseraLogs?: string[];
 }
 
 export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps> = ({
@@ -74,11 +72,9 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
   const [currentIndex, setCurrentIndex] = useState<number>(-1);
   const [batchLinksText, setBatchLinksText] = useState<string>('');
   const [isActivatingBatch, setIsActivatingBatch] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<'register' | 'coursera' | 'activate'>('coursera');
+  const [activeTab, setActiveTab] = useState<'register' | 'activate'>('register');
   const [toastMessage, setToastMessage] = useState<string>('');
   const [isSyncingGmail, setIsSyncingGmail] = useState<boolean>(false);
-  const [isCourseraRunning, setIsCourseraRunning] = useState<boolean>(false);
-  const [currentCourseraIndex, setCurrentCourseraIndex] = useState<number>(-1);
 
   const isPausedRef = useRef<boolean>(false);
   const isRunningRef = useRef<boolean>(false);
@@ -117,7 +113,6 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
       }
 
       const isCertified = st.status === 'certified' || !!st.certificateLink || !!st.certificateNumber;
-      const isCoursera = !!st.courseraVerified;
 
       return {
         student: st,
@@ -128,8 +123,6 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
         number,
         errorMessage: isCertified ? undefined : st.errorReason,
         logs: isCertified ? ['🎓 O\'quvchi Coursera kursini tugatgan va sertifikatga ega. Qayta urinish shart emas.'] : [],
-        courseraStatus: isCertified ? 'verified' : (isCoursera ? 'verified' : 'pending'),
-        courseraLogs: isCoursera ? ['✅ Coursera hisobi faol va tasdiqlangan.'] : [],
       };
     });
 
@@ -337,50 +330,45 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
         if (!isRunningRef.current) break;
       }
 
-      // Skip already certified students
+      // Skip already succeeded students or students with certificates
       const currentStudent = items[i].student;
       const isCertified = currentStudent.status === 'certified' || !!currentStudent.certificateLink || !!currentStudent.certificateNumber;
-      if (isCertified) {
+      if (items[i].status === 'success' || isCertified) {
         continue;
       }
 
       setCurrentIndex(i);
+      await processStudent(i);
 
-      // Step 1: Aileaders Registration (if not yet registered)
-      let aileadersSuccess = items[i].status === 'success';
-      if (!aileadersSuccess) {
-        aileadersSuccess = await processStudent(i);
-        await new Promise(r => setTimeout(r, 1500));
-      }
-
-      // Step 2: Coursera Registration (if not yet verified)
-      const isCourseraDone = items[i].courseraStatus === 'verified' || !!items[i].student.courseraVerified;
-      if (!isCourseraDone && (aileadersSuccess || items[i].status === 'success')) {
-        await processStudentCoursera(i);
-        await new Promise(r => setTimeout(r, 2000));
-      }
+      // Brief delay between students to respect Aileaders rate-limit
+      await new Promise(r => setTimeout(r, 2000));
     }
 
     setIsRunning(false);
     isRunningRef.current = false;
     setCurrentIndex(-1);
-    showToast(`🎉 Sinf ro'yxatdan o'tkazish yakunlandi! Gmail pochtasidan tasdiqlash xatlari tekshirilmoqda...`);
+    showToast(`🎉 Sinf ro'yxatdan o'tkazildi! Gmail xatlari avtomatik tekshirilmoqda...`);
     
     // Automatically check Gmail and activate everyone right away
     await handleSyncGmailActivations();
   };
 
-  // Gmail IMAP auto-activation for both Aileaders and Coursera
+  // Gmail IMAP auto-activation
   const handleSyncGmailActivations = async () => {
     setIsSyncingGmail(true);
     try {
       const res = await fetch('/api/gmail/sync-and-activate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ retries: 5, delaySeconds: 3 })
       });
       const data = await res.json();
       if (data.success && Array.isArray(data.activatedResults)) {
+        const activatedEmails = new Set<string>(
+          data.activatedResults
+            .filter((r: any) => r.success)
+            .map((r: any) => (r.email || '').trim().toLowerCase())
+        );
+
         let activatedCount = 0;
         const toUpdateStudents: Student[] = [];
 
@@ -388,30 +376,20 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
           const next = [...prev];
           next.forEach((item, idx) => {
             const itemEmailClean = item.assignedEmail.trim().toLowerCase();
-
-            // Strict exact email match with full dots intact
-            const matched = data.activatedResults.find((r: any) => {
-              if (!r.success) return false;
-              const rEmail = (r.email || '').trim().toLowerCase();
-              return rEmail === itemEmailClean;
-            });
-
-            if (matched) {
+            const isMatch = activatedEmails.has(itemEmailClean) || 
+              Array.from(activatedEmails).some((ae: string) => ae.replace(/\./g, '') === itemEmailClean.replace(/\./g, ''));
+            
+            if (isMatch && item.status !== 'success') {
               activatedCount++;
-              const isCoursera = matched.type === 'coursera';
               next[idx] = {
                 ...next[idx],
-                status: isCoursera ? next[idx].status : 'success',
-                courseraStatus: isCoursera ? 'verified' : next[idx].courseraStatus,
-                logs: [...(next[idx].logs || []), `✅ Gmail orqali ${isCoursera ? 'Coursera' : 'Aileaders'} hisobi tasdiqlandi!`],
-                courseraLogs: isCoursera ? [...(next[idx].courseraLogs || []), `✅ Gmail orqali Coursera hisobi faollashtirildi!`] : next[idx].courseraLogs,
+                status: 'success',
+                logs: [...(next[idx].logs || []), `✅ Gmail orqali muvaffaqiyatli faollashtirildi!`],
               };
               toUpdateStudents.push({
                 ...item.student,
                 assignedEmail: item.assignedEmail,
-                status: isCoursera ? item.student.status : 'pending',
-                courseraVerified: isCoursera ? true : item.student.courseraVerified,
-                courseraRegisteredAt: isCoursera ? new Date().toISOString() : item.student.courseraRegisteredAt,
+                status: 'pending',
                 hasError: false,
                 errorReason: '',
               });
@@ -420,18 +398,15 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
           return next;
         });
 
+        // Asynchronously update student states outside of component render
         for (const st of toUpdateStudents) {
           try {
             await onUpdateStudent(st);
           } catch {}
         }
 
-        if (activatedCount > 0) {
-          playChime();
-          showToast(`⚡️ Gmail'dan ${activatedCount} ta o'quvchi hisobi aniq tasdiqlandi va faollashtirildi!`);
-        } else {
-          showToast(`ℹ️ Gmail tekshirildi: yangi tasdiqlanmagan xat topilmadi.`);
-        }
+        playChime();
+        showToast(`⚡️ Gmail'dan ${activatedCount || data.activatedCount} ta o'quvchi avtomatik faollashtirildi!`);
       } else {
         showToast(data.error || "Gmail tekshirildi, yangi tasdiqlash xati topilmadi");
       }
@@ -440,123 +415,6 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
     } finally {
       setIsSyncingGmail(false);
     }
-  };
-
-  // Coursera Student Registration Handler
-  const processStudentCoursera = async (index: number) => {
-    const item = items[index];
-    if (!item) return false;
-
-    if (item.status === 'certified' || item.student.certificateLink) {
-      return true;
-    }
-
-    setItems(prev => {
-      const next = [...prev];
-      next[index] = {
-        ...next[index],
-        courseraStatus: 'processing',
-        courseraLogs: [`[${new Date().toLocaleTimeString('uz-UZ')}] Coursera dasturiga ulanish boshlandi...`],
-      };
-      return next;
-    });
-
-    try {
-      const res = await fetch('/api/coursera/register-student', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fullName: item.student.fullName,
-          email: item.assignedEmail,
-          password: globalPassword,
-        }),
-      });
-
-      const data = await res.json();
-      const combinedLogs = [...(data.logs || [])];
-
-      if (data.success && data.verified) {
-        setItems(prev => {
-          const next = [...prev];
-          next[index] = {
-            ...next[index],
-            courseraStatus: 'verified',
-            courseraLogs: [...(next[index].courseraLogs || []), ...combinedLogs, "✅ Coursera hisobi to'liq faollashtirildi!"],
-          };
-          return next;
-        });
-
-        await onUpdateStudent({
-          ...item.student,
-          assignedEmail: item.assignedEmail,
-          assignedPassword: globalPassword,
-          courseraVerified: true,
-          courseraRegisteredAt: new Date().toISOString(),
-        });
-
-        playChime();
-        sendPushNotification(item.student.fullName);
-        showToast(`🎓 ${item.student.fullName} Coursera'dan muvaffaqiyatli ro'yxatdan o'tdi va tasdiqlandi!`);
-        return true;
-      } else if (data.success && data.waitingEmail) {
-        setItems(prev => {
-          const next = [...prev];
-          next[index] = {
-            ...next[index],
-            courseraStatus: 'waiting_email',
-            courseraLogs: [...(next[index].courseraLogs || []), ...combinedLogs, "📬 Tasdiqlash xati kutilmoqda..."],
-          };
-          return next;
-        });
-        showToast(`📬 ${item.student.fullName}: Coursera so'rovi yuborildi, xat kutilmoqda.`);
-        return true;
-      } else {
-        const errorMsg = data.error || "Coursera ro'yxatdan o'tishda xatolik";
-        setItems(prev => {
-          const next = [...prev];
-          next[index] = {
-            ...next[index],
-            courseraStatus: 'error',
-            errorMessage: errorMsg,
-            courseraLogs: [...(next[index].courseraLogs || []), ...combinedLogs, `❌ Xatolik: ${errorMsg}`],
-          };
-          return next;
-        });
-        return false;
-      }
-    } catch (err: any) {
-      setItems(prev => {
-        const next = [...prev];
-        next[index] = {
-          ...next[index],
-          courseraStatus: 'error',
-          errorMessage: err.message,
-          courseraLogs: [...(next[index].courseraLogs || []), `❌ Server xatosi: ${err.message}`],
-        };
-        return next;
-      });
-      return false;
-    }
-  };
-
-  const handleStartCourseraBatch = async () => {
-    setIsCourseraRunning(true);
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].status === 'certified' || items[i].student.courseraVerified || items[i].courseraStatus === 'verified') {
-        continue;
-      }
-      setCurrentCourseraIndex(i);
-      await processStudentCoursera(i);
-      await new Promise(r => setTimeout(r, 2000));
-    }
-    setIsCourseraRunning(false);
-    setCurrentCourseraIndex(-1);
-    showToast(`🎉 Sinf Coursera ro'yxatdan o'tkazish jarayoni yakunlandi!`);
-  };
-
-  const handleStopCourseraBatch = () => {
-    setIsCourseraRunning(false);
-    setCurrentCourseraIndex(-1);
   };
 
   const handlePauseBatch = () => {
@@ -648,9 +506,8 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
 
   const certifiedCount = items.filter(i => i.status === 'certified').length;
   const successCount = items.filter(i => i.status === 'success').length;
-  const courseraCount = items.filter(i => i.courseraStatus === 'verified' || !!i.student.courseraVerified || i.status === 'certified').length;
-  const errorCount = items.filter(i => i.status === 'error' || i.courseraStatus === 'error').length;
-  const pendingCount = items.filter(i => i.status === 'pending' || i.courseraStatus === 'pending').length;
+  const errorCount = items.filter(i => i.status === 'error').length;
+  const pendingCount = items.filter(i => i.status === 'pending').length;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-950/70 backdrop-blur-xs animate-fade-in overflow-y-auto">
@@ -750,29 +607,16 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
         {/* Action Controls & Stats */}
         <div className="px-6 py-3 bg-white border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 flex-shrink-0">
           <div className="flex items-center gap-2">
-            {!isRunning && !isCourseraRunning ? (
-              <>
-                <button
-                  type="button"
-                  onClick={handleStartBatch}
-                  className="px-5 py-2.5 bg-gradient-to-r from-blue-700 via-indigo-700 to-purple-700 hover:from-blue-800 hover:to-purple-800 text-white font-extrabold text-xs rounded-xl shadow-md flex items-center gap-2 transition-all cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]"
-                  title="Har bir o'quvchini avval Aileaders, so'ngra Coursera rasmiy ta'lim dasturidan ro'yxatdan o'tkazib, Gmail orqali hisobini faollashtiradi"
-                >
-                  <Play className="w-4 h-4 fill-white" />
-                  <span>⚡️ Butun Sinfni Ro'yxatdan O'tkazish (To'liq Avtomat)</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleStartCourseraBatch}
-                  className="px-4 py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]"
-                  title="Sinfdagi barcha o'quvchilarni faqat Coursera ta'lim dasturidan ro'yxatdan o'tkazish"
-                >
-                  <GraduationCap className="w-4 h-4 text-yellow-300" />
-                  <span>🎓 Coursera Avtomat</span>
-                </button>
-              </>
-            ) : isRunning ? (
+            {!isRunning ? (
+              <button
+                type="button"
+                onClick={handleStartBatch}
+                className="px-5 py-2.5 bg-gradient-to-r from-blue-700 to-indigo-700 hover:from-blue-800 hover:to-indigo-800 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-2 transition-all cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]"
+              >
+                <Play className="w-4 h-4 fill-white" />
+                <span>Butun Sinfni Ro'yxatdan O'tkazish (Avtomatik)</span>
+              </button>
+            ) : (
               <div className="flex items-center gap-2">
                 {!isPaused ? (
                   <button
@@ -803,20 +647,6 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
                   <span>Bekor qilish</span>
                 </button>
               </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-indigo-700 animate-pulse flex items-center gap-1.5 bg-indigo-50 px-3 py-1.5 rounded-lg border border-indigo-200">
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-600" />
-                  <span>Coursera robot: {currentCourseraIndex + 1}/{items.length}...</span>
-                </span>
-                <button
-                  type="button"
-                  onClick={handleStopCourseraBatch}
-                  className="px-3 py-1.5 bg-rose-100 hover:bg-rose-200 text-rose-800 font-bold text-xs rounded-lg cursor-pointer"
-                >
-                  To'xtatish
-                </button>
-              </div>
             )}
 
             {/* Direct Gmail IMAP Auto-Activation Button */}
@@ -825,7 +655,7 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
               onClick={handleSyncGmailActivations}
               disabled={isSyncingGmail}
               className="px-4 py-2.5 bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-700 hover:to-teal-800 text-white font-extrabold text-xs rounded-xl shadow-md flex items-center gap-2 cursor-pointer transition-all active:scale-[0.98] disabled:opacity-50"
-              title="Gmail pochtasidagi barcha yangi tasdiqlash xatlarini izlab topadi va o'quvchilar hisoblarini faollashtiradi"
+              title="akramxonsaidov02@gmail.com pochtasidagi barcha tasdiqlash xatlarini o'zi topib, o'quvchilarni bittada faollashtiradi"
             >
               <Zap className={`w-4 h-4 text-yellow-300 fill-yellow-300 ${isSyncingGmail ? 'animate-spin' : 'animate-pulse'}`} />
               <span>{isSyncingGmail ? "Gmail tekshirilmoqda..." : "⚡️ Gmail'dan Avto-faollashtirish"}</span>
@@ -846,7 +676,7 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
           </div>
 
           {/* Quick Counters */}
-          <div className="flex items-center gap-2.5 text-xs">
+          <div className="flex items-center gap-3 text-xs">
             {certifiedCount > 0 && (
               <span className="px-2.5 py-1 rounded-lg bg-purple-50 text-purple-900 font-bold border border-purple-200 flex items-center gap-1.5">
                 <GraduationCap className="w-3.5 h-3.5 text-purple-600" />
@@ -856,12 +686,7 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
 
             <span className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 font-bold border border-emerald-200 flex items-center gap-1.5">
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Aileaders: {successCount}</span>
-            </span>
-
-            <span className="px-2.5 py-1 rounded-lg bg-blue-50 text-blue-900 font-bold border border-blue-200 flex items-center gap-1.5">
-              <GraduationCap className="w-3.5 h-3.5 text-blue-600" />
-              <span>Coursera faol: {courseraCount}</span>
+              <span>Ro'yxatdan o'tgan: {successCount}</span>
             </span>
 
             <span className="px-2.5 py-1 rounded-lg bg-amber-50 text-amber-800 font-bold border border-amber-200 flex items-center gap-1.5">
@@ -1006,103 +831,66 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
                         </td>
 
                         <td className="py-3 px-4">
-                          <div className="space-y-1.5">
-                            {/* Aileaders Status */}
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-[10px] font-bold text-slate-500 w-14">Aileaders:</span>
-                              {item.status === 'certified' ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-900 border border-purple-200">
-                                  <GraduationCap className="w-3 h-3 text-purple-600" />
-                                  <span>Tugatilgan</span>
-                                </span>
-                              ) : item.status === 'success' ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
-                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                  <span>Ro'yxatdan o'tdi</span>
-                                </span>
-                              ) : item.status === 'processing' ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 animate-pulse">
-                                  <RefreshCw className="w-3 h-3 animate-spin text-blue-600" />
-                                  <span>Yuborilmoqda...</span>
-                                </span>
-                              ) : item.status === 'error' ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200" title={item.errorMessage}>
-                                  <XCircle className="w-3 h-3 text-rose-600" />
-                                  <span className="truncate max-w-[120px]">{item.errorMessage || "Xatolik"}</span>
-                                </span>
-                              ) : (
-                                <span className="text-slate-400 font-medium text-[10px]">Navbatda</span>
-                              )}
-                            </div>
+                          {item.status === 'certified' && (
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-purple-100 text-purple-900 border border-purple-200 shadow-xs">
+                              <GraduationCap className="w-3.5 h-3.5 text-purple-600" />
+                              <span>🎓 Sertifikat mavjud (Tugatilgan)</span>
+                            </span>
+                          )}
 
-                            {/* Coursera Status */}
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-[10px] font-bold text-slate-500 w-14">Coursera:</span>
-                              {item.courseraStatus === 'verified' || !!item.student.courseraVerified || item.status === 'certified' ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-900 border border-blue-200">
-                                  <CheckCircle2 className="w-3 h-3 text-blue-600" />
-                                  <span>Faol & Tasdiqlangan</span>
-                                </span>
-                              ) : item.courseraStatus === 'processing' ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-800 animate-pulse">
-                                  <RefreshCw className="w-3 h-3 animate-spin text-indigo-600" />
-                                  <span>Ulanmoqda...</span>
-                                </span>
-                              ) : item.courseraStatus === 'waiting_email' ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
-                                  <Mail className="w-3 h-3 text-amber-700" />
-                                  <span>Xat kutilmoqda</span>
-                                </span>
-                              ) : item.courseraStatus === 'error' ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
-                                  <AlertTriangle className="w-3 h-3 text-rose-600" />
-                                  <span>Xato</span>
-                                </span>
-                              ) : (
-                                <span className="text-slate-400 font-medium text-[10px]">Ulanmagan</span>
-                              )}
+                          {item.status === 'success' && (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                              <span>✅ Ro'yxatdan o'tdi / Tasdiqlandi</span>
+                            </span>
+                          )}
+
+                          {item.status === 'processing' && (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-blue-100 text-blue-800 animate-pulse">
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600" />
+                              <span>Tekshirilmoqda...</span>
+                            </span>
+                          )}
+
+                          {item.status === 'error' && (
+                            <div className="text-rose-700 font-semibold text-[11px] flex items-start gap-1">
+                              <XCircle className="w-3.5 h-3.5 text-rose-600 flex-shrink-0 mt-0.5" />
+                              <span>{item.errorMessage || "Xatolik yuz berdi"}</span>
                             </div>
-                          </div>
+                          )}
+
+                          {item.status === 'pending' && (
+                            <span className="text-slate-400 font-medium text-[11px]">
+                              Navbatda
+                            </span>
+                          )}
                         </td>
 
                         <td className="py-3 px-3 text-right">
                           {item.status === 'certified' ? (
-                            <span className="text-[10px] text-purple-700 font-bold px-2.5 py-1 bg-purple-50 rounded-lg border border-purple-200 inline-block">
-                              🎓 Sertifikat bor
+                            <span className="text-[10px] text-purple-700 font-bold px-2 py-1 bg-purple-50 rounded-lg border border-purple-200 inline-block">
+                              🎓 Tayyor
                             </span>
                           ) : (
                             <div className="flex items-center justify-end gap-1.5">
-                              {/* Coursera single button */}
-                              <button
-                                type="button"
-                                onClick={() => processStudentCoursera(idx)}
-                                disabled={isRunning || isCourseraRunning}
-                                className="px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 disabled:opacity-50"
-                                title="Ushbu o'quvchini Coursera rasmiy dasturidan ro'yxatdan o'tkazish va tasdiqlash"
-                              >
-                                <GraduationCap className="w-3 h-3 text-blue-600" />
-                                <span>Coursera</span>
-                              </button>
-
-                              {/* Aileaders single retry button */}
                               <button
                                 type="button"
                                 onClick={() => processStudent(idx)}
-                                disabled={isRunning || isCourseraRunning}
-                                className="p-1 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors cursor-pointer"
-                                title="Aileaders'dan qaytadan o'tkazish"
+                                disabled={isRunning}
+                                className="p-1.5 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors cursor-pointer"
+                                title="Qaytadan ro'yxatdan o'tkazish"
                               >
                                 <RefreshCw className="w-3.5 h-3.5" />
                               </button>
 
-                              {/* Manual Link button */}
                               <button
                                 type="button"
                                 onClick={() => handleSingleActivate(idx)}
-                                className="p-1 hover:bg-amber-100 text-amber-700 rounded-lg transition-colors cursor-pointer"
-                                title="Gmail'dan kelgan havolani qo'lda kiritish"
+                                className="px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-[10px] font-bold transition-colors cursor-pointer flex items-center gap-1"
+                                title="Gmail'dan kelgan havolani kiritish"
                               >
-                                <Mail className="w-3.5 h-3.5 text-amber-700" />
+                                <Mail className="w-3 h-3 text-amber-700" />
+                                <span>Havola kiritish</span>
                               </button>
                             </div>
                           )}

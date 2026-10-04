@@ -513,13 +513,13 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
 
       // If document was already registered on Aileaders earlier
       if (lookupResult.result?.code === 'metrika_is_already_in_use' || lookupResult.result?.code === 'passport_already_in_use' || lookupResult.result?.code === 'passport_exists') {
-        const desc = lookupResult.result?.description || "Hujjat band qilingan";
-        log(`⚠️ 4. Ushbu o'quvchi hujjati Aileaders tizimida avval ro'yxatdan o'tgan (${desc}).`);
+        log(`ℹ️ 4. Ushbu o'quvchi Aileaders tizimida allaqachon mavjud! Gmail pochtasidagi xat orqali faollashtiriladi.`);
         return res.json({
-          success: false,
+          success: true,
+          status: 'ALREADY_REGISTERED',
           isAlreadyRegistered: true,
-          error: `⚠️ O'quvchi hujjati Aileaders tizimida allaqachon mavjud (${desc}).`,
-          reason: 'ALREADY_IN_USE',
+          targetEmail: email.trim(),
+          message: "O'quvchi avval ro'yxatdan o'tgan. Gmail'dagi tasdiqlash havolasi orqali faollashtiriladi.",
           logs,
         });
       }
@@ -568,13 +568,13 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
         regResult.result?.description?.includes('кайд килинган');
 
       if (isAlreadyInUse) {
-        const desc = regResult.result?.description || "Hujjat band qilingan";
-        log(`⚠️ 6. Ushbu o'quvchi Aileaders tizimida allaqachon mavjud (${desc}).`);
+        log(`ℹ️ 6. Ushbu o'quvchi Aileaders tizimida allaqachon mavjud! Gmail'dagi tasdiq xati orqali faollashtiriladi.`);
         return res.json({
-          success: false,
+          success: true,
+          status: 'ALREADY_REGISTERED',
           isAlreadyRegistered: true,
-          error: `⚠️ O'quvchi hujjati Aileaders tizimida allaqachon mavjud (${desc}).`,
-          reason: 'ALREADY_IN_USE',
+          targetEmail: registeredEmail,
+          message: "O'quvchi avval ro'yxatdan o'tgan. Gmail pochtasidagi tasdiqlash xati orqali faollashtiriladi.",
           logs,
         });
       }
@@ -872,279 +872,6 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
     }
   });
 
-  // COURSERA AUTOMATION: Register student in official Coursera Learning Program + Auto Verify via IMAP
-  app.post('/api/coursera/register-student', async (req, res) => {
-    let page: any = null;
-    const logs: string[] = [];
-    const log = (msg: string) => {
-      logs.push(`[${new Date().toLocaleTimeString('uz-UZ')}] ${msg}`);
-      console.log(`[Coursera Robot] ${msg}`);
-    };
-
-    try {
-      const { fullName, email, password = 'MaktabPass2026!' } = req.body;
-      if (!fullName || !email) {
-        return res.status(400).json({ success: false, error: "O'quvchi F.I.SH va email manzili ko'rsatilmadi", logs });
-      }
-
-      const cleanEmail = email.trim().toLowerCase();
-      const cleanName = fullName.trim();
-      log(`1. Coursera rasmiy ta'lim dasturi ochilmoqda (learning-program-h13rq)...`);
-
-      const browser = await getBrowser();
-      page = await browser.newPage();
-      await page.setViewport({ width: 1280, height: 900 });
-      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-      await page.setExtraHTTPHeaders({
-        'Accept-Language': 'uz-UZ,uz;q=0.9,ru;q=0.8,en-US;q=0.7,en;q=0.6',
-      });
-
-      const courseraUrl = 'https://www.coursera.org/programs/learning-program-h13rq?authMode=signup';
-      log(`2. Manzil: ${courseraUrl}`);
-      await page.goto(courseraUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-      await new Promise(r => setTimeout(r, 1200));
-
-      // Remove any OneTrust popups or banners
-      await page.evaluate(() => {
-        document.querySelectorAll('#onetrust-consent-sdk, #onetrust-banner-sdk, .onetrust-pc-dark-filter, #onetrust-pc-sdk, .ot-fade-in').forEach(el => el.remove());
-      });
-
-      log(`3. O'quvchi ma'lumotlari kiritilmoqda: "${cleanName}", Email: "${cleanEmail}"...`);
-
-      // Fill Name, Email, Password using robust selectors
-      const nameSel = 'input[name="name"], input#name, input[placeholder*="name" i], input[placeholder*="имя" i]';
-      const emailSel = 'input[name="email"], input#email, input[type="email"], input[placeholder*="email" i]';
-      const passSel = 'input[name="password"], input#password, input[type="password"]';
-
-      await page.waitForSelector(nameSel, { timeout: 15000 });
-      await page.click(nameSel);
-      await page.evaluate((sel: string) => {
-        const el = document.querySelector(sel) as HTMLInputElement;
-        if (el) el.value = '';
-      }, nameSel);
-      await page.type(nameSel, cleanName, { delay: 15 });
-
-      await page.click(emailSel);
-      await page.evaluate((sel: string) => {
-        const el = document.querySelector(sel) as HTMLInputElement;
-        if (el) el.value = '';
-      }, emailSel);
-      await page.type(emailSel, cleanEmail, { delay: 15 });
-
-      await page.click(passSel);
-      await page.evaluate((sel: string) => {
-        const el = document.querySelector(sel) as HTMLInputElement;
-        if (el) el.value = '';
-      }, passSel);
-      await page.type(passSel, password, { delay: 15 });
-
-      await new Promise(r => setTimeout(r, 800));
-
-      log(`4. "Join for Free" (Ro'yxatdan o'tish) ko'k tugmasi bosilmoqda...`);
-      let submitClicked = false;
-      try {
-        const submitBtn = await page.$('button[type="submit"], button.css-18xham5');
-        if (submitBtn) {
-          await submitBtn.click();
-          submitClicked = true;
-        }
-      } catch {}
-
-      if (!submitClicked) {
-        submitClicked = await page.evaluate(() => {
-          const btns = Array.from(document.querySelectorAll('button'));
-          const target = btns.find(b => {
-            const txt = b.innerText.toLowerCase();
-            return b.type === 'submit' ||
-                   txt.includes('join for free') ||
-                   txt.includes('присоединиться') ||
-                   txt.includes('sign up') ||
-                   txt.includes('зарегистрироваться');
-          });
-          if (target) {
-            (target as HTMLElement).click();
-            return true;
-          }
-          return false;
-        });
-      }
-
-      try {
-        await page.keyboard.press('Enter');
-      } catch {}
-
-      log(`5. Coursera serveridan javob va tasdiqlash oynasi kutilmoqda (5 soniya)...`);
-      await new Promise(r => setTimeout(r, 5000));
-
-      // Handle confirmation dialog: click the left/first blue button inside the modal
-      const clickedConfirm = await page.evaluate(() => {
-        const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .cds-dialog, .c-modal, [class*="modal" i], .css-1s5z767');
-        if (dialog) {
-          const btns = Array.from(dialog.querySelectorAll('button, a[role="button"]'));
-          const blueBtn = btns.find(b => {
-            const btnEl = b as HTMLElement;
-            const style = window.getComputedStyle(btnEl);
-            const bg = style.backgroundColor;
-            const cls = btnEl.className.toLowerCase();
-            const txt = (btnEl.innerText || '').toLowerCase();
-            const btnType = (btnEl as HTMLButtonElement).type || '';
-            return cls.includes('primary') || 
-                   bg.includes('rgb(0, 86, 210)') || 
-                   bg.includes('blue') || 
-                   btnType === 'submit' || 
-                   txt.includes('присоединиться') || 
-                   txt.includes('join') || 
-                   txt.includes('дальше') || 
-                   txt.includes('continue');
-          }) || (btns[0] as HTMLElement | undefined);
-          if (blueBtn) {
-            (blueBtn as HTMLElement).click();
-            return { clicked: true, text: (blueBtn as HTMLElement).innerText.trim() };
-          }
-        }
-        return { clicked: false };
-      });
-
-      if (clickedConfirm.clicked) {
-        log(`✅ 6. Hisobni tasdiqlash oynasidagi tugma bosildi: "${clickedConfirm.text || 'Tasdiqlash'}"`);
-      } else {
-        log(`ℹ️ 6. Ro'yxatdan o'tish arizasi qabul qilindi.`);
-      }
-
-      log(`📬 7. Gmail orqali Coursera tasdiqlash xati qidirilmoqda (delay va retry mexanizmi bilan)...`);
-
-      // IMAP Polling with delay and retry (up to 8 attempts with 4.5-second delay)
-      let verificationLink: string | null = null;
-      const maxRetries = 8;
-      const delayMs = 4500;
-
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        log(`Qidiruv [${attempt}/${maxRetries}]: Gmail pochtasi tekshirilmoqda (${cleanEmail})...`);
-        await new Promise(r => setTimeout(r, delayMs));
-
-        try {
-          const { ImapFlow } = await import('imapflow');
-          const client = new ImapFlow({
-            ...GMAIL_AUTH,
-            logger: false,
-          });
-          await client.connect();
-          const lock = await client.getMailboxLock('INBOX');
-          const total = (client.mailbox as any)?.exists || 0;
-          const startSeq = Math.max(1, total - 35);
-
-          for await (let msg of client.fetch(`${startSeq}:*`, { envelope: true, source: true })) {
-            const fromAddr = (msg.envelope?.from?.[0]?.address || '').toLowerCase();
-            const subject = (msg.envelope?.subject || '');
-            const toAddr = (msg.envelope?.to?.[0]?.address || '').toLowerCase().trim();
-
-            const isCoursera = fromAddr.includes('coursera') || fromAddr.includes('no-reply') || subject.includes('coursera') || subject.includes('Подтвердите') || subject.includes('Verify');
-            if (!isCoursera) continue;
-
-            const rawSource = msg.source ? msg.source.toString('utf8') : '';
-            const decoded = rawSource.replace(/=\r?\n/g, '').replace(/=3D/g, '=');
-
-            // Exact match on toAddr OR decoded body containing specific email with exact dots
-            const isMatch = toAddr === cleanEmail || 
-                            decoded.includes(cleanEmail) || 
-                            (subject.toLowerCase().includes(cleanName.toLowerCase().split(' ')[0]) && fromAddr.includes('coursera'));
-
-            if (isMatch) {
-              // Option 1: Blue button (#0056d2) in HTML table/cell
-              const btnMatch = decoded.match(/bgcolor=["']#0056[dD]2["'][^>]*>[\s\S]*?<a[^>]+href=["'](https:\/\/link\.coursera\.org\/[^"']+)["']/i) ||
-                               decoded.match(/background:\s*#0056[dD]2[^"']*["'][^>]*>[\s\S]*?<a[^>]+href=["'](https:\/\/link\.coursera\.org\/[^"']+)["']/i) ||
-                               decoded.match(/<a[^>]+href=["'](https:\/\/link\.coursera\.org\/[^"']+)["'][^>]*style=["'][^"']*#0056/i);
-
-              // Option 2: Fallback direct URL under the button
-              const rawLinkMatch = decoded.match(/href=["'](https:\/\/link\.coursera\.org\/f\/a\/[^"']+)["']/i) ||
-                                   decoded.match(/(https:\/\/link\.coursera\.org\/f\/a\/[a-zA-Z0-9_\-~/+=]+)/i);
-
-              let foundUrl = btnMatch ? btnMatch[1] : (rawLinkMatch ? rawLinkMatch[1] : null);
-              if (foundUrl) {
-                foundUrl = foundUrl.replace(/~=.*$/, '~').replace(/=$/, '').trim();
-                verificationLink = foundUrl;
-                log(`🎯 Coursera tasdiqlash xati topildi: "${subject}" -> ${toAddr}`);
-                break;
-              }
-            }
-          }
-          lock.release();
-          await client.logout();
-
-          if (verificationLink) break;
-        } catch (imapErr: any) {
-          log(`⚠️ IMAP qidiruv xabari: ${imapErr.message}`);
-        }
-      }
-
-      if (verificationLink) {
-        log(`🔗 8. Tasdiqlash havolasi ochilmoqda: ${verificationLink.slice(0, 60)}...`);
-        let verifySuccess = false;
-        try {
-          const verifyResp = await fetch(verificationLink, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            },
-            redirect: 'follow',
-            signal: AbortSignal.timeout(15000),
-          });
-          verifySuccess = verifyResp.ok || verifyResp.status < 400;
-          log(`✅ 9. Coursera hisobi muvaffaqiyatli tasdiqlandi! (Status: ${verifyResp.status}, URL: ${verifyResp.url})`);
-        } catch (e: any) {
-          log(`ℹ️ 9. Havola so'rovi yuborildi: ${e.message}`);
-          verifySuccess = true;
-        }
-
-        // Send Telegram notification
-        try {
-          const users = getTelegramUsers();
-          const tgText = `🎓 <b>Coursera Hisobi Faollashtirildi!</b>\n\n👤 O'quvchi: <b>${cleanName}</b>\n📧 Email: <code>${cleanEmail}</code>\n✅ Holat: Coursera hisobi muvaffaqiyatli tasdiqlangan va faol\n🏛 Dastur: Digital Education Development Centre (Coursera)`;
-          for (const u of users) {
-            if (u.chatId) {
-              await fetch(`https://api.telegram.org/bot8846557313:AAE5J1aRrvJJ2LLZCbD7WlI_JFzhSrmR_tA/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  chat_id: u.chatId,
-                  text: tgText,
-                  parse_mode: 'HTML',
-                }),
-              }).catch(() => {});
-            }
-          }
-        } catch {}
-
-        return res.json({
-          success: true,
-          verified: true,
-          courseraUrl,
-          verificationUrl: verificationLink,
-          message: `✅ ${cleanName} Coursera ta'lim dasturidan muvaffaqiyatli ro'yxatdan o'tkazildi va Gmail orqali hisobi tasdiqlandi!`,
-          logs,
-        });
-      } else {
-        log(`ℹ️ 8. Ro'yxatdan o'tish arizasi Coursera'ga yuborildi. Tasdiq xati yetib kelgach, qayta sinxronlashtirish mumkin.`);
-        return res.json({
-          success: true,
-          verified: false,
-          waitingEmail: true,
-          courseraUrl,
-          message: `Coursera ro'yxatdan o'tish arizasi yuborildi. Tasdiqlash xati Gmail pochtangizga yetib kelishi kutilmoqda.`,
-          logs,
-        });
-      }
-
-    } catch (err: any) {
-      log(`❌ Xatolik yuz berdi: ${err.message}`);
-      return res.status(500).json({ success: false, error: err.message, logs });
-    } finally {
-      if (page) {
-        try { await page.close(); } catch {}
-      }
-    }
-  });
-
   // Get bot status and list of registered teachers
   app.get('/api/telegram/status', (_req, res) => {
     try {
@@ -1411,115 +1138,59 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
     };
 
     try {
-      const { targetEmail, retries = 1, delaySeconds = 3 } = req.body || {};
       const { ImapFlow } = await import('imapflow');
+      const client = new ImapFlow({
+        ...GMAIL_AUTH,
+        logger: false,
+      });
+
+      log(`1. ${GMAIL_AUTH.auth.user} pochta qutisiga ulanilmoqda...`);
+      await client.connect();
+      const lock = await client.getMailboxLock('INBOX');
 
       const activationItems: Array<{
         recipientEmail: string;
         activationUrl: string;
-        type: 'coursera' | 'aileaders';
-        subject: string;
         date: string;
       }> = [];
 
-      const cleanTarget = targetEmail ? targetEmail.trim().toLowerCase() : null;
-      const totalAttempts = Math.max(1, Math.min(retries, 8));
+      try {
+        log(`2. Oxirgi kelgan Aileaders / UzbCoders xatlari tahlil qilinmoqda...`);
+        const total = (client.mailbox as any)?.exists || 0;
+        const startSeq = Math.max(1, total - 40);
+        const seqRange = `${startSeq}:*`;
 
-      for (let attempt = 1; attempt <= totalAttempts; attempt++) {
-        if (attempt > 1 || delaySeconds > 0) {
-          log(`Qidiruv [${attempt}/${totalAttempts}]: Gmail tekshirilmoqda...`);
-          await new Promise(r => setTimeout(r, delaySeconds * 1000));
-        }
-
-        const client = new ImapFlow({
-          ...GMAIL_AUTH,
-          logger: false,
-        });
-
-        try {
-          await client.connect();
-          const lock = await client.getMailboxLock('INBOX');
-          const total = (client.mailbox as any)?.exists || 0;
-          const startSeq = Math.max(1, total - 45);
-          const seqRange = `${startSeq}:*`;
-
-          for await (let msg of client.fetch(seqRange, { source: true, envelope: true })) {
-            const fromAddr = (msg.envelope?.from?.[0]?.address || '').toLowerCase();
-            const subject = (msg.envelope?.subject || '');
-            const toAddress = (msg.envelope?.to?.[0]?.address || '').toLowerCase().trim();
-
+        for await (let msg of client.fetch(seqRange, { source: true, envelope: true })) {
+          const fromAddr = (msg.envelope?.from?.[0]?.address || '').toLowerCase();
+          const subject = (msg.envelope?.subject || '').toLowerCase();
+          if (fromAddr.includes('uzbcoders') || fromAddr.includes('aileaders') || subject.includes('activation') || subject.includes('faollashtirish')) {
             const rawSource = msg.source ? msg.source.toString('utf8') : '';
-            const decoded = rawSource.replace(/=\r?\n/g, '').replace(/=3D/g, '=');
-            const mailDate = msg.envelope?.date ? new Date(msg.envelope.date).toISOString() : new Date().toISOString();
-
-            // Strict target email check if target was passed
-            if (cleanTarget) {
-              const matchesTo = toAddress === cleanTarget || decoded.includes(cleanTarget);
-              if (!matchesTo) continue;
-            }
-
-            // 1. Check Coursera confirmation email
-            const isCoursera = fromAddr.includes('coursera') || fromAddr.includes('no-reply') || subject.includes('coursera') || subject.includes('Подтвердите') || subject.includes('Verify');
-            if (isCoursera) {
-              const btnMatch = decoded.match(/bgcolor=["']#0056[dD]2["'][^>]*>[\s\S]*?<a[^>]+href=["'](https:\/\/link\.coursera\.org\/[^"']+)["']/i) ||
-                               decoded.match(/background:\s*#0056[dD]2[^"']*["'][^>]*>[\s\S]*?<a[^>]+href=["'](https:\/\/link\.coursera\.org\/[^"']+)["']/i) ||
-                               decoded.match(/<a[^>]+href=["'](https:\/\/link\.coursera\.org\/[^"']+)["'][^>]*style=["'][^"']*#0056/i);
-
-              const rawLinkMatch = decoded.match(/href=["'](https:\/\/link\.coursera\.org\/f\/a\/[^"']+)["']/i) ||
-                                   decoded.match(/(https:\/\/link\.coursera\.org\/f\/a\/[a-zA-Z0-9_\-~/+=]+)/i) ||
-                                   decoded.match(/(https?:\/\/(?:www\.)?coursera\.org\/(?:account-verification|account\/email_verify|api\/verifyEmail)[^\s"'<>]+)/i);
-
-              let courseraLink = btnMatch ? btnMatch[1] : (rawLinkMatch ? rawLinkMatch[1] : null);
-              if (courseraLink) {
-                courseraLink = courseraLink.replace(/~=.*$/, '~').replace(/=$/, '').trim();
-                if (!activationItems.some(i => i.activationUrl === courseraLink)) {
-                  activationItems.push({
-                    recipientEmail: toAddress || cleanTarget || '',
-                    activationUrl: courseraLink,
-                    type: 'coursera',
-                    subject,
-                    date: mailDate,
-                  });
-                }
-              }
-            }
-
-            // 2. Check Aileaders / Uzbcoders activation email
-            if (fromAddr.includes('uzbcoders') || fromAddr.includes('aileaders') || fromAddr.includes('noreply') || subject.includes('activation') || subject.includes('faollashtirish')) {
-              const urlMatches = rawSource.match(/https?:\/\/[^\s"'<>]+activate[^\s"'<>]*/gi);
-              if (urlMatches && urlMatches.length > 0) {
-                const cleanUrl = urlMatches[0].replace(/&amp;/g, '&').trim();
-                if (!activationItems.some(i => i.activationUrl === cleanUrl)) {
-                  activationItems.push({
-                    recipientEmail: toAddress || cleanTarget || '',
-                    activationUrl: cleanUrl,
-                    type: 'aileaders',
-                    subject,
-                    date: mailDate,
-                  });
-                }
-              }
+            const toAddress = (msg.envelope?.to?.[0]?.address || '').toLowerCase().trim();
+            const urlMatches = rawSource.match(/https?:\/\/[^\s\"\'<>]+activate[^\s\"\'<>]*/gi);
+            if (urlMatches && urlMatches.length > 0) {
+              const cleanUrl = urlMatches[0].replace(/&amp;/g, '&').trim();
+              const mailDate = msg.envelope?.date ? new Date(msg.envelope.date).toISOString() : new Date().toISOString();
+              activationItems.push({
+                recipientEmail: toAddress,
+                activationUrl: cleanUrl,
+                date: mailDate,
+              });
             }
           }
-          lock.release();
-        } finally {
-          await client.logout();
         }
-
-        if (targetEmail && activationItems.length > 0) {
-          break;
-        }
+      } finally {
+        lock.release();
       }
+      await client.logout();
 
-      log(`3. Gmail'dan jami ${activationItems.length} ta tasdiqlash xati topildi!`);
+      log(`3. Gmail'dan ${activationItems.length} ta faollashtirish havolasi topildi!`);
 
       // De-duplicate by URL
       const uniqueItems = Array.from(new Map(activationItems.map(item => [item.activationUrl, item])).values());
 
-      // Activate each URL
+      // Now activate each unique URL
       const activatedResults: Array<{
         email: string;
-        type: 'coursera' | 'aileaders';
         activationUrl: string;
         success: boolean;
       }> = [];
@@ -1528,29 +1199,26 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
         try {
           const actResp = await fetch(item.activationUrl, {
             headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
               'Accept': 'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8',
             },
-            redirect: 'follow',
-            signal: AbortSignal.timeout(12000),
+            signal: AbortSignal.timeout(10000),
           });
           const actText = await actResp.text();
           const isOk = actResp.ok || actResp.status < 400 || actText.includes('success');
           activatedResults.push({
             email: item.recipientEmail,
-            type: item.type,
             activationUrl: item.activationUrl,
             success: isOk,
           });
-          log(`✅ ${item.type === 'coursera' ? 'Coursera' : 'Aileaders'} hisobi tasdiqlandi: ${item.recipientEmail}`);
+          log(`✅ Faollashtirildi: ${item.recipientEmail}`);
         } catch (e: any) {
           activatedResults.push({
             email: item.recipientEmail,
-            type: item.type,
             activationUrl: item.activationUrl,
             success: false,
           });
-          log(`⚠️ Tasdiqlash xatosi (${item.recipientEmail}): ${e.message}`);
+          log(`⚠️ Faollashtirish xatosi (${item.recipientEmail}): ${e.message}`);
         }
       }
 

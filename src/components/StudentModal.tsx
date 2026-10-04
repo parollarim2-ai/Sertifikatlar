@@ -22,10 +22,7 @@ import {
   Copy,
   AlertOctagon,
   ShieldAlert,
-  Clock,
-  GraduationCap,
-  Zap,
-  RefreshCw
+  Clock
 } from 'lucide-react';
 
 function formatExactCertificateTime(isoString?: string): string {
@@ -89,129 +86,6 @@ export const StudentModal: React.FC<StudentModalProps> = ({
   const [allowDuplicateName, setAllowDuplicateName] = useState(false);
   const [quickCopiedField, setQuickCopiedField] = useState('');
   const [isAiLeadersOpen, setIsAiLeadersOpen] = useState(false);
-  const [isRegisteringCoursera, setIsRegisteringCoursera] = useState(false);
-  const [courseraNotice, setCourseraNotice] = useState('');
-
-  const playChime = () => {
-    try {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(587.33, ctx.currentTime);
-      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1);
-      gain.gain.setValueAtTime(0.2, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.35);
-    } catch {}
-  };
-
-  const handleRegisterCourseraDirect = async () => {
-    if (!formData.fullName || !formData.assignedEmail) {
-      alert("O'quvchi F.I.SH va biriktirilgan Gmail pochtasi kiritilmagan!");
-      return;
-    }
-
-    // Request notification permission if needed
-    if ('Notification' in window && Notification.permission === 'default') {
-      try {
-        await Notification.requestPermission();
-      } catch {}
-    }
-
-    setIsRegisteringCoursera(true);
-    setCourseraNotice("1/3. Coursera ta'lim dasturiga ulanilmoqda...");
-
-    try {
-      const res = await fetch('/api/coursera/register-student', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fullName: formData.fullName,
-          email: formData.assignedEmail,
-          password: formData.assignedPassword || 'MaktabPass2026!',
-        }),
-      });
-
-      const data = await res.json();
-      if (data.success && data.verified) {
-        const updated: Student = {
-          ...formData,
-          courseraVerified: true,
-          courseraRegisteredAt: new Date().toISOString(),
-        };
-        setFormData(updated);
-        onSave(updated);
-        setCourseraNotice("✅ Coursera'dan ro'yxatdan o'tdi va Gmail orqali hisob faollashtirildi!");
-        
-        playChime();
-        if ('Notification' in window && Notification.permission === 'granted') {
-          try {
-            new Notification("Coursera Hisobi Faollashtirildi! 🎓", {
-              body: `${formData.fullName} uchun Coursera hisobi ochildi va tasdiqlandi!`,
-              icon: '/favicon.ico',
-            });
-          } catch {}
-        }
-        setTimeout(() => setCourseraNotice(''), 7000);
-      } else if (data.success && data.waitingEmail) {
-        setCourseraNotice("📬 Coursera so'rovi yuborildi. Gmail pochtasidan tasdiq xati qidirilmoqda...");
-        
-        // Auto-poll IMAP for this specific student's email
-        let pollCount = 0;
-        const pollInterval = setInterval(async () => {
-          pollCount++;
-          try {
-            const checkRes = await fetch('/api/gmail/sync-and-activate', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ targetEmail: formData.assignedEmail, retries: 2, delaySeconds: 2 })
-            });
-            const checkData = await checkRes.json();
-            const found = checkData.activatedResults?.find((r: any) =>
-              r.success && r.type === 'coursera' && r.email?.trim().toLowerCase() === formData.assignedEmail?.trim().toLowerCase()
-            );
-            if (found) {
-              clearInterval(pollInterval);
-              const updated: Student = {
-                ...formData,
-                courseraVerified: true,
-                courseraRegisteredAt: new Date().toISOString(),
-              };
-              setFormData(updated);
-              onSave(updated);
-              setCourseraNotice("✅ Coursera hisobi Gmail orqali muvaffaqiyatli tasdiqlandi!");
-              playChime();
-              if ('Notification' in window && Notification.permission === 'granted') {
-                try {
-                  new Notification("Coursera Hisobi Faollashtirildi! 🎓", {
-                    body: `${formData.fullName} uchun Coursera hisobi tasdiqlandi!`,
-                    icon: '/favicon.ico',
-                  });
-                } catch {}
-              }
-              setTimeout(() => setCourseraNotice(''), 7000);
-            }
-          } catch {}
-
-          if (pollCount >= 5) {
-            clearInterval(pollInterval);
-          }
-        }, 5000);
-      } else {
-        alert(`Xatolik: ${data.error || "Coursera ro'yxatdan o'tishda xatolik yuz berdi"}`);
-        setCourseraNotice('');
-      }
-    } catch (e: any) {
-      alert(`Server xatosi: ${e.message}`);
-      setCourseraNotice('');
-    } finally {
-      setIsRegisteringCoursera(false);
-    }
-  };
 
   const passportInputRef = useRef<HTMLInputElement>(null);
 
@@ -765,17 +639,6 @@ export const StudentModal: React.FC<StudentModalProps> = ({
 
                 <button
                   type="button"
-                  onClick={handleRegisterCourseraDirect}
-                  disabled={isRegisteringCoursera}
-                  className="px-3.5 py-2 text-xs font-bold rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
-                  title="O'quvchini to'g'ridan-to'g'ri Coursera dasturidan ro'yxatdan o'tkazish va Gmail orqali hisobini faollashtirish"
-                >
-                  <GraduationCap className={`w-3.5 h-3.5 ${isRegisteringCoursera ? 'animate-spin' : ''}`} />
-                  <span>{isRegisteringCoursera ? "Coursera'dan o'tkazilmoqda..." : "🎓 Coursera orqali ro'yxatdan o'tish"}</span>
-                </button>
-
-                <button
-                  type="button"
                   onClick={() => setIsAiLeadersOpen(true)}
                   className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-indigo-600 via-blue-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02]"
                   title="aileaders.uz va Coursera saytida ro'yxatdan o'tkazish avtomati"
@@ -783,21 +646,6 @@ export const StudentModal: React.FC<StudentModalProps> = ({
                   <ExternalLink className="w-3.5 h-3.5" />
                   <span>⚡️ Sertifikat olish (AI Leaders & Coursera Avtomat)</span>
                 </button>
-              </div>
-            )}
-
-            {/* Coursera Status / Notice */}
-            {formData.courseraVerified && (
-              <div className="flex items-center gap-2 p-2.5 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs font-bold">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
-                <span>✅ Ushbu o'quvchining rasmiy Coursera hisobi faol va tasdiqlangan!</span>
-              </div>
-            )}
-
-            {courseraNotice && (
-              <div className="p-2.5 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-900 font-semibold animate-fade-in flex items-center gap-2">
-                <RefreshCw className="w-4 h-4 text-blue-600 animate-spin flex-shrink-0" />
-                <span>{courseraNotice}</span>
               </div>
             )}
 
