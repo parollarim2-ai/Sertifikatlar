@@ -139,6 +139,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [isClassBatchModalOpen, setIsClassBatchModalOpen] = useState(false);
   const [batchTargetClass, setBatchTargetClass] = useState<ClassGroup | null>(null);
 
+  // In-app Delete Confirmation state (avoids blocked window.confirm in iframe)
+  const [deleteConfirmation, setDeleteConfirmation] = useState<{
+    isOpen: boolean;
+    type: 'class' | 'student';
+    id: string;
+    name: string;
+    subtitle?: string;
+  } | null>(null);
+
   const handleOpenClassBatch = (cg: ClassGroup) => {
     setBatchTargetClass(cg);
     setIsClassBatchModalOpen(true);
@@ -843,14 +852,30 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         </div>
                       </div>
 
-                      <button
-                        type="button"
-                        onClick={() => setEditingClass(c)}
-                        className="p-1.5 text-slate-400 hover:text-slate-800 rounded-lg hover:bg-slate-100 transition-colors"
-                        title="Tahrirlash"
-                      >
-                        <Edit2 className="w-3.5 h-3.5" />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setEditingClass(c)}
+                          className="p-1.5 text-slate-400 hover:text-slate-800 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+                          title="Sinf ma'lumotlarini tahrirlash"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeleteConfirmation({
+                            isOpen: true,
+                            type: 'class',
+                            id: c.id,
+                            name: `${c.name} sinfi`,
+                            subtitle: `${c.teacherName} rahbarligidagi barcha ${cStudents.length} ta o'quvchi ham butunlay o'chiriladi.`
+                          })}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition-colors cursor-pointer"
+                          title="Sinfni o'chirish"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
 
                     {/* Stats */}
@@ -1031,6 +1056,23 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     >
                       <CreditCard className="w-4 h-4 text-emerald-400" />
                       <span>To'lov</span>
+                    </button>
+
+                    {/* Button 4: Delete this class */}
+                    <button
+                      type="button"
+                      onClick={() => setDeleteConfirmation({
+                        isOpen: true,
+                        type: 'class',
+                        id: currentClass.id,
+                        name: `${currentClass.name} sinfi`,
+                        subtitle: `${currentClass.teacherName} rahbarligidagi barcha o'quvchilar ham butunlay o'chiriladi.`
+                      })}
+                      className="px-3 py-2.5 bg-rose-500/20 hover:bg-rose-600/40 text-rose-200 hover:text-white font-semibold text-xs rounded-xl border border-rose-400/30 flex items-center gap-1.5 transition-colors cursor-pointer"
+                      title="Ushbu sinfni va uning o'quvchilarini o'chirish"
+                    >
+                      <Trash2 className="w-4 h-4 text-rose-400" />
+                      <span>Sinfni o'chirish</span>
                     </button>
                   </div>
                 </div>
@@ -1299,16 +1341,37 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                 Ustozlar paneli
                               </button>
                             ) : (
-                              <button
-                                type="button"
-                                onClick={e => {
-                                  e.stopPropagation();
-                                  if (st.rawStudent) onOpenStudentModal(st.rawStudent);
-                                }}
-                                className="px-2.5 py-1 text-xs font-sans font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded border border-slate-200 transition-colors cursor-pointer"
-                              >
-                                Tahrirlash
-                              </button>
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={e => {
+                                    e.stopPropagation();
+                                    if (st.rawStudent) onOpenStudentModal(st.rawStudent);
+                                  }}
+                                  className="px-2.5 py-1 text-xs font-sans font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded border border-slate-200 transition-colors cursor-pointer"
+                                >
+                                  Tahrirlash
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={e => {
+                                    e.stopPropagation();
+                                    if (st.rawStudent) {
+                                      setDeleteConfirmation({
+                                        isOpen: true,
+                                        type: 'student',
+                                        id: st.rawStudent.id,
+                                        name: st.rawStudent.fullName,
+                                        subtitle: `${st.badgeLabel} o'quvchisi ro'yxatdan butunlay o'chiriladi.`
+                                      });
+                                    }
+                                  }}
+                                  className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors cursor-pointer"
+                                  title="O'quvchini o'chirish"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             )}
                           </td>
                         </tr>
@@ -1967,12 +2030,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    if (confirm(`Haqiqatan ham ${editingClass.name} sinfini o'chirmoqchimisiz?`)) {
-                      onDeleteClass(editingClass.id);
-                      setEditingClass(null);
-                    }
+                    const cls = editingClass;
+                    setEditingClass(null);
+                    setDeleteConfirmation({
+                      isOpen: true,
+                      type: 'class',
+                      id: cls.id,
+                      name: `${cls.name} sinfi`,
+                      subtitle: "Ushbu sinf va unga biriktirilgan barcha o'quvchilar ro'yxatdan butunlay o'chiriladi."
+                    });
                   }}
-                  className="text-xs font-medium text-rose-700 hover:text-rose-800"
+                  className="text-xs font-semibold text-rose-600 hover:text-rose-700 hover:bg-rose-50 px-2.5 py-1.5 rounded-lg border border-rose-200 transition-colors cursor-pointer"
                 >
                   Sinfni o'chirish
                 </button>
@@ -2039,6 +2107,59 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             }
           }}
         />
+      )}
+
+      {/* In-App Delete Confirmation Modal (100% works inside iframe) */}
+      {deleteConfirmation && deleteConfirmation.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
+          <div className="bg-white border border-slate-200 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 animate-scale-up">
+            <div className="flex items-start gap-3.5">
+              <div className="w-11 h-11 rounded-xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center flex-shrink-0 shadow-xs">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="text-base font-bold text-slate-900">
+                  {deleteConfirmation.type === 'class' ? "Sinfni o'chirish" : "O'quvchini o'chirish"}
+                </h3>
+                <p className="text-sm text-slate-600 mt-1">
+                  Haqiqatan ham <strong className="text-slate-900 font-semibold">{deleteConfirmation.name}</strong> ni butunlay o'chirib tashlamoqchimisiz?
+                </p>
+                {deleteConfirmation.subtitle && (
+                  <p className="text-xs text-rose-600 font-medium mt-2 bg-rose-50/80 p-2.5 rounded-xl border border-rose-200">
+                    ⚠️ {deleteConfirmation.subtitle}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmation(null)}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors cursor-pointer"
+              >
+                Bekor qilish (ESC)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (deleteConfirmation.type === 'class') {
+                    onDeleteClass(deleteConfirmation.id);
+                    showQuickToast(`🗑 ${deleteConfirmation.name} muvaffaqiyatli o'chirildi`);
+                  } else {
+                    onDeleteStudent(deleteConfirmation.id);
+                    showQuickToast(`🗑 ${deleteConfirmation.name} ro'yxatdan o'chirildi`);
+                  }
+                  setDeleteConfirmation(null);
+                }}
+                className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Ha, o'chirilsin</span>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

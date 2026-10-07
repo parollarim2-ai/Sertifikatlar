@@ -131,6 +131,18 @@ export function extractPassportDigits(raw?: string): string {
  * based on class grade. If class grade <= 9, it is ALWAYS 'metrika'.
  */
 export function detectStudentDocType(className?: string, studentPassport?: string): 'metrika' | 'passport' {
+  if (studentPassport) {
+    const clean = studentPassport.trim().toUpperCase().replace(/\s+/g, '');
+    // Standard Uzbek Passport or ID Card: 2 letters (AA, AB, AC, AD, FA, etc.) followed by 7 digits
+    if (/^[A-Z]{2}\d{7}$/.test(clean)) {
+      return 'passport';
+    }
+    // Roman numeral metrika (I-..., II-..., etc.) or containing hyphen
+    if (/^[IVX]+-?[A-Z]+/i.test(clean) || clean.includes('-')) {
+      return 'metrika';
+    }
+  }
+
   if (className) {
     const match = className.match(/^(\d{1,2})/);
     if (match) {
@@ -143,14 +155,6 @@ export function detectStudentDocType(className?: string, studentPassport?: strin
     }
   }
 
-  if (studentPassport) {
-    const clean = studentPassport.trim().toUpperCase();
-    if (clean.startsWith('I') || clean.includes('-') || !clean.match(/^[A-Z]{2}\d{7}$/)) {
-      return 'metrika';
-    }
-    return 'passport';
-  }
-
   return 'metrika';
 }
 
@@ -158,21 +162,25 @@ export function detectStudentDocType(className?: string, studentPassport?: strin
  * Extracts normalized series and 7-digit number from student document string
  */
 export function extractDocSeriesAndNumber(docType: 'metrika' | 'passport', rawId: string): { series: string; number: string } {
-  const trimmed = (rawId || '').trim();
+  const trimmed = (rawId || '').trim().toUpperCase();
   const digits = extractPassportDigits(trimmed) || trimmed.replace(/\D/g, '').slice(-7);
 
   if (docType === 'metrika') {
-    // Look for Roman numeral series like I-FR, II-TO, I-TN, or IFR
-    const match = trimmed.match(/^([I|V|X]+-[A-Z]+|[I|V|X]+[A-Z]+|[A-Za-z\-]+)/i);
+    // Convert 1-AS -> I-AS, 2-TO -> II-TO, 3-TN -> III-TN if user entered arabic numbers
+    let norm = trimmed;
+    if (/^1-/.test(norm)) norm = 'I-' + norm.slice(2);
+    else if (/^2-/.test(norm)) norm = 'II-' + norm.slice(2);
+    else if (/^3-/.test(norm)) norm = 'III-' + norm.slice(2);
+
+    const match = norm.match(/^([IVX]+-[A-Z]+|[IVX]+[A-Z]+|[A-Z]{1,2}-[A-Z]+|[A-Za-z\-]+)/i);
     let series = match ? match[0].toUpperCase() : 'I-FR';
-    // Format IFR to I-FR if needed
     if (series.startsWith('I') && !series.includes('-') && series.length >= 3) {
       series = `I-${series.slice(1)}`;
     }
     if (!series || series.length < 2) series = 'I-FR';
     return { series, number: digits };
   } else {
-    // 2-letter uppercase series like AA, AB, AC
+    // 2-letter uppercase series like AA, AB, AC, AD, FA
     const match = trimmed.match(/^[A-Za-z]{2}/);
     const series = match ? match[0].toUpperCase() : 'AA';
     return { series, number: digits };

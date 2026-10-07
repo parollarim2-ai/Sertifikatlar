@@ -179,13 +179,13 @@ export default function App() {
   // Firestore real-time subscriptions
   useEffect(() => {
     const unsubClasses = subscribeToClasses((remoteClasses) => {
-      if (remoteClasses && remoteClasses.length > 0) {
+      if (remoteClasses) {
         setClasses(remoteClasses);
       }
     });
 
     const unsubStudents = subscribeToStudents((remoteStudents) => {
-      if (remoteStudents && remoteStudents.length > 0) {
+      if (remoteStudents) {
         setStudents(remoteStudents);
       }
     });
@@ -326,10 +326,12 @@ export default function App() {
   };
 
   const handleDeleteStudent = async (studentId: string) => {
-    if (confirm("Haqiqatan ham ushbu o'quvchini ro'yxatdan o'chirmoqchimisiz?")) {
-      setStudents(prev => prev.filter(s => s.id !== studentId));
-      setActiveStudentModal(null);
+    setStudents(prev => prev.filter(s => s.id !== studentId));
+    setActiveStudentModal(null);
+    try {
       await syncDeleteStudent(studentId);
+    } catch (e) {
+      console.error("O'quvchini o'chirishda xatolik:", e);
     }
   };
 
@@ -346,15 +348,17 @@ export default function App() {
   };
 
   const handleDeleteClass = async (classId: string) => {
-    if (confirm("Ushbu sinf va barcha tegishli ma'lumotlarni o'chirishni tasdiqlaysizmi?")) {
-      const studentsToDelete = students.filter(s => s.classId === classId);
-      setClasses(prev => prev.filter(c => c.id !== classId));
-      setStudents(prev => prev.filter(s => s.classId !== classId));
-      
+    const studentsToDelete = students.filter(s => s.classId === classId);
+    setClasses(prev => prev.filter(c => c.id !== classId));
+    setStudents(prev => prev.filter(s => s.classId !== classId));
+    
+    try {
       await syncDeleteClass(classId);
       for (const s of studentsToDelete) {
         await syncDeleteStudent(s.id);
       }
+    } catch (e) {
+      console.error("Sinfni o'chirishda xatolik:", e);
     }
   };
 
@@ -571,15 +575,12 @@ export default function App() {
   };
 
   const handleClearAllData = () => {
-    if (confirm("Diqqat! Barcha sinflar va o'quvchilar ro'yxati to'liq o'chiriladi. Davom ettirasizmi?")) {
-      setClasses([]);
-      setStudents([]);
-      setTeacherCertificates([]);
-      localStorage.removeItem(STORAGE_CLASSES_KEY);
-      localStorage.removeItem(STORAGE_STUDENTS_KEY);
-      localStorage.removeItem(STORAGE_TEACHERS_KEY);
-      alert("Ma'lumotlar bazasi tozalandi.");
-    }
+    setClasses([]);
+    setStudents([]);
+    setTeacherCertificates([]);
+    localStorage.removeItem(STORAGE_CLASSES_KEY);
+    localStorage.removeItem(STORAGE_STUDENTS_KEY);
+    localStorage.removeItem(STORAGE_TEACHERS_KEY);
   };
 
   return (

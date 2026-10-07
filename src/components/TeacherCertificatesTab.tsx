@@ -604,10 +604,8 @@ export const TeacherCertificatesTab: React.FC<TeacherCertificatesTabProps> = ({
                           </button>
                           <button
                             onClick={() => {
-                              if (confirm(`Haqiqatan ham "${teacher.fullName}" ni o'chirmoqchimisiz?`)) {
-                                onDeleteTeacher(teacher.id);
-                                showToast("Ustoz o'chirildi");
-                              }
+                              onDeleteTeacher(teacher.id);
+                              showToast("Ustoz ro'yxatdan o'chirildi");
                             }}
                             className="p-1.5 rounded-lg text-rose-500 hover:text-rose-700 hover:bg-rose-50 transition-colors"
                             title="O'chirish"

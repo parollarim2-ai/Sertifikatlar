@@ -294,16 +294,24 @@ export function cleanFullName(rawName: string): string {
 
   // In Uzbek names, stop at the patronymic ("o'g'li", "qizi", "-ovich", "-ovna")
   let nameWords = rawWords.slice(0, 5);
+  let hasPatronymic = false;
   for (let i = 1; i < nameWords.length; i++) {
     const w = nameWords[i].toLowerCase();
     if (w === "o'g'li" || w === "qizi" || w === "ogli" || w === "ugli" || w === "kizi" || w === "ўғли" || w === "қизи" || w === "угли" || w === "кизи") {
       nameWords = nameWords.slice(0, i + 1);
+      hasPatronymic = true;
       break;
     }
     if (/(?:ovich|ovna|yevich|yevna|ович|овна|евич|евна)$/i.test(w)) {
       nameWords = nameWords.slice(0, i + 1);
+      hasPatronymic = true;
       break;
     }
+  }
+
+  // If no patronymic marker was detected, a standard Uzbek full name is at most 3 words (Familiya, Ism, Sharif)
+  if (!hasPatronymic && nameWords.length > 3) {
+    nameWords = nameWords.slice(0, 3);
   }
 
   if (nameWords.length < 2) return '';
@@ -340,34 +348,35 @@ export function parseSingleStudentLine(line: string): ParsedStudentPreview | nul
   }
 
   if (parts.length >= 2) {
-    let nameCandidate = '';
     let birthCandidate = '';
     let passCandidate = '';
+    const consumedIndices = new Set<number>();
 
-    // Check adjacent cells for series + document number (e.g. "AA" in one cell, "1234567" in next)
+    // 1. Check adjacent cells for series + document number (e.g. "I-FR" in one cell, "0682635" in next)
     for (let i = 0; i < parts.length - 1; i++) {
-      if (!passCandidate) {
+      if (!passCandidate && !consumedIndices.has(i) && !consumedIndices.has(i + 1)) {
         const combined = `${parts[i]} ${parts[i + 1]}`.trim();
         const { passportOrId } = extractPassportOrId(combined);
         if (passportOrId) {
           passCandidate = passportOrId;
+          consumedIndices.add(i);
+          consumedIndices.add(i + 1);
+          break;
         }
       }
     }
 
-    for (const part of parts) {
-      if (!part) continue;
-      // Skip pure line number cells (e.g. "1", "24", "10.")
-      if (/^\s*\d{1,3}[\.\)\-]?\s*$/.test(part)) {
-        continue;
-      }
+    // 2. Scan cells for date and standalone passport
+    parts.forEach((part, idx) => {
+      if (!part || consumedIndices.has(idx)) return;
 
       // Check date
       if (!birthCandidate) {
         const { birthDate } = extractBirthDate(part);
         if (birthDate) {
           birthCandidate = birthDate;
-          continue;
+          consumedIndices.add(idx);
+          return;
         }
       }
 
@@ -376,29 +385,56 @@ export function parseSingleStudentLine(line: string): ParsedStudentPreview | nul
         const { passportOrId } = extractPassportOrId(part);
         if (passportOrId) {
           passCandidate = passportOrId;
-          continue;
+          consumedIndices.add(idx);
+          return;
         }
       }
+    });
 
-      // Check name (ignore address/phone parts)
-      if (!nameCandidate) {
-        // Skip obvious address or phone parts
-        if (/\b(?:viloyat|tuman|shahar|qishloq|mahalla|ko'cha|uy|xonadon|\+?998)\b/i.test(part)) {
-          continue;
-        }
-        const cleaned = cleanFullName(part);
-        if (cleaned && cleaned.split(/\s+/).length >= 2) {
-          nameCandidate = cleaned;
-        }
+    // 3. Collect remaining candidate name parts
+    const eligibleCells: string[] = [];
+    parts.forEach((part, idx) => {
+      if (!part || consumedIndices.has(idx)) return;
+
+      // Skip row numbers ("1", "24", "10.")
+      if (/^\s*\d{1,3}[\.\)\-]?\s*$/.test(part)) return;
+
+      // Skip gender words
+      if (/^(erkak|ayol|o'g'il\s*bola|qiz\s*bola|o'g'il|qiz|jinsi|еркак|аёл|ўғил|қиз|жинси|[emжм])$/i.test(part)) return;
+
+      // Skip parent indicators
+      if (/\b(?:ota-onasi|otasi|onasi|vasiy|родител)\b/i.test(part)) return;
+
+      // Skip phones or addresses
+      if (/\b(?:viloyat|tuman|shahar|qishloq|mahalla|ko'cha|uy|xonadon|\+?998|вилоят|туман|шаҳар|маҳалла|кўча)\b/i.test(part)) return;
+
+      // Skip document labels
+      if (/^(pasport|metrika|guvohnoma|hujjat|seriya|raqam|паспорт|метрика|гувоҳнома|ҳужжат)$/i.test(part)) return;
+
+      eligibleCells.push(part);
+    });
+
+    // If the first eligible cell already has a full name (>= 2 words), use it directly!
+    // Do NOT concatenate parent or address cells that might follow.
+    if (eligibleCells.length > 0) {
+      const firstCellCleaned = cleanFullName(eligibleCells[0]);
+      if (firstCellCleaned && firstCellCleaned.split(/\s+/).length >= 2) {
+        return {
+          fullName: firstCellCleaned,
+          birthDate: birthCandidate,
+          passportOrId: passCandidate,
+        };
       }
-    }
 
-    if (nameCandidate) {
-      return {
-        fullName: nameCandidate,
-        birthDate: birthCandidate,
-        passportOrId: passCandidate,
-      };
+      // Otherwise combine up to 3 separate cells (Familiya, Ism, Sharif)
+      const combinedCandidate = cleanFullName(eligibleCells.slice(0, 3).join(' '));
+      if (combinedCandidate && combinedCandidate.split(/\s+/).length >= 2) {
+        return {
+          fullName: combinedCandidate,
+          birthDate: birthCandidate,
+          passportOrId: passCandidate,
+        };
+      }
     }
   }
 

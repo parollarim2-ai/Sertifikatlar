@@ -61,6 +61,9 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
   
   const [parsedStudents, setParsedStudents] = useState<ParsedStudentPreview[]>([]);
   const [uploadedFileName, setUploadedFileName] = useState('');
+  const [currentFile, setCurrentFile] = useState<File | null>(null);
+  const [availableSheets, setAvailableSheets] = useState<string[]>([]);
+  const [activeSheetName, setActiveSheetName] = useState<string>('');
   const [rawExtractedText, setRawExtractedText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [isAiScanning, setIsAiScanning] = useState(false);
@@ -166,14 +169,24 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
           setParsedStudents(prev => {
             return prev.map(existing => {
               const normExist = existing.fullName.toLowerCase().replace(/[^a-z\u0400-\u04FF]/g, '');
+              const existWords = existing.fullName.toLowerCase().split(/\s+/).filter(Boolean);
+
               const aiMatch = aiData.students.find((aiSt: any) => {
                 const normAi = (aiSt.fullName || '').toLowerCase().replace(/[^a-z\u0400-\u04FF]/g, '');
-                return (
-                  normExist.includes(normAi) ||
-                  normAi.includes(normExist) ||
-                  (normExist.length >= 6 && normAi.length >= 6 && normExist.slice(0, 6) === normAi.slice(0, 6))
-                );
+                if (normExist === normAi) return true;
+
+                // Match with high confidence on both first and last name
+                const aiWords = (aiSt.fullName || '').toLowerCase().split(/\s+/).filter(Boolean);
+                if (existWords.length >= 2 && aiWords.length >= 2) {
+                  const lastMatch = existWords[0] === aiWords[0] || 
+                    (existWords[0].length >= 5 && aiWords[0].length >= 5 && existWords[0].slice(0, 5) === aiWords[0].slice(0, 5));
+                  const firstMatch = existWords[1] === aiWords[1] || 
+                    (existWords[1].length >= 4 && aiWords[1].length >= 4 && existWords[1].slice(0, 4) === aiWords[1].slice(0, 4));
+                  return lastMatch && firstMatch;
+                }
+                return false;
               });
+
               if (aiMatch) {
                 return {
                   fullName: existing.fullName,
@@ -194,14 +207,17 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
     }
   };
 
-  // Process uploaded file
-  const handleProcessFile = async (file: File) => {
+  // Process uploaded file (with optional target sheet)
+  const handleProcessFile = async (file: File, targetSheet?: string) => {
     setIsProcessing(true);
+    setCurrentFile(file);
     setUploadedFileName(file.name);
 
     try {
-      const extracted = await extractStudentsFromFile(file);
+      const extracted = await extractStudentsFromFile(file, targetSheet);
       setRawExtractedText(extracted.rawText || '');
+      setAvailableSheets(extracted.availableSheets || []);
+      setActiveSheetName(extracted.activeSheetName || '');
 
       if (uploadMode === 'new') {
         if (extracted.detectedClassName && !newClassName) {
@@ -253,6 +269,11 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  const handleSwitchSheet = async (sheet: string) => {
+    if (!currentFile || sheet === activeSheetName) return;
+    await handleProcessFile(currentFile, sheet);
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -349,15 +370,8 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
     let studentsToInsert = validStudents;
 
     if (uploadMode === 'existing' && duplicateCount > 0) {
-      const proceed = confirm(
-        `Diqqat: Yuklanayotgan ro'yxatda ${duplicateCount} ta o'quvchi ushbu sinfda allaqachon mavjud!\n\n` +
-        `Takroriy o'quvchilarni tashlab ketib, faqat yangilarini qo'shishni xohlaysizmi?\n` +
-        `- "OK" ni bossangiz faqat yangi o'quvchilar qo'shiladi.\n` +
-        `- "Bekor qilish" ni bossangiz barcha qatorlar qo'shiladi.`
-      );
-      if (proceed) {
-        studentsToInsert = validStudents.filter(s => !isDuplicateName(s.fullName));
-      }
+      // Automatically skip duplicates when adding to an existing class
+      studentsToInsert = validStudents.filter(s => !isDuplicateName(s.fullName));
     }
 
     if (studentsToInsert.length === 0) {
@@ -682,6 +696,39 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
           {/* PREVIEW OF PARSED STUDENTS TABLE */}
           {parsedStudents.length > 0 && (
             <div className="space-y-3">
+
+              {/* Multi-sheet Excel Selector Banner */}
+              {availableSheets.length > 1 && (
+                <div className="p-3.5 bg-blue-50/90 border border-blue-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-xs animate-fade-in">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center font-bold flex-shrink-0">
+                      <FileSpreadsheet className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <span className="font-bold text-slate-900 block">Excel Fayli Varoqlari (Sheets):</span>
+                      <span className="text-[11px] text-slate-600">
+                        Ushbu Excel faylda {availableSheets.length} ta varoq topildi. Kerakli sinf varog'ini tanlang:
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {availableSheets.map(sheet => (
+                      <button
+                        key={sheet}
+                        type="button"
+                        onClick={() => handleSwitchSheet(sheet)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                          activeSheetName === sheet
+                            ? 'bg-blue-600 text-white shadow-xs ring-2 ring-blue-300'
+                            : 'bg-white text-slate-700 hover:bg-blue-100/70 border border-slate-200'
+                        }`}
+                      >
+                        {sheet}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               
               {/* Duplicate Passport/Metrika Warning Banner */}
               {duplicatePassports.size > 0 && (

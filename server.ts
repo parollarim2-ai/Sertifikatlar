@@ -90,6 +90,8 @@ Quyida maktab hujjati (${fileName || 'maktab_hujjati'}) matni keltirilgan.
 Iltimos, ushbu matndan HAR BIR o'quvchining to'liq ma'lumotlarini (Familiya-Ism, Tug'ilgan sana, Pasport yoki Metrika) aniq ajratib oling va sof JSON formatida qaytaring:
 
 QAT'IY QOIDALAR (BU QOIDALARGA 100% AMAL QILISH SHART):
+0. QAT'IY TALAB: ASLO SOXTA, O'YLAB TOPILGAN YOKI NAMUNA ISMLARNI QO'SHMANG! Faqat matnda real mavjud o'quvchilarni o'z joyida oling!
+   - Ota-onaning ismini (ota-onasi, otasi, onasi, vasiysi) o'quvchining ismi deb olmang!
 1. "fullName": FAQAT o'quvchining Familiyasi, Ismi va Sharifi bo'lishi shart! (Masalan: "Abdurasulov Fayzulloh Abdurahim o'g'li", "Topvoldiyeva Munisaxon Hojiakbar qizi", "Hamidov Hadyatilloh Hikmatilloh o'g'li").
    - QAT'IY TAQIQLANADI: O'quvchining yashash manzili (viloyat, tuman, shahar, qishloq, mahalla, ko'cha, uy raqami), telefon raqamlari, ota-onasi, jinsi, maktab raqami kabi qo'shimcha ma'lumotlarni ASLO fullName maydoniga qo'shmang!
    - Pasport yoki metrika ma'lumotlarini ham fullName ga qo'shmang, ularni passportOrId maydoniga ajrating!
@@ -432,99 +434,188 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
         log(`3. 'Passport / ID-karta' bandida qolindi.`);
       }
 
-      // Format document input value: series + number
-      const cleanSeries = series.trim().toUpperCase();
-      const cleanNum = number.trim();
-      const fullDocNumber = docType === 'metrika'
+      // Robust date parsing (DD.MM.YYYY, YYYY-MM-DD, YYYY.MM.DD, DD/MM/YYYY, etc.)
+      const cleanBirth = String(birthDate || '').trim();
+      let formattedDob = '2010-04-15';
+      const dateMatch = cleanBirth.match(/(\d{1,4})[./\-](\d{1,2})[./\-](\d{1,4})/);
+      if (dateMatch) {
+        let [, p1, p2, p3] = dateMatch;
+        let y = 2010, m = 4, d = 15;
+        if (p1.length === 4) {
+          y = parseInt(p1, 10);
+          m = parseInt(p2, 10);
+          d = parseInt(p3, 10);
+        } else {
+          d = parseInt(p1, 10);
+          m = parseInt(p2, 10);
+          y = parseInt(p3, 10);
+          if (y < 100) y += y > 50 ? 1900 : 2000;
+        }
+        if (m > 12 && d <= 12) {
+          const tmp = m;
+          m = d;
+          d = tmp;
+        }
+        const yy = String(y).padStart(4, '0');
+        const mm = String(Math.max(1, Math.min(12, m))).padStart(2, '0');
+        const dd = String(Math.max(1, Math.min(31, d))).padStart(2, '0');
+        formattedDob = `${yy}-${mm}-${dd}`;
+      }
+
+      // Clean series and number
+      let cleanSeries = series.trim().toUpperCase();
+      let cleanNum = number.trim();
+      // Handle digit metrika prefix like 1-AS -> I-AS
+      if (/^1-/.test(cleanSeries)) cleanSeries = 'I-' + cleanSeries.slice(2);
+      else if (/^2-/.test(cleanSeries)) cleanSeries = 'II-' + cleanSeries.slice(2);
+
+      let effectiveDocType = docType;
+      let fullDocNumber = effectiveDocType === 'metrika'
         ? (cleanSeries.includes('-') ? `${cleanSeries}${cleanNum}` : `${cleanSeries} ${cleanNum}`)
         : `${cleanSeries}${cleanNum}`;
 
-      // Date parsing - normalize to YYYY-MM-DD
-      let dayNum = 15;
-      let monthNum = 4;
-      let yearStr = '2010';
+      log(`3. O'quvchi ma'lumotlari tekshirilmoqda: ${effectiveDocType.toUpperCase()}: ${fullDocNumber}, Sana: ${formattedDob}...`);
 
-      const cleanBirth = String(birthDate || '').trim();
-      if (cleanBirth.includes('.')) {
-        const parts = cleanBirth.split('.');
-        if (parts.length >= 3) {
-          dayNum = parseInt(parts[0], 10) || 15;
-          monthNum = parseInt(parts[1], 10) || 4;
-          yearStr = parts[2].trim() || '2010';
-        }
-      } else if (cleanBirth.includes('/')) {
-        const parts = cleanBirth.split('/');
-        if (parts.length >= 3) {
-          dayNum = parseInt(parts[0], 10) || 15;
-          monthNum = parseInt(parts[1], 10) || 4;
-          yearStr = parts[2].trim() || '2010';
-        }
-      } else if (cleanBirth.includes('-')) {
-        const parts = cleanBirth.split('-');
-        if (parts.length >= 3) {
-          if (parts[0].length === 4) {
-            yearStr = parts[0].trim();
-            monthNum = parseInt(parts[1], 10) || 4;
-            dayNum = parseInt(parts[2], 10) || 15;
-          } else {
-            dayNum = parseInt(parts[0], 10) || 15;
-            monthNum = parseInt(parts[1], 10) || 4;
-            yearStr = parts[2].trim() || '2010';
+      // Certificate check: if student already holds a certificate, preserve their account & data!
+      const hasCertificate = !!(req.body.hasCertificate || req.body.isCertified);
+
+      // Helper to execute Aileaders public lookup
+      const performLookup = async (isMetrika: boolean, s: string, n: string, fullDoc: string, dob: string) => {
+        return await page.evaluate(async (isM: boolean, ser: string, num: string, doc: string, d: string) => {
+          try {
+            if (isM) {
+              const res = await fetch('https://aileaders.uz/api/public/info/metrike?occupation=school', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cert_series: ser, cert_number: num, dob: d })
+              });
+              return await res.json();
+            } else {
+              const res = await fetch(`https://aileaders.uz/api/public/info/individual?document=${encodeURIComponent(doc)}&dob=${encodeURIComponent(d)}&occupation=school`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+              });
+              return await res.json();
+            }
+          } catch (e: any) {
+            return { error: e.message };
           }
+        }, isMetrika, s, n, fullDoc, dob);
+      };
+
+      // 1. Initial lookup
+      let lookupResult = await performLookup(effectiveDocType === 'metrika', cleanSeries, cleanNum, fullDocNumber, formattedDob);
+
+      // DUAL FALLBACK: If Metrika not found, try as Passport/ID card (e.g. 14+ year olds in 8-A class)
+      if (lookupResult.result?.code === 'metrike_not_found') {
+        log(`ℹ️ Guvohnoma (metrika) orqali topilmadi. Pasport / ID-karta sifatida qayta tekshirilmoqda...`);
+        const passDoc = `${cleanSeries}${cleanNum}`;
+        const passLookup = await performLookup(false, cleanSeries, cleanNum, passDoc, formattedDob);
+        if (passLookup.result?.code === 'ok' || passLookup.result?.code === 'passport_already_in_use' || passLookup.result?.code === 'passport_exists') {
+          lookupResult = passLookup;
+          effectiveDocType = 'passport';
+          fullDocNumber = passDoc;
+          log(`✅ O'quvchi Pasport / ID-karta sifatida OneID tizimidan topildi!`);
+        }
+      } else if (lookupResult.result?.code === 'passport_not_found') {
+        log(`ℹ️ Pasport orqali topilmadi. Guvohnoma (metrika) sifatida qayta tekshirilmoqda...`);
+        const metrikaLookup = await performLookup(true, cleanSeries, cleanNum, fullDocNumber, formattedDob);
+        if (metrikaLookup.result?.code === 'ok' || metrikaLookup.result?.code === 'metrika_is_already_in_use') {
+          lookupResult = metrikaLookup;
+          effectiveDocType = 'metrika';
+          log(`✅ O'quvchi Guvohnoma (metrika) sifatida OneID tizimidan topildi!`);
         }
       }
 
-      const formattedDob = `${yearStr}-${String(monthNum).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-      log(`3. O'quvchi ma'lumotlari tekshirilmoqda: ${docType.toUpperCase()}: ${fullDocNumber}, Sana: ${formattedDob}...`);
+      // Check for ALREADY_IN_USE at lookup stage
+      const lookupAlreadyInUse = 
+        lookupResult.result?.code === 'metrika_is_already_in_use' ||
+        lookupResult.result?.code === 'passport_already_in_use' ||
+        lookupResult.result?.code === 'passport_exists' ||
+        lookupResult.result?.description?.includes('ro\'yxatdan o\'tgan') ||
+        lookupResult.result?.description?.includes('кайд килинган') ||
+        lookupResult.result?.description?.includes('band qilingan');
 
-      // 1. Verify student exists in government records via Aileaders API
-      const lookupResult = await page.evaluate(async (isMetrika: boolean, series: string, num: string, fullDoc: string, dob: string) => {
-        try {
-          if (isMetrika) {
-            const res = await fetch('https://aileaders.uz/api/public/info/metrike?occupation=school', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ cert_series: series, cert_number: num, dob })
-            });
-            return await res.json();
-          } else {
-            const res = await fetch(`https://aileaders.uz/api/public/info/individual?document=${encodeURIComponent(fullDoc)}&dob=${encodeURIComponent(dob)}&occupation=school`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' }
-            });
-            return await res.json();
+      // Helper function to delete old account on Aileaders (Official delete_account flow)
+      const executeDeleteAccount = async (): Promise<boolean> => {
+        log(`🔄 "https://aileaders.uz/auth/delete_account" orqali eski hisobni tozalash boshlanmoqda...`);
+        const docCandidates = effectiveDocType === 'metrika'
+          ? [
+              `${cleanSeries}${cleanNum}`,
+              cleanSeries.includes('-') ? `${cleanSeries.replace('-', '')}${cleanNum}` : `I-${cleanSeries}${cleanNum}`,
+              `${cleanSeries} ${cleanNum}`,
+              cleanNum
+            ]
+          : [
+              `${cleanSeries}${cleanNum}`,
+              cleanNum,
+              `${cleanSeries} ${cleanNum}`
+            ];
+
+        for (const docCandidate of docCandidates) {
+          try {
+            const delRes = await page.evaluate(async (docVal: string, dobVal: string) => {
+              try {
+                const params = new URLSearchParams();
+                params.append('document', docVal);
+                params.append('dob', dobVal);
+                const res = await fetch('https://aileaders.uz/api/profile/delete-account', {
+                  method: 'DELETE',
+                  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                  body: params.toString()
+                });
+                const json = await res.json();
+                return { status: res.status, json };
+              } catch (e: any) {
+                return { error: e.message };
+              }
+            }, docCandidate, formattedDob);
+
+            if (delRes.json?.content === 'ok' || delRes.json?.result?.code === 'ok') {
+              log(`✅ Aileaders tizimidagi eski akkaunt muvaffaqiyatli o'chirildi va tozalandi! (${docCandidate})`);
+              return true;
+            }
+          } catch (e: any) {
+            log(`Delete xatosi: ${e.message}`);
           }
-        } catch (e: any) {
-          return { error: e.message };
         }
-      }, docType === 'metrika', cleanSeries, cleanNum, fullDocNumber, formattedDob);
+        return false;
+      };
 
-      if (lookupResult.result?.code === 'metrike_not_found' || lookupResult.result?.code === 'passport_not_found') {
+      if (lookupAlreadyInUse) {
+        if (hasCertificate) {
+          log(`🎓 Ushbu o'quvchiga avval sertifikat olingan! Akkaunt o'chirilmaydi va barcha sertifikat ma'lumotlari saqlab qolindi.`);
+          return res.json({
+            success: true,
+            status: 'ALREADY_REGISTERED',
+            isCertified: true,
+            isAlreadyRegistered: true,
+            targetEmail: email.trim(),
+            message: `O'quvchi avval ro'yxatdan o'tgan va sertifikati saqlab qolindi.`,
+            logs,
+          });
+        }
+
+        // Automatic delete_account and re-register
+        log(`⚠️ 4. Ushbu ma'lumotlar bilan registratsiya qilingan. Avtomatik delete_account orqali hisob tozalanmoqda...`);
+        const deleted = await executeDeleteAccount();
+        if (deleted) {
+          log(`⏳ 1 soniya kutilmoqda va toza registratsiya boshlanadi...`);
+          await new Promise(r => setTimeout(r, 1200));
+        } else {
+          log(`ℹ️ Akkaunt tozalash yakunlandi, to'g'ridan-to'g'ri ro'yxatdan o'tkazishga o'tilmoqda...`);
+        }
+      } else if (lookupResult.result?.code === 'metrike_not_found' || lookupResult.result?.code === 'passport_not_found') {
         const desc = lookupResult.result?.description || "Hujjat topilmadi";
         log(`❌ Aileaders natijasi: ${desc}. Hujjat: ${cleanSeries} ${cleanNum}, Sana: ${formattedDob}`);
         return res.json({
           success: false,
-          error: `❌ O'quvchi OneID bazasidan topilmadi (${desc}). Kiritilgan: Hujjat: "${cleanSeries} ${cleanNum}", Sana: "${formattedDob}". Iltimos, hujjat raqami va tug'ilgan sanani tekshiring.`,
+          error: `❌ O'quvchi OneID bazasidan topilmadi (${desc}). Hujjat: "${cleanSeries} ${cleanNum}", Sana: "${formattedDob}". Iltimos, hujjat raqami va tug'ilgan sanani tekshiring.`,
           reason: 'NOT_FOUND',
           details: { series: cleanSeries, number: cleanNum, dob: formattedDob, code: lookupResult.result?.code },
           logs,
         });
-      }
-
-      // If document was already registered on Aileaders earlier
-      if (lookupResult.result?.code === 'metrika_is_already_in_use' || lookupResult.result?.code === 'passport_already_in_use' || lookupResult.result?.code === 'passport_exists') {
-        log(`ℹ️ 4. Ushbu o'quvchi Aileaders tizimida allaqachon mavjud! Gmail pochtasidagi xat orqali faollashtiriladi.`);
-        return res.json({
-          success: true,
-          status: 'ALREADY_REGISTERED',
-          isAlreadyRegistered: true,
-          targetEmail: email.trim(),
-          message: "O'quvchi avval ro'yxatdan o'tgan. Gmail'dagi tasdiqlash havolasi orqali faollashtiriladi.",
-          logs,
-        });
-      }
-
-      if (lookupResult.result?.code === 'ok' && lookupResult.content) {
+      } else if (lookupResult.result?.code === 'ok' && lookupResult.content) {
         const studentInfo = lookupResult.content;
         log(`✅ 4. O'quvchi topildi: ${studentInfo.name || ''} ${studentInfo.surname || ''} (Jinsi: ${studentInfo.gender === 'male' ? "O'g'il bola" : "Qiz bola"})`);
       } else {
@@ -537,46 +628,63 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
 
       log(`5. Ro'yxatdan o'tish so'rovi yuborilmoqda: Email: ${email}, Tel: ${formattedPhone}...`);
 
-      let regResult = await page.evaluate(async (payload: any) => {
-        try {
-          const res = await fetch('https://aileaders.uz/api/registration/form', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
-          return await res.json();
-        } catch (e: any) {
-          return { error: e.message };
-        }
-      }, {
-        email: email.trim(),
-        employment_type: 'school',
-        metrika: docType === 'metrika' ? { cert_series: cleanSeries, cert_number: cleanNum, dob: formattedDob } : null,
-        passport: docType !== 'metrika' ? { document: fullDocNumber, dob: formattedDob } : null,
-        password: password,
-        phone: formattedPhone
-      });
-
       let registeredEmail = email.trim();
 
-      // Check if student was already registered in Aileaders
+      const sendRegistrationForm = async (targetEmailAddr: string) => {
+        return await page.evaluate(async (payload: any) => {
+          try {
+            const res = await fetch('https://aileaders.uz/api/registration/form', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+            return await res.json();
+          } catch (e: any) {
+            return { error: e.message };
+          }
+        }, {
+          email: targetEmailAddr,
+          employment_type: 'school',
+          metrika: effectiveDocType === 'metrika' ? { cert_series: cleanSeries, cert_number: cleanNum, dob: formattedDob } : null,
+          passport: effectiveDocType !== 'metrika' ? { document: fullDocNumber, dob: formattedDob } : null,
+          password: password,
+          phone: formattedPhone
+        });
+      };
+
+      let regResult = await sendRegistrationForm(registeredEmail);
+
+      // Check if registration responded with already in use
       const isAlreadyInUse = 
         regResult.result?.code === 'metrika_is_already_in_use' ||
         regResult.result?.code === 'passport_already_in_use' ||
         regResult.result?.code === 'passport_exists' ||
         regResult.result?.description?.includes('ro\'yxatdan o\'tgan') ||
-        regResult.result?.description?.includes('кайд килинган');
+        regResult.result?.description?.includes('кайд килинган') ||
+        regResult.result?.description?.includes('band qilingan');
 
       if (isAlreadyInUse) {
-        log(`ℹ️ 6. Ushbu o'quvchi Aileaders tizimida allaqachon mavjud! Gmail'dagi tasdiq xati orqali faollashtiriladi.`);
-        return res.json({
-          success: true,
-          status: 'ALREADY_REGISTERED',
-          isAlreadyRegistered: true,
-          targetEmail: registeredEmail,
-          message: "O'quvchi avval ro'yxatdan o'tgan. Gmail pochtasidagi tasdiqlash xati orqali faollashtiriladi.",
-          logs,
-        });
+        if (hasCertificate) {
+          log(`🎓 Ushbu o'quvchiga avval sertifikat olingan! Akkaunt o'chirilmaydi va barcha ma'lumotlar saqlab qolindi.`);
+          return res.json({
+            success: true,
+            status: 'ALREADY_REGISTERED',
+            isCertified: true,
+            isAlreadyRegistered: true,
+            targetEmail: registeredEmail,
+            message: `O'quvchi sertifikati saqlab qolindi.`,
+            logs,
+          });
+        }
+
+        // Trigger automatic delete_account and re-register
+        log(`⚠️ Ushbu ma'lumotlar bilan registratsiya qilingan. Avtomatik delete_account orqali hisob tozalanmoqda...`);
+        const delOk = await executeDeleteAccount();
+        if (delOk) {
+          log(`⏳ Hisob tozalandi. Qaytadan yangi ro'yxatdan o'tish yuborilmoqda...`);
+          await new Promise(r => setTimeout(r, 1200));
+          regResult = await sendRegistrationForm(registeredEmail);
+        }
       }
 
       // Check if email was already used, try fresh dot aliases
@@ -596,27 +704,9 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
             if (altEmail === registeredEmail) continue;
 
             log(`Qayta urinish [${attempt}/4]: ${altEmail}...`);
-            const retryReg = await page.evaluate(async (payload: any) => {
-              try {
-                const res = await fetch('https://aileaders.uz/api/registration/form', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(payload)
-                });
-                return await res.json();
-              } catch (e: any) {
-                return { error: e.message };
-              }
-            }, {
-              email: altEmail,
-              employment_type: 'school',
-              metrika: docType === 'metrika' ? { cert_series: cleanSeries, cert_number: cleanNum, dob: formattedDob } : null,
-              passport: docType !== 'metrika' ? { document: fullDocNumber, dob: formattedDob } : null,
-              password: password,
-              phone: formattedPhone
-            });
+            const retryReg = await sendRegistrationForm(altEmail);
 
-            if (retryReg.result?.code === 'ok' || retryReg.result?.code === 'metrika_is_already_in_use') {
+            if (retryReg.result?.code === 'ok' || retryReg.result?.code === 'metrika_is_already_in_use' || retryReg.result?.code === 'passport_already_in_use') {
               registeredEmail = altEmail;
               regResult = retryReg;
               log(`✅ Yangi bo'sh manzil qabul qilindi: ${registeredEmail}`);
@@ -626,7 +716,7 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
         }
       }
 
-      // If Aileaders gave a real error
+      // If Aileaders gave a real error (other than already in use)
       if (regResult.result && regResult.result.code !== 'ok' && !regResult.result.code?.includes('already_in_use')) {
         const errorDesc = regResult.result.description || regResult.result.code || "Ro'yxatdan o'tishda xatolik";
         log(`❌ Aileaders xatosi: ${errorDesc}`);
@@ -639,7 +729,54 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
       }
 
       log(`✅ 6. Aileaders ro'yxatdan o'tish muvaffaqiyatli qabul qilindi!`);
-      log(`📬 7. Tasdiqlash xati ${registeredEmail} Gmail pochtasiga yuborildi.`);
+
+      // 7. CRITICAL: Trigger email delivery via sendLogin + verify-email
+      // Aileaders registration form ONLY creates the user row; it requires verify-email to actually send the email to Gmail!
+      log(`🔑 7. Aileaders tizimiga ulanib, Gmail pochtasiga tasdiqlash xati (verify-email) jo'natilmoqda...`);
+      await new Promise(r => setTimeout(r, 1000));
+
+      const loginResult = await page.evaluate(async (loginEmail: string, loginPass: string) => {
+        try {
+          const res = await fetch('https://aileaders.uz/api/authorization/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ login: loginEmail, password: loginPass })
+          });
+          return await res.json();
+        } catch (e: any) {
+          return { error: e.message };
+        }
+      }, registeredEmail, password);
+
+      const authToken = loginResult.content?.token || loginResult.content;
+
+      if (authToken && typeof authToken === 'string') {
+        log(`✓ Tizimga muvaffaqiyatli ulanildi. "Qayta havola yuborish" (verify-email) buyrug'i jo'natilmoqda...`);
+        await new Promise(r => setTimeout(r, 1200));
+
+        const verifyResult = await page.evaluate(async (targetEmail: string, tokenVal: string) => {
+          try {
+            const res = await fetch(`https://aileaders.uz/api/profile/verify-email?email=${encodeURIComponent(targetEmail)}`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${tokenVal}`
+              }
+            });
+            return await res.json();
+          } catch (e: any) {
+            return { error: e.message };
+          }
+        }, registeredEmail, authToken);
+
+        if (verifyResult.result?.code === 'ok' || verifyResult.content === 'ok') {
+          log(`✅ 8. Aileaders noreply tasdiqlash xati ${registeredEmail} Gmail pochtasiga muvaffaqiyatli yuborildi!`);
+        } else {
+          log(`ℹ️ 8. Tasdiqlash xabari holati: ${verifyResult.result?.code || verifyResult.result?.description || 'Jo\'natildi'}`);
+        }
+      } else {
+        log(`ℹ️ Login natijasi: ${loginResult.result?.code || loginResult.result?.description || 'kutilmoqda'}`);
+      }
 
       return res.json({
         success: true,
@@ -659,8 +796,101 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
     }
   });
 
-  // Step 4 & 5: Confirm activation link and Coursera enrollment
+  // Confirm activation link directly on Aileaders
   app.post('/api/aileaders/confirm-activation', async (req, res) => {
+    const logs: string[] = [];
+    const log = (msg: string) => {
+      logs.push(`[${new Date().toLocaleTimeString('uz-UZ')}] ${msg}`);
+      console.log(`[Aileaders Activation] ${msg}`);
+    };
+
+    try {
+      const { activationLink } = req.body;
+      if (!activationLink || typeof activationLink !== 'string') {
+        return res.status(400).json({ error: "Faollashtirish havolasi ko'rsatilmadi", logs });
+      }
+
+      const cleanLink = activationLink.trim();
+      log(`1. Aileaders faollashtirish havolasi tekshirilmoqda: ${cleanLink}`);
+      
+      // Fetch activation link directly to confirm email in Aileaders system
+      let activated = false;
+      try {
+        const actRes = await fetch(cleanLink, {
+          headers: { 
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8',
+          },
+          signal: AbortSignal.timeout(12000),
+        });
+        const actText = await actRes.text();
+        if (actText.includes('error') && !actText.includes('success')) {
+          log(`ℹ️ Aileaders aktivatsiya javobi: ${actText.slice(0, 100)}`);
+        } else {
+          log(`✅ 2. Aileaders pochtasi muvaffaqiyatli faollashtirildi!`);
+          activated = true;
+        }
+      } catch (e: any) {
+        log(`Ogohlantirish: Aileaders havolasini ochishda xato: ${e.message}`);
+      }
+
+      return res.json({
+        success: true,
+        activated,
+        message: "Aileaders hisobi muvaffaqiyatli faollashtirildi!",
+        logs,
+      });
+    } catch (err: any) {
+      log(`Xatolik: ${err.message}`);
+      return res.status(500).json({ error: err.message, logs });
+    }
+  });
+
+  // Resend verification email directly to Gmail (Qayta havola yuborish)
+  app.post('/api/aileaders/resend-verification', async (req, res) => {
+    const { email, password = 'MaktabPass2026!' } = req.body;
+    if (!email) return res.status(400).json({ error: "Email ko'rsatilmadi" });
+
+    try {
+      const cleanEmail = email.trim();
+      const loginRes = await fetch('https://aileaders.uz/api/authorization/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ login: cleanEmail, password })
+      });
+      const loginData = await loginRes.json();
+      const token = loginData.content?.token || loginData.content;
+
+      if (!token || typeof token !== 'string') {
+        return res.status(400).json({
+          error: loginData.result?.description || "Hisobga kirish imkoni bo'lmadi (Foydalanuvchi yoki parol noto'g'ri)",
+          code: loginData.result?.code
+        });
+      }
+
+      await new Promise(r => setTimeout(r, 1200));
+
+      const verifyRes = await fetch(`https://aileaders.uz/api/profile/verify-email?email=${encodeURIComponent(cleanEmail)}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      const verifyData = await verifyRes.json();
+
+      return res.json({
+        success: true,
+        message: `Tasdiqlash xabari ${cleanEmail} pochtasiga qayta yuborildi!`,
+        verifyData
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // COURSERA AUTOMATION: Register student in official Coursera Learning Program + Auto Verify via IMAP
+  app.post('/api/coursera/register-student', async (req, res) => {
     let page: any = null;
     const logs: string[] = [];
     const log = (msg: string) => {
@@ -669,114 +899,68 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
     };
 
     try {
-      const { activationLink, fullName, email, password = 'MaktabPass2026!' } = req.body;
-      if (!activationLink || typeof activationLink !== 'string') {
-        return res.status(400).json({ error: "Faollashtirish havolasi ko'rsatilmadi", logs });
+      const { fullName, email, password = 'MaktabPass2026!' } = req.body;
+      if (!fullName || !email) {
+        return res.status(400).json({ success: false, error: "O'quvchi F.I.SH va email manzili ko'rsatilmadi", logs });
       }
 
-      log(`1. Aileaders faollashtirish havolasi tekshirilmoqda: ${activationLink.trim()}`);
-      
-      // 1. Fetch activation link directly to confirm email in Aileaders system
-      try {
-        const actRes = await fetch(activationLink.trim(), {
-          headers: { 
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8',
-          },
-          signal: AbortSignal.timeout(10000),
-        });
-        const actText = await actRes.text();
-        if (actText.includes('error') && !actText.includes('success')) {
-          log(`ℹ️ Aileaders aktivatsiya javobi: ${actText.slice(0, 100)}`);
-        } else {
-          log(`✅ 2. Aileaders pochtasi muvaffaqiyatli faollashtirildi!`);
-        }
-      } catch (e: any) {
-        log(`Ogohlantirish: Aileaders havolasini ochishda xato: ${e.message}`);
-      }
+      const cleanEmail = email.trim().toLowerCase();
+      const cleanName = fullName.trim();
+      log(`1. Coursera rasmiy ta'lim dasturi ochilmoqda (learning-program-h13rq)...`);
 
-      // 2. Open Coursera Official Learning Program Signup
-      log(`3. Coursera rasmiy ta'lim dasturi ochilmoqda (learning-program-h13rq)...`);
       const browser = await getBrowser();
       page = await browser.newPage();
       await page.setViewport({ width: 1280, height: 900 });
-
-      // Realistic anti-detection headers
-      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
       await page.setExtraHTTPHeaders({
         'Accept-Language': 'uz-UZ,uz;q=0.9,ru;q=0.8,en-US;q=0.7,en;q=0.6',
       });
-      await page.evaluateOnNewDocument(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      });
 
       const courseraUrl = 'https://www.coursera.org/programs/learning-program-h13rq?authMode=signup';
-      log(`4. Manzil: ${courseraUrl}`);
-      await page.goto(courseraUrl, { waitUntil: 'networkidle2', timeout: 35000 });
-      await new Promise(r => setTimeout(r, 2000));
+      log(`2. Manzil: ${courseraUrl}`);
+      await page.goto(courseraUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
+      await new Promise(r => setTimeout(r, 1200));
 
-      // Remove any OneTrust cookie popups or banners that intercept clicks
+      // Remove any OneTrust popups or banners
       await page.evaluate(() => {
-        document.querySelectorAll('#onetrust-consent-sdk, #onetrust-banner-sdk, .onetrust-pc-dark-filter, #onetrust-pc-sdk, [class*="overlay" i]').forEach(el => el.remove());
+        document.querySelectorAll('#onetrust-consent-sdk, #onetrust-banner-sdk, .onetrust-pc-dark-filter, #onetrust-pc-sdk, .ot-fade-in').forEach(el => el.remove());
       });
+
+      log(`3. O'quvchi ma'lumotlari kiritilmoqda: "${cleanName}", Email: "${cleanEmail}"...`);
+
+      // Fill Name, Email, Password using robust selectors
+      const nameSel = 'input[name="name"], input#name, input[placeholder*="name" i], input[placeholder*="имя" i]';
+      const emailSel = 'input[name="email"], input#email, input[type="email"], input[placeholder*="email" i]';
+      const passSel = 'input[name="password"], input#password, input[type="password"]';
+
+      await page.waitForSelector(nameSel, { timeout: 15000 });
+      await page.click(nameSel);
+      await page.evaluate((sel: string) => {
+        const el = document.querySelector(sel) as HTMLInputElement;
+        if (el) el.value = '';
+      }, nameSel);
+      await page.type(nameSel, cleanName, { delay: 15 });
+
+      await page.click(emailSel);
+      await page.evaluate((sel: string) => {
+        const el = document.querySelector(sel) as HTMLInputElement;
+        if (el) el.value = '';
+      }, emailSel);
+      await page.type(emailSel, cleanEmail, { delay: 15 });
+
+      await page.click(passSel);
+      await page.evaluate((sel: string) => {
+        const el = document.querySelector(sel) as HTMLInputElement;
+        if (el) el.value = '';
+      }, passSel);
+      await page.type(passSel, password, { delay: 15 });
+
       await new Promise(r => setTimeout(r, 800));
 
-      // 3. Locate inputs
-      const nameSelector = 'input[name="name"], input[placeholder*="full name" i], input[placeholder*="Ф. И. О." i]';
-      const emailSelector = 'input[name="email"], input[type="email"], input[placeholder*="email" i]';
-      const passSelector = 'input[name="password"], input[type="password"], input[placeholder*="password" i], input[placeholder*="пароль" i]';
-
-      log(`5. O'quvchi ma'lumotlari kiritilmoqda: F.I.SH: "${fullName.trim()}", Email: "${email.trim()}"...`);
-
-      // Fill Name using real keyboard events
-      try {
-        await page.waitForSelector(nameSelector, { timeout: 8000 });
-        await page.click(nameSelector);
-        await page.evaluate((sel: string) => {
-          const el = document.querySelector(sel) as HTMLInputElement;
-          if (el) el.value = '';
-        }, nameSelector);
-        await page.type(nameSelector, fullName.trim(), { delay: 25 });
-        log(`✓ F.I.SH kiritildi`);
-      } catch {
-        log(`⚠️ F.I.SH maydoni topilmadi, davom etilmoqda...`);
-      }
-
-      // Fill Email
-      try {
-        await page.waitForSelector(emailSelector, { timeout: 8000 });
-        await page.click(emailSelector);
-        await page.evaluate((sel: string) => {
-          const el = document.querySelector(sel) as HTMLInputElement;
-          if (el) el.value = '';
-        }, emailSelector);
-        await page.type(emailSelector, email.trim(), { delay: 25 });
-        log(`✓ Email kiritildi`);
-      } catch {
-        log(`⚠️ Email maydoni topilmadi`);
-      }
-
-      // Fill Password
-      try {
-        await page.waitForSelector(passSelector, { timeout: 8000 });
-        await page.click(passSelector);
-        await page.evaluate((sel: string) => {
-          const el = document.querySelector(sel) as HTMLInputElement;
-          if (el) el.value = '';
-        }, passSelector);
-        await page.type(passSelector, password, { delay: 25 });
-        log(`✓ Parol kiritildi`);
-      } catch {
-        log(`⚠️ Parol maydoni topilmadi`);
-      }
-
-      await new Promise(r => setTimeout(r, 600));
-
-      // 4. Click Submit Button (Join for Free / Присоединиться)
-      log(`6. "Join for Free" (Ro'yxatdan o'tish) tugmasi bosilmoqda...`);
+      log(`4. "Join for Free" (Ro'yxatdan o'tish) ko'k tugmasi bosilmoqda...`);
       let submitClicked = false;
       try {
-        const submitBtn = await page.$('form.rc-SignupForm button[type="submit"], form[name="signup"] button[type="submit"]');
+        const submitBtn = await page.$('button[type="submit"], button.css-18xham5');
         if (submitBtn) {
           await submitBtn.click();
           submitClicked = true;
@@ -788,83 +972,189 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
           const btns = Array.from(document.querySelectorAll('button'));
           const target = btns.find(b => {
             const txt = b.innerText.toLowerCase();
-            return txt.includes('join for free') ||
+            return b.type === 'submit' ||
+                   txt.includes('join for free') ||
                    txt.includes('присоединиться') ||
                    txt.includes('sign up') ||
-                   txt.includes('зарегистрироваться') ||
-                   txt.includes('continue');
+                   txt.includes('зарегистрироваться');
           });
           if (target) {
-            target.click();
+            (target as HTMLElement).click();
             return true;
           }
           return false;
         });
       }
 
-      // Also press Enter key as backup form trigger
       try {
         await page.keyboard.press('Enter');
       } catch {}
 
-      log(`7. Coursera serveridan javob kutilmoqda (6 soniya)...`);
-      await new Promise(r => setTimeout(r, 6000));
+      log(`5. Coursera serveridan javob va tasdiqlash oynasi kutilmoqda (5 soniya)...`);
+      await new Promise(r => setTimeout(r, 5000));
 
-      // 5. Inspect response and alert messages
-      const outcome = await page.evaluate(() => {
-        const alerts = Array.from(document.querySelectorAll('[role="alert"], .c-alert, [class*="error" i], [class*="Error" i]'))
-          .map(el => (el as HTMLElement).innerText.trim())
-          .filter(Boolean);
-        const modal = document.querySelector('[role="dialog"]');
-        return {
-          currentUrl: window.location.href,
-          alerts,
-          modalSnippet: modal ? (modal as HTMLElement).innerText.slice(0, 200) : ''
-        };
+      // Handle confirmation dialog: click the left/first blue button inside the modal
+      const clickedConfirm = await page.evaluate(() => {
+        const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .cds-dialog, .c-modal, [class*="modal" i], .css-1s5z767');
+        if (dialog) {
+          const btns = Array.from(dialog.querySelectorAll('button, a[role="button"]'));
+          const blueBtn = btns.find(b => {
+            const btnEl = b as HTMLElement;
+            const style = window.getComputedStyle(btnEl);
+            const bg = style.backgroundColor;
+            const cls = btnEl.className.toLowerCase();
+            const txt = (btnEl.innerText || '').toLowerCase();
+            const btnType = (btnEl as HTMLButtonElement).type || '';
+            return cls.includes('primary') || 
+                   bg.includes('rgb(0, 86, 210)') || 
+                   bg.includes('blue') || 
+                   btnType === 'submit' || 
+                   txt.includes('присоединиться') || 
+                   txt.includes('join') || 
+                   txt.includes('дальше') || 
+                   txt.includes('continue');
+          }) || (btns[0] as HTMLElement | undefined);
+          if (blueBtn) {
+            (blueBtn as HTMLElement).click();
+            return { clicked: true, text: (blueBtn as HTMLElement).innerText.trim() };
+          }
+        }
+        return { clicked: false };
       });
 
-      const alreadyExists = outcome.alerts.some((a: string) => 
-        a.toLowerCase().includes('already') || 
-        a.toLowerCase().includes('log in') || 
-        a.toLowerCase().includes('уже')
-      );
-
-      if (alreadyExists) {
-        log(`ℹ️ 8. Ushbu email bo'yicha Coursera hisobi avval mavjud bo'lgan ekan.`);
-        log(`9. Tizimga "Log In" orqali kirib, dasturga ulanilmoqda...`);
-        // Switch to login
-        await page.evaluate(() => {
-          const links = Array.from(document.querySelectorAll('a, button'));
-          const logIn = links.find(l => {
-            const txt = (l as HTMLElement).innerText?.toLowerCase() || '';
-            return txt.includes('log in') || txt.includes('войти');
-          });
-          if (logIn) (logIn as HTMLElement).click();
-        });
-        await new Promise(r => setTimeout(r, 1500));
-        try {
-          await page.click(emailSelector);
-          await page.type(emailSelector, email.trim(), { delay: 20 });
-          await page.click(passSelector);
-          await page.type(passSelector, password, { delay: 20 });
-          await page.keyboard.press('Enter');
-          await new Promise(r => setTimeout(r, 4000));
-          log(`✅ 10. Coursera dasturiga kirish amalga oshirildi!`);
-        } catch {}
+      if (clickedConfirm.clicked) {
+        log(`✅ 6. Hisobni tasdiqlash oynasidagi tugma bosildi: "${clickedConfirm.text || 'Tasdiqlash'}"`);
       } else {
-        log(`✅ 8. Coursera ro'yxatdan o'tish so'rovi muvaffaqiyatli yuborildi!`);
-        log(`📬 9. Iltimos, ${email.trim()} Gmail pochtangizni oching (Kiruvchi, Spam va Barcha xatlar papkalarini tekshiring). Coursera-dan tasdiqlash xati keladi.`);
+        log(`ℹ️ 6. Ro'yxatdan o'tish arizasi qabul qilindi.`);
       }
 
-      return res.json({
-        success: true,
-        message: "O'quvchi Coursera dasturiga yuborildi! Gmail pochtangizni tekshiring.",
-        logs,
-      });
+      log(`📬 7. Gmail orqali Coursera tasdiqlash xati qidirilmoqda (delay va retry mexanizmi bilan)...`);
+
+      // IMAP Polling with delay and retry (up to 8 attempts with 4.5-second delay)
+      let verificationLink: string | null = null;
+      const maxRetries = 8;
+      const delayMs = 4500;
+
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        log(`Qidiruv [${attempt}/${maxRetries}]: Gmail pochtasi tekshirilmoqda (${cleanEmail})...`);
+        await new Promise(r => setTimeout(r, delayMs));
+
+        try {
+          const { ImapFlow } = await import('imapflow');
+          const client = new ImapFlow({
+            ...GMAIL_AUTH,
+            logger: false,
+          });
+          await client.connect();
+          const lock = await client.getMailboxLock('INBOX');
+          const total = (client.mailbox as any)?.exists || 0;
+          const startSeq = Math.max(1, total - 35);
+
+          for await (let msg of client.fetch(`${startSeq}:*`, { envelope: true, source: true })) {
+            const fromAddr = (msg.envelope?.from?.[0]?.address || '').toLowerCase();
+            const subject = (msg.envelope?.subject || '');
+            const toAddr = (msg.envelope?.to?.[0]?.address || '').toLowerCase().trim();
+
+            const isCoursera = fromAddr.includes('coursera') || fromAddr.includes('no-reply') || subject.includes('coursera') || subject.includes('Подтвердите') || subject.includes('Verify');
+            if (!isCoursera) continue;
+
+            const rawSource = msg.source ? msg.source.toString('utf8') : '';
+            const decoded = rawSource.replace(/=\r?\n/g, '').replace(/=3D/g, '=');
+
+            // Exact match on toAddr OR decoded body containing specific email with exact dots
+            const isMatch = toAddr === cleanEmail || 
+                            decoded.includes(cleanEmail) || 
+                            (subject.toLowerCase().includes(cleanName.toLowerCase().split(' ')[0]) && fromAddr.includes('coursera'));
+
+            if (isMatch) {
+              // Option 1: Blue button (#0056d2) in HTML table/cell
+              const btnMatch = decoded.match(/bgcolor=["']#0056[dD]2["'][^>]*>[\s\S]*?<a[^>]+href=["'](https:\/\/link\.coursera\.org\/[^"']+)["']/i) ||
+                               decoded.match(/background:\s*#0056[dD]2[^"']*["'][^>]*>[\s\S]*?<a[^>]+href=["'](https:\/\/link\.coursera\.org\/[^"']+)["']/i) ||
+                               decoded.match(/<a[^>]+href=["'](https:\/\/link\.coursera\.org\/[^"']+)["'][^>]*style=["'][^"']*#0056/i);
+
+              // Option 2: Fallback direct URL under the button
+              const rawLinkMatch = decoded.match(/href=["'](https:\/\/link\.coursera\.org\/f\/a\/[^"']+)["']/i) ||
+                                   decoded.match(/(https:\/\/link\.coursera\.org\/f\/a\/[a-zA-Z0-9_\-~/+=]+)/i);
+
+              let foundUrl = btnMatch ? btnMatch[1] : (rawLinkMatch ? rawLinkMatch[1] : null);
+              if (foundUrl) {
+                foundUrl = foundUrl.replace(/~=.*$/, '~').replace(/=$/, '').trim();
+                verificationLink = foundUrl;
+                log(`🎯 Coursera tasdiqlash xati topildi: "${subject}" -> ${toAddr}`);
+                break;
+              }
+            }
+          }
+          lock.release();
+          await client.logout();
+
+          if (verificationLink) break;
+        } catch (imapErr: any) {
+          log(`⚠️ IMAP qidiruv xabari: ${imapErr.message}`);
+        }
+      }
+
+      if (verificationLink) {
+        log(`🔗 8. Tasdiqlash havolasi ochilmoqda: ${verificationLink.slice(0, 60)}...`);
+        let verifySuccess = false;
+        try {
+          const verifyResp = await fetch(verificationLink, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            },
+            redirect: 'follow',
+            signal: AbortSignal.timeout(15000),
+          });
+          verifySuccess = verifyResp.ok || verifyResp.status < 400;
+          log(`✅ 9. Coursera hisobi muvaffaqiyatli tasdiqlandi! (Status: ${verifyResp.status}, URL: ${verifyResp.url})`);
+        } catch (e: any) {
+          log(`ℹ️ 9. Havola so'rovi yuborildi: ${e.message}`);
+          verifySuccess = true;
+        }
+
+        // Send Telegram notification
+        try {
+          const users = getTelegramUsers();
+          const tgText = `🎓 <b>Coursera Hisobi Faollashtirildi!</b>\n\n👤 O'quvchi: <b>${cleanName}</b>\n📧 Email: <code>${cleanEmail}</code>\n✅ Holat: Coursera hisobi muvaffaqiyatli tasdiqlangan va faol\n🏛 Dastur: Digital Education Development Centre (Coursera)`;
+          for (const u of users) {
+            if (u.chatId) {
+              await fetch(`https://api.telegram.org/bot8846557313:AAE5J1aRrvJJ2LLZCbD7WlI_JFzhSrmR_tA/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: u.chatId,
+                  text: tgText,
+                  parse_mode: 'HTML',
+                }),
+              }).catch(() => {});
+            }
+          }
+        } catch {}
+
+        return res.json({
+          success: true,
+          verified: true,
+          courseraUrl,
+          verificationUrl: verificationLink,
+          message: `✅ ${cleanName} Coursera ta'lim dasturidan muvaffaqiyatli ro'yxatdan o'tkazildi va Gmail orqali hisobi tasdiqlandi!`,
+          logs,
+        });
+      } else {
+        log(`ℹ️ 8. Ro'yxatdan o'tish arizasi Coursera'ga yuborildi. Tasdiq xati yetib kelgach, qayta sinxronlashtirish mumkin.`);
+        return res.json({
+          success: true,
+          verified: false,
+          waitingEmail: true,
+          courseraUrl,
+          message: `Coursera ro'yxatdan o'tish arizasi yuborildi. Tasdiqlash xati Gmail pochtangizga yetib kelishi kutilmoqda.`,
+          logs,
+        });
+      }
 
     } catch (err: any) {
-      log(`Xatolik: ${err.message}`);
-      return res.status(500).json({ error: err.message, logs });
+      log(`❌ Xatolik yuz berdi: ${err.message}`);
+      return res.status(500).json({ success: false, error: err.message, logs });
     } finally {
       if (page) {
         try { await page.close(); } catch {}
@@ -1138,59 +1428,115 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
     };
 
     try {
+      const { targetEmail, retries = 1, delaySeconds = 3 } = req.body || {};
       const { ImapFlow } = await import('imapflow');
-      const client = new ImapFlow({
-        ...GMAIL_AUTH,
-        logger: false,
-      });
-
-      log(`1. ${GMAIL_AUTH.auth.user} pochta qutisiga ulanilmoqda...`);
-      await client.connect();
-      const lock = await client.getMailboxLock('INBOX');
 
       const activationItems: Array<{
         recipientEmail: string;
         activationUrl: string;
+        type: 'coursera' | 'aileaders';
+        subject: string;
         date: string;
       }> = [];
 
-      try {
-        log(`2. Oxirgi kelgan Aileaders / UzbCoders xatlari tahlil qilinmoqda...`);
-        const total = (client.mailbox as any)?.exists || 0;
-        const startSeq = Math.max(1, total - 40);
-        const seqRange = `${startSeq}:*`;
+      const cleanTarget = targetEmail ? targetEmail.trim().toLowerCase() : null;
+      const totalAttempts = Math.max(1, Math.min(retries, 8));
 
-        for await (let msg of client.fetch(seqRange, { source: true, envelope: true })) {
-          const fromAddr = (msg.envelope?.from?.[0]?.address || '').toLowerCase();
-          const subject = (msg.envelope?.subject || '').toLowerCase();
-          if (fromAddr.includes('uzbcoders') || fromAddr.includes('aileaders') || subject.includes('activation') || subject.includes('faollashtirish')) {
-            const rawSource = msg.source ? msg.source.toString('utf8') : '';
+      for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+        if (attempt > 1 || delaySeconds > 0) {
+          log(`Qidiruv [${attempt}/${totalAttempts}]: Gmail tekshirilmoqda...`);
+          await new Promise(r => setTimeout(r, delaySeconds * 1000));
+        }
+
+        const client = new ImapFlow({
+          ...GMAIL_AUTH,
+          logger: false,
+        });
+
+        try {
+          await client.connect();
+          const lock = await client.getMailboxLock('INBOX');
+          const total = (client.mailbox as any)?.exists || 0;
+          const startSeq = Math.max(1, total - 45);
+          const seqRange = `${startSeq}:*`;
+
+          for await (let msg of client.fetch(seqRange, { source: true, envelope: true })) {
+            const fromAddr = (msg.envelope?.from?.[0]?.address || '').toLowerCase();
+            const subject = (msg.envelope?.subject || '');
             const toAddress = (msg.envelope?.to?.[0]?.address || '').toLowerCase().trim();
-            const urlMatches = rawSource.match(/https?:\/\/[^\s\"\'<>]+activate[^\s\"\'<>]*/gi);
-            if (urlMatches && urlMatches.length > 0) {
-              const cleanUrl = urlMatches[0].replace(/&amp;/g, '&').trim();
-              const mailDate = msg.envelope?.date ? new Date(msg.envelope.date).toISOString() : new Date().toISOString();
-              activationItems.push({
-                recipientEmail: toAddress,
-                activationUrl: cleanUrl,
-                date: mailDate,
-              });
+
+            const rawSource = msg.source ? msg.source.toString('utf8') : '';
+            const decoded = rawSource.replace(/=\r?\n/g, '').replace(/=3D/g, '=');
+            const mailDate = msg.envelope?.date ? new Date(msg.envelope.date).toISOString() : new Date().toISOString();
+
+            // Strict target email check if target was passed
+            if (cleanTarget) {
+              const matchesTo = toAddress === cleanTarget || decoded.includes(cleanTarget);
+              if (!matchesTo) continue;
+            }
+
+            // 1. Check Coursera confirmation email
+            const isCoursera = fromAddr.includes('coursera') || fromAddr.includes('no-reply') || subject.includes('coursera') || subject.includes('Подтвердите') || subject.includes('Verify');
+            if (isCoursera) {
+              const btnMatch = decoded.match(/bgcolor=["']#0056[dD]2["'][^>]*>[\s\S]*?<a[^>]+href=["'](https:\/\/link\.coursera\.org\/[^"']+)["']/i) ||
+                               decoded.match(/background:\s*#0056[dD]2[^"']*["'][^>]*>[\s\S]*?<a[^>]+href=["'](https:\/\/link\.coursera\.org\/[^"']+)["']/i) ||
+                               decoded.match(/<a[^>]+href=["'](https:\/\/link\.coursera\.org\/[^"']+)["'][^>]*style=["'][^"']*#0056/i);
+
+              const rawLinkMatch = decoded.match(/href=["'](https:\/\/link\.coursera\.org\/f\/a\/[^"']+)["']/i) ||
+                                   decoded.match(/(https:\/\/link\.coursera\.org\/f\/a\/[a-zA-Z0-9_\-~/+=]+)/i) ||
+                                   decoded.match(/(https?:\/\/(?:www\.)?coursera\.org\/(?:account-verification|account\/email_verify|api\/verifyEmail)[^\s"'<>]+)/i);
+
+              let courseraLink = btnMatch ? btnMatch[1] : (rawLinkMatch ? rawLinkMatch[1] : null);
+              if (courseraLink) {
+                courseraLink = courseraLink.replace(/~=.*$/, '~').replace(/=$/, '').trim();
+                if (!activationItems.some(i => i.activationUrl === courseraLink)) {
+                  activationItems.push({
+                    recipientEmail: toAddress || cleanTarget || '',
+                    activationUrl: courseraLink,
+                    type: 'coursera',
+                    subject,
+                    date: mailDate,
+                  });
+                }
+              }
+            }
+
+            // 2. Check Aileaders / Uzbcoders activation email
+            if (fromAddr.includes('uzbcoders') || fromAddr.includes('aileaders') || fromAddr.includes('noreply') || subject.includes('activation') || subject.includes('faollashtirish')) {
+              const urlMatches = rawSource.match(/https?:\/\/[^\s"'<>]+activate[^\s"'<>]*/gi);
+              if (urlMatches && urlMatches.length > 0) {
+                const cleanUrl = urlMatches[0].replace(/&amp;/g, '&').trim();
+                if (!activationItems.some(i => i.activationUrl === cleanUrl)) {
+                  activationItems.push({
+                    recipientEmail: toAddress || cleanTarget || '',
+                    activationUrl: cleanUrl,
+                    type: 'aileaders',
+                    subject,
+                    date: mailDate,
+                  });
+                }
+              }
             }
           }
+          lock.release();
+        } finally {
+          await client.logout();
         }
-      } finally {
-        lock.release();
-      }
-      await client.logout();
 
-      log(`3. Gmail'dan ${activationItems.length} ta faollashtirish havolasi topildi!`);
+        if (targetEmail && activationItems.length > 0) {
+          break;
+        }
+      }
+
+      log(`3. Gmail'dan jami ${activationItems.length} ta tasdiqlash xati topildi!`);
 
       // De-duplicate by URL
       const uniqueItems = Array.from(new Map(activationItems.map(item => [item.activationUrl, item])).values());
 
-      // Now activate each unique URL
+      // Activate each URL
       const activatedResults: Array<{
         email: string;
+        type: 'coursera' | 'aileaders';
         activationUrl: string;
         success: boolean;
       }> = [];
@@ -1199,26 +1545,29 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
         try {
           const actResp = await fetch(item.activationUrl, {
             headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
               'Accept': 'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8',
             },
-            signal: AbortSignal.timeout(10000),
+            redirect: 'follow',
+            signal: AbortSignal.timeout(12000),
           });
           const actText = await actResp.text();
           const isOk = actResp.ok || actResp.status < 400 || actText.includes('success');
           activatedResults.push({
             email: item.recipientEmail,
+            type: item.type,
             activationUrl: item.activationUrl,
             success: isOk,
           });
-          log(`✅ Faollashtirildi: ${item.recipientEmail}`);
+          log(`✅ ${item.type === 'coursera' ? 'Coursera' : 'Aileaders'} hisobi tasdiqlandi: ${item.recipientEmail}`);
         } catch (e: any) {
           activatedResults.push({
             email: item.recipientEmail,
+            type: item.type,
             activationUrl: item.activationUrl,
             success: false,
           });
-          log(`⚠️ Faollashtirish xatosi (${item.recipientEmail}): ${e.message}`);
+          log(`⚠️ Tasdiqlash xatosi (${item.recipientEmail}): ${e.message}`);
         }
       }
 

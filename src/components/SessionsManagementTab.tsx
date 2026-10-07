@@ -320,9 +320,7 @@ export const SessionsManagementTab: React.FC<SessionsManagementTabProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              if (confirm("Ushbu seans qaydini o'chirishni xohlaysizmi?")) {
-                                onDeleteSession(sess.id || sess.deviceId);
-                              }
+                              onDeleteSession(sess.id || sess.deviceId);
                             }}
                             className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg transition-colors cursor-pointer"
                             title="Seans tarixini o'chirish"
