@@ -3,7 +3,11 @@ import path from 'path';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
-import puppeteer, { Browser } from 'puppeteer';
+import puppeteerExtra from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import type { Browser } from 'puppeteer';
+
+puppeteerExtra.use(StealthPlugin());
 import {
   startTelegramBot,
   stopTelegramBot,
@@ -17,12 +21,13 @@ import {
   deleteTelegramWebhook,
   ensureFreshFirestoreData,
 } from './server-telegram.ts';
+import { solveStudentCourseraQuizzes } from './server-coursera-quiz.ts';
 
 let sharedBrowser: Browser | null = null;
 
 async function getBrowser(): Promise<Browser> {
   if (!sharedBrowser || !sharedBrowser.connected) {
-    sharedBrowser = await puppeteer.launch({
+    sharedBrowser = (await puppeteerExtra.launch({
       headless: true,
       args: [
         '--no-sandbox',
@@ -31,9 +36,10 @@ async function getBrowser(): Promise<Browser> {
         '--disable-gpu',
         '--no-first-run',
         '--no-zygote',
-        '--single-process',
+        '--disable-blink-features=AutomationControlled',
+        '--window-size=1280,950',
       ],
-    });
+    })) as unknown as Browser;
   }
   return sharedBrowser;
 }
@@ -1162,6 +1168,23 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
     }
   });
 
+  // COURSERA AUTOMATION: Solve 4 Quizzes automatically for a student (Beta)
+  app.post('/api/coursera/solve-quizzes', async (req, res) => {
+    try {
+      const { studentId, fullName, email, password = 'MaktabPass2026!' } = req.body;
+      if (!fullName || !email) {
+        return res.status(400).json({ success: false, error: "O'quvchi F.I.SH va email manzili ko'rsatilmadi", logs: [] });
+      }
+
+      const browser = await getBrowser();
+      const result = await solveStudentCourseraQuizzes(browser, { id: studentId, fullName, email, password });
+      return res.json(result);
+    } catch (err: any) {
+      console.error('Error solving Coursera quizzes:', err);
+      return res.status(500).json({ success: false, error: err.message, logs: [err.message] });
+    }
+  });
+
   // Get bot status and list of registered teachers
   app.get('/api/telegram/status', (_req, res) => {
     try {
@@ -1665,7 +1688,7 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
       try {
         startTelegramBot();
       } catch (botErr) {
-        console.warn("Could not start Telegram Bot:", botErr);
+        console.log("Could not start Telegram Bot:", botErr);
       }
     }, 3000);
   });

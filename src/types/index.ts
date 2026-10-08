@@ -19,6 +19,8 @@ export interface Student {
   certifiedAt?: string; // EXACT timestamp with seconds when certificate was entered
   courseraVerified?: boolean;
   courseraRegisteredAt?: string;
+  courseraQuizStatus?: 'pending' | 'solving' | 'completed' | 'error';
+  courseraQuizCompletedAt?: string;
 }
 
 export interface ClassGroup {

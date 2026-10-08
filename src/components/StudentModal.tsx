@@ -25,7 +25,8 @@ import {
   Clock,
   GraduationCap,
   Zap,
-  RefreshCw
+  RefreshCw,
+  FileCheck
 } from 'lucide-react';
 
 function formatExactCertificateTime(isoString?: string): string {
@@ -91,6 +92,8 @@ export const StudentModal: React.FC<StudentModalProps> = ({
   const [isAiLeadersOpen, setIsAiLeadersOpen] = useState(false);
   const [isRegisteringCoursera, setIsRegisteringCoursera] = useState(false);
   const [courseraNotice, setCourseraNotice] = useState('');
+  const [isSolvingQuizzes, setIsSolvingQuizzes] = useState(false);
+  const [quizNotice, setQuizNotice] = useState('');
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
   const playChime = () => {
@@ -211,6 +214,49 @@ export const StudentModal: React.FC<StudentModalProps> = ({
       setCourseraNotice('');
     } finally {
       setIsRegisteringCoursera(false);
+    }
+  };
+
+  const handleSolveCourseraQuizzesDirect = async () => {
+    if (!formData.assignedEmail || !formData.assignedEmail.includes('@')) {
+      alert("Avval o'quvchiga email biriktirilishi va Coursera hisobi ochilgan bo'lishi lozim!");
+      return;
+    }
+
+    setIsSolvingQuizzes(true);
+    setQuizNotice("1/4. Coursera 4 ta testi (Quiz 1-4) avtomatik yechilmoqda...");
+
+    try {
+      const res = await fetch('/api/coursera/solve-quizzes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          studentId: student?.id,
+          fullName: formData.fullName,
+          email: formData.assignedEmail,
+          password: formData.assignedPassword || 'MaktabPass2026!',
+        }),
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        setFormData(prev => ({
+          ...prev,
+          courseraQuizStatus: 'completed',
+          courseraQuizCompletedAt: new Date().toISOString(),
+        }));
+        playChime();
+        setQuizNotice("🏆 Barcha 4 ta Coursera testlari muvaffaqiyatli topshirildi!");
+        setTimeout(() => setQuizNotice(''), 8000);
+      } else {
+        alert(`Xatolik: ${data.error || "Testlarni topshirishda xatolik yuz berdi"}`);
+        setQuizNotice('');
+      }
+    } catch (err: any) {
+      alert(`Server xatosi: ${err.message}`);
+      setQuizNotice('');
+    } finally {
+      setIsSolvingQuizzes(false);
     }
   };
 
@@ -777,6 +823,17 @@ export const StudentModal: React.FC<StudentModalProps> = ({
 
                 <button
                   type="button"
+                  onClick={handleSolveCourseraQuizzesDirect}
+                  disabled={isSolvingQuizzes}
+                  className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                  title="Coursera 4 ta testini (Introduction to Generative AI) avtomatik yechish"
+                >
+                  <FileCheck className={`w-3.5 h-3.5 ${isSolvingQuizzes ? 'animate-spin' : ''}`} />
+                  <span>{isSolvingQuizzes ? "Testlar yechilmoqda (1-4)..." : "🎯 Coursera Testlarini Yechish (Beta)"}</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setIsAiLeadersOpen(true)}
                   className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-indigo-600 via-blue-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02]"
                   title="aileaders.uz va Coursera saytida ro'yxatdan o'tkazish avtomati"
@@ -792,6 +849,20 @@ export const StudentModal: React.FC<StudentModalProps> = ({
               <div className="flex items-center gap-2 p-2.5 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs font-bold">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
                 <span>✅ Ushbu o'quvchining rasmiy Coursera hisobi faol va tasdiqlangan!</span>
+              </div>
+            )}
+
+            {formData.courseraQuizStatus === 'completed' && (
+              <div className="flex items-center gap-2 p-2.5 rounded-lg bg-teal-50 border border-teal-300 text-teal-900 text-xs font-bold">
+                <CheckCircle2 className="w-4 h-4 text-teal-600 flex-shrink-0" />
+                <span>🏆 Barcha 4 ta Coursera testlari muvaffaqiyatli topshirilgan!</span>
+              </div>
+            )}
+
+            {quizNotice && (
+              <div className="p-2.5 rounded-lg bg-teal-50 border border-teal-300 text-xs text-teal-950 font-semibold animate-fade-in flex items-center gap-2">
+                <RefreshCw className="w-4 h-4 text-teal-600 animate-spin flex-shrink-0" />
+                <span>{quizNotice}</span>
               </div>
             )}
 

@@ -46,6 +46,8 @@ interface StudentBatchState {
   logs: string[];
   courseraStatus?: 'pending' | 'processing' | 'verified' | 'waiting_email' | 'error';
   courseraLogs?: string[];
+  quizStatus?: 'pending' | 'processing' | 'completed' | 'error';
+  quizLogs?: string[];
 }
 
 export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps> = ({
@@ -79,9 +81,12 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
   const [isSyncingGmail, setIsSyncingGmail] = useState<boolean>(false);
   const [isCourseraRunning, setIsCourseraRunning] = useState<boolean>(false);
   const [currentCourseraIndex, setCurrentCourseraIndex] = useState<number>(-1);
+  const [isQuizRunning, setIsQuizRunning] = useState<boolean>(false);
+  const [currentQuizIndex, setCurrentQuizIndex] = useState<number>(-1);
 
   const isPausedRef = useRef<boolean>(false);
   const isRunningRef = useRef<boolean>(false);
+  const isQuizRunningRef = useRef<boolean>(false);
 
   // Initialize items when modal opens
   useEffect(() => {
@@ -118,6 +123,7 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
 
       const isCertified = st.status === 'certified' || !!st.certificateLink || !!st.certificateNumber;
       const isCoursera = !!st.courseraVerified;
+      const isQuizDone = isCertified || st.courseraQuizStatus === 'completed';
 
       return {
         student: st,
@@ -130,6 +136,8 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
         logs: isCertified ? ['🎓 O\'quvchi Coursera kursini tugatgan va sertifikatga ega. Qayta urinish shart emas.'] : [],
         courseraStatus: isCertified ? 'verified' : (isCoursera ? 'verified' : 'pending'),
         courseraLogs: isCoursera ? ['✅ Coursera hisobi faol va tasdiqlangan.'] : [],
+        quizStatus: isQuizDone ? 'completed' : (st.courseraQuizStatus === 'error' ? 'error' : 'pending'),
+        quizLogs: isQuizDone ? ['🏆 Barcha 4 ta Coursera testlari topshirilgan.'] : [],
       };
     });
 
@@ -606,6 +614,136 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
     setCurrentCourseraIndex(-1);
   };
 
+  // Coursera Quiz Solver Handler (4 Quizzes: Introduction to Generative AI)
+  const processStudentQuiz = async (index: number) => {
+    const item = items[index];
+    if (!item) return false;
+
+    if (item.status === 'certified' || item.student.certificateLink) {
+      return true;
+    }
+
+    setItems(prev => {
+      const next = [...prev];
+      next[index] = {
+        ...next[index],
+        quizStatus: 'processing',
+        quizLogs: [`[${new Date().toLocaleTimeString('uz-UZ')}] Coursera testlari (Quiz 1-4) avtomatik yechilmoqda...`],
+      };
+      return next;
+    });
+
+    try {
+      const res = await fetch('/api/coursera/solve-quizzes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          studentId: item.student.id,
+          fullName: item.student.fullName,
+          email: item.assignedEmail,
+          password: item.student.assignedPassword || globalPassword,
+        }),
+      });
+
+      const data = await res.json();
+      const combinedLogs = [...(data.logs || [])];
+
+      if (data.success) {
+        setItems(prev => {
+          const next = [...prev];
+          next[index] = {
+            ...next[index],
+            quizStatus: 'completed',
+            quizLogs: [...(next[index].quizLogs || []), ...combinedLogs, "🏆 Barcha 4 ta Coursera testlari muvaffaqiyatli topshirildi!"],
+          };
+          return next;
+        });
+
+        await onUpdateStudent({
+          ...item.student,
+          courseraQuizStatus: 'completed',
+          courseraQuizCompletedAt: new Date().toISOString(),
+        });
+
+        playChime();
+        sendPushNotification(item.student.fullName);
+        showToast(`🏆 ${item.student.fullName}: Barcha 4 ta Coursera testlari topshirildi!`);
+        return true;
+      } else {
+        const errorMsg = data.error || "Testlarni topshirishda xatolik";
+        setItems(prev => {
+          const next = [...prev];
+          next[index] = {
+            ...next[index],
+            quizStatus: 'error',
+            errorMessage: errorMsg,
+            quizLogs: [...(next[index].quizLogs || []), ...combinedLogs, `❌ Xatolik: ${errorMsg}`],
+          };
+          return next;
+        });
+        showToast(`❌ ${item.student.fullName}: ${errorMsg}`);
+        return false;
+      }
+    } catch (err: any) {
+      setItems(prev => {
+        const next = [...prev];
+        next[index] = {
+          ...next[index],
+          quizStatus: 'error',
+          errorMessage: err.message,
+          quizLogs: [...(next[index].quizLogs || []), `❌ Server xatosi: ${err.message}`],
+        };
+        return next;
+      });
+      showToast(`❌ Server xatosi: ${err.message}`);
+      return false;
+    }
+  };
+
+  const handleStartQuizBatch = async () => {
+    setIsQuizRunning(true);
+    isQuizRunningRef.current = true;
+    let successCount = 0;
+    let failCount = 0;
+
+    for (let i = 0; i < items.length; i++) {
+      if (!isQuizRunningRef.current) break;
+
+      if (items[i].status === 'certified' || items[i].quizStatus === 'completed' || items[i].student.courseraQuizStatus === 'completed') {
+        continue;
+      }
+      setCurrentQuizIndex(i);
+      const ok = await processStudentQuiz(i);
+      if (ok) {
+        successCount++;
+      } else {
+        failCount++;
+      }
+
+      if (!isQuizRunningRef.current) break;
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    setIsQuizRunning(false);
+    isQuizRunningRef.current = false;
+    setCurrentQuizIndex(-1);
+
+    if (failCount > 0) {
+      showToast(`⚠️ Natija: ${successCount} ta o'quvchi topshirdi, ${failCount} tasida xatolik yuz berdi. Tafsilotlar loglarda.`);
+    } else if (successCount > 0) {
+      showToast(`🏆 Barcha ${successCount} ta o'quvchining Coursera testlari muvaffaqiyatli topshirildi!`);
+    } else {
+      showToast(`ℹ️ Topshirilishi kerak bo'lgan yangi testlar topilmadi.`);
+    }
+  };
+
+  const handleStopQuizBatch = () => {
+    setIsQuizRunning(false);
+    isQuizRunningRef.current = false;
+    setCurrentQuizIndex(-1);
+    showToast(`🛑 Testlarni yechish to'xtatildi.`);
+  };
+
   const handlePauseBatch = () => {
     setIsPaused(true);
     isPausedRef.current = true;
@@ -696,7 +834,8 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
   const certifiedCount = items.filter(i => i.status === 'certified').length;
   const successCount = items.filter(i => i.status === 'success').length;
   const courseraCount = items.filter(i => i.courseraStatus === 'verified' || !!i.student.courseraVerified || i.status === 'certified').length;
-  const errorCount = items.filter(i => i.status === 'error' || i.courseraStatus === 'error').length;
+  const quizDoneCount = items.filter(i => i.quizStatus === 'completed' || i.student.courseraQuizStatus === 'completed' || i.status === 'certified').length;
+  const errorCount = items.filter(i => i.status === 'error' || i.courseraStatus === 'error' || i.quizStatus === 'error').length;
   const pendingCount = items.filter(i => i.status === 'pending' || i.courseraStatus === 'pending').length;
 
   return (
@@ -797,7 +936,7 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
         {/* Action Controls & Stats */}
         <div className="px-6 py-3 bg-white border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 flex-shrink-0">
           <div className="flex items-center gap-2">
-            {!isRunning && !isCourseraRunning ? (
+            {!isRunning && !isCourseraRunning && !isQuizRunning ? (
               <>
                 <button
                   type="button"
@@ -817,6 +956,16 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
                 >
                   <GraduationCap className="w-4 h-4 text-yellow-300" />
                   <span>🎓 Coursera Avtomat</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleStartQuizBatch}
+                  className="px-4 py-2.5 bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 hover:from-emerald-700 hover:to-cyan-700 text-white font-extrabold text-xs rounded-xl shadow-md flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]"
+                  title="Sinfdagi barcha o'quvchilar nomidan Coursera 4 ta testini (Introduction to Generative AI) avtomatik yechib topshirish"
+                >
+                  <FileCheck className="w-4 h-4 text-emerald-200" />
+                  <span>🎯 Testlarni Ishlash (Beta)</span>
                 </button>
               </>
             ) : isRunning ? (
@@ -850,7 +999,7 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
                   <span>Bekor qilish</span>
                 </button>
               </div>
-            ) : (
+            ) : isCourseraRunning ? (
               <div className="flex items-center gap-2">
                 <span className="text-xs font-bold text-indigo-700 animate-pulse flex items-center gap-1.5 bg-indigo-50 px-3 py-1.5 rounded-lg border border-indigo-200">
                   <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-600" />
@@ -859,6 +1008,20 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
                 <button
                   type="button"
                   onClick={handleStopCourseraBatch}
+                  className="px-3 py-1.5 bg-rose-100 hover:bg-rose-200 text-rose-800 font-bold text-xs rounded-lg cursor-pointer"
+                >
+                  To'xtatish
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-emerald-800 animate-pulse flex items-center gap-1.5 bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-300">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-600" />
+                  <span>Testlar yechilmoqda: {currentQuizIndex + 1}/{items.length}...</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleStopQuizBatch}
                   className="px-3 py-1.5 bg-rose-100 hover:bg-rose-200 text-rose-800 font-bold text-xs rounded-lg cursor-pointer"
                 >
                   To'xtatish
@@ -909,6 +1072,11 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
             <span className="px-2.5 py-1 rounded-lg bg-blue-50 text-blue-900 font-bold border border-blue-200 flex items-center gap-1.5">
               <GraduationCap className="w-3.5 h-3.5 text-blue-600" />
               <span>Coursera faol: {courseraCount}</span>
+            </span>
+
+            <span className="px-2.5 py-1 rounded-lg bg-teal-50 text-teal-900 font-bold border border-teal-300 flex items-center gap-1.5">
+              <FileCheck className="w-3.5 h-3.5 text-teal-700" />
+              <span>Test topshirgan: {quizDoneCount}</span>
             </span>
 
             <span className="px-2.5 py-1 rounded-lg bg-amber-50 text-amber-800 font-bold border border-amber-200 flex items-center gap-1.5">
@@ -1109,6 +1277,29 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
                                 <span className="text-slate-400 font-medium text-[10px]">Ulanmagan</span>
                               )}
                             </div>
+
+                            {/* Coursera Quizzes Status */}
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[10px] font-bold text-slate-500 w-14">Testlar:</span>
+                              {item.quizStatus === 'completed' || item.student.courseraQuizStatus === 'completed' || item.status === 'certified' ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-teal-100 text-teal-900 border border-teal-300">
+                                  <CheckCircle2 className="w-3 h-3 text-teal-600" />
+                                  <span>4/4 Topshirildi</span>
+                                </span>
+                              ) : item.quizStatus === 'processing' ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 animate-pulse">
+                                  <RefreshCw className="w-3 h-3 animate-spin text-emerald-600" />
+                                  <span>Yechilmoqda (1-4)...</span>
+                                </span>
+                              ) : item.quizStatus === 'error' ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200" title={item.errorMessage}>
+                                  <AlertTriangle className="w-3 h-3 text-rose-600" />
+                                  <span>Xato</span>
+                                </span>
+                              ) : (
+                                <span className="text-slate-400 font-medium text-[10px]">Topshirilmagan</span>
+                              )}
+                            </div>
                           </div>
                         </td>
 
@@ -1119,11 +1310,23 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
                             </span>
                           ) : (
                             <div className="flex items-center justify-end gap-1.5">
+                              {/* Single Coursera Quiz Solver button */}
+                              <button
+                                type="button"
+                                onClick={() => processStudentQuiz(idx)}
+                                disabled={isRunning || isCourseraRunning || isQuizRunning}
+                                className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-[10px] font-extrabold transition-all cursor-pointer flex items-center gap-1 disabled:opacity-50"
+                                title="Ushbu o'quvchi uchun Coursera 4 ta testini avtomatik yechib topshirish"
+                              >
+                                <FileCheck className="w-3 h-3 text-emerald-700" />
+                                <span>Testni Ishlash</span>
+                              </button>
+
                               {/* Coursera single button */}
                               <button
                                 type="button"
                                 onClick={() => processStudentCoursera(idx)}
-                                disabled={isRunning || isCourseraRunning}
+                                disabled={isRunning || isCourseraRunning || isQuizRunning}
                                 className="px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 disabled:opacity-50"
                                 title="Ushbu o'quvchini Coursera rasmiy dasturidan ro'yxatdan o'tkazish va tasdiqlash"
                               >

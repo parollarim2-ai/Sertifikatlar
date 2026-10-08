@@ -80,7 +80,7 @@ try {
     ensureFreshFirestoreData().then((stats) => {
       console.log(`📡 [Telegram Bot] Synchronized with Firestore: ${stats.classesCount} classes, ${stats.studentsCount} students (${stats.certifiedCount} certified)`);
     }).catch((err) => {
-      console.warn('Initial Firestore sync notice:', err.message);
+      console.log('Initial Firestore sync notice:', err.message);
     });
 
     // Periodic synchronization every 30 seconds ensures fresh data without fragile idle gRPC streams
@@ -144,7 +144,7 @@ export async function ensureFreshFirestoreData(): Promise<{ classesCount: number
       certifiedCount: cert,
     };
   } catch (err: any) {
-    console.warn('ensureFreshFirestoreData notice:', err.message);
+    console.log('ensureFreshFirestoreData notice:', err.message);
     return {
       classesCount: store.classes.length,
       studentsCount: store.students.length,
@@ -643,22 +643,24 @@ export async function startTelegramBot() {
       await deleteTelegramWebhookDirect();
     }
   } catch (err: any) {
-    console.warn('[Telegram Bot] Webhook initial check notice:', err.message);
+    console.log('[Telegram Bot] Webhook initial check notice:', err.message);
   }
 
   isPolling = true;
   console.log('🤖 Telegram Bot polling service started for @Courseradan_bot');
 
   let consecutive409Count = 0;
+  let consecutiveNetworkErrors = 0;
 
   const poll = async () => {
     while (isPolling) {
       try {
-        const res = await fetch(`${TELEGRAM_API}/getUpdates?offset=${updateOffset}&timeout=20`, {
-          signal: AbortSignal.timeout(25000),
+        const res = await fetch(`${TELEGRAM_API}/getUpdates?offset=${updateOffset}&timeout=15`, {
+          signal: AbortSignal.timeout(20000),
         });
         if (res.ok) {
           consecutive409Count = 0;
+          consecutiveNetworkErrors = 0;
           const data: any = await res.json();
           if (data.ok && Array.isArray(data.result)) {
             for (const update of data.result) {
@@ -672,7 +674,7 @@ export async function startTelegramBot() {
           // is currently running getUpdates. Back off calmly without spamming deleteWebhook and restarting every 2s.
           const backoffSec = Math.min(30, 5 * Math.min(consecutive409Count, 6));
           if (consecutive409Count <= 2 || consecutive409Count % 6 === 0) {
-            console.warn(`[Telegram Bot] 409 Conflict: another instance is active. Standing by (backoff ${backoffSec}s)...`);
+            console.log(`[Telegram Bot] 409 Conflict: another instance is active. Standing by (backoff ${backoffSec}s)...`);
           }
           if (consecutive409Count === 3) {
             try {
@@ -682,14 +684,30 @@ export async function startTelegramBot() {
           await new Promise((r) => setTimeout(r, backoffSec * 1000));
         } else {
           consecutive409Count = 0;
+          consecutiveNetworkErrors = 0;
           await new Promise((r) => setTimeout(r, 2000));
         }
       } catch (err: any) {
-        // Network timeout is normal in long polling
-        if (err.name !== 'TimeoutError') {
-          console.warn('Telegram polling retry in 2s:', err.message);
+        // Network timeout, socket reset, or transient disconnect is completely normal in HTTP long polling
+        consecutiveNetworkErrors++;
+        const isTransient =
+          err?.name === 'TimeoutError' ||
+          err?.name === 'AbortError' ||
+          err?.cause?.name === 'TimeoutError' ||
+          err?.cause?.name === 'AbortError' ||
+          (err?.message && (err.message.includes('fetch failed') || err.message.includes('aborted') || err.message.includes('network'))) ||
+          err?.code === 'ECONNRESET' ||
+          err?.code === 'ETIMEDOUT' ||
+          err?.code === 'UND_ERR_SOCKET' ||
+          err?.code === 'EAI_AGAIN';
+
+        if (!isTransient) {
+          console.log('[Telegram Bot] Polling notice:', err?.message || err);
         }
-        await new Promise((r) => setTimeout(r, 2000));
+
+        // Smooth progressive backoff on network issues: 2s -> 4s -> max 10s
+        const backoffMs = Math.min(10000, 2000 * Math.min(consecutiveNetworkErrors, 5));
+        await new Promise((r) => setTimeout(r, backoffMs));
       }
     }
   };
@@ -820,7 +838,7 @@ async function handleTelegramUpdate(update: any) {
 
       if (firestoreDb) {
         setDoc(doc(firestoreDb, 'telegramUsers', chatId.toString()), tgUserObj, { merge: true }).catch((e) => {
-          console.warn('Firestore telegramUsers save notice:', e.message);
+          console.log('Firestore telegramUsers save notice:', e.message);
         });
       }
 
