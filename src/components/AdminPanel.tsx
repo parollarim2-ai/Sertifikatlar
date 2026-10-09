@@ -6,6 +6,7 @@ import { TeacherCertificatesTab } from './TeacherCertificatesTab';
 import { GmailGeneratorModal } from './GmailGeneratorModal';
 import { OperatorSpeedAnalyticsModal } from './OperatorSpeedAnalyticsModal';
 import { ClassBatchAutomationModal } from './ClassBatchAutomationModal';
+import { ClassLiquidGlassStrip } from './ClassLiquidGlassStrip';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
 import { analyzeOperatorSpeed, getStoredCertifyLogs } from '../utils/operatorSpeedTracker';
 import { 
@@ -47,7 +48,9 @@ import {
   GraduationCap,
   Zap,
   Flame,
-  Trophy
+  Trophy,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 
 export interface UnifiedItem {
@@ -138,6 +141,39 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [isSpeedModalOpen, setIsSpeedModalOpen] = useState(false);
   const [isClassBatchModalOpen, setIsClassBatchModalOpen] = useState(false);
   const [batchTargetClass, setBatchTargetClass] = useState<ClassGroup | null>(null);
+
+  // Compact / Expanded state for top class selection panel
+  const [isClassCardsExpanded, setIsClassCardsExpanded] = useState(false);
+
+  // Multi-select status filter: 'certified' (Tayyor), 'error' (Xatolik), 'pending' (Kutilmoqda)
+  type StatusFilterType = 'certified' | 'error' | 'pending';
+  const [selectedStatusFilters, setSelectedStatusFilters] = useState<StatusFilterType[]>([]);
+  const [isStatusDropdownOpen, setIsStatusDropdownOpen] = useState(false);
+  const statusDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (statusDropdownRef.current && !statusDropdownRef.current.contains(e.target as Node)) {
+        setIsStatusDropdownOpen(false);
+      }
+    };
+    if (isStatusDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isStatusDropdownOpen]);
+
+  const toggleStatusFilter = (st: StatusFilterType) => {
+    setSelectedStatusFilters(prev => {
+      if (prev.includes(st)) {
+        return prev.filter(x => x !== st);
+      } else {
+        return [...prev, st];
+      }
+    });
+  };
 
   // In-app Delete Confirmation state (avoids blocked window.confirm in iframe)
   const [deleteConfirmation, setDeleteConfirmation] = useState<{
@@ -269,24 +305,44 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const grandTotalPaidRevenue = totalPaidRevenue + teachersPaid;
   const grandTotalRemainingDebt = totalRemainingDebt + teachersDebt;
 
+  // Today's date keys for exact certificate count tracking
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const todayLocalDateKey = useMemo(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }, []);
+
+  // Bugun olingan sertifikatlar aniq miqdori (O'quvchilar + Ustozlar + Loglar)
+  const todayCertificatesCount = useMemo(() => {
+    const studentCount = students.filter(s => {
+      if (s.status !== 'certified') return false;
+      if (s.certifiedAt) {
+        const d = s.certifiedAt.slice(0, 10);
+        return d === todayKey || d === todayLocalDateKey;
+      }
+      return false;
+    }).length;
+
+    const teacherCount = teacherCertificates.filter(t => {
+      if (t.status !== 'certified') return false;
+      if (t.certifiedAt) {
+        const d = t.certifiedAt.slice(0, 10);
+        return d === todayKey || d === todayLocalDateKey;
+      }
+      return false;
+    }).length;
+
+    const logs = getStoredCertifyLogs(students);
+    const logsToday = logs.filter(l => {
+      const d = l.timestamp ? l.timestamp.slice(0, 10) : '';
+      return d === todayKey || d === todayLocalDateKey;
+    }).length;
+
+    return Math.max(studentCount + teacherCount, logsToday);
+  }, [students, teacherCertificates, todayKey, todayLocalDateKey]);
+
   // Unified list of people for the table (Students + Teachers when selected or searching)
   const unifiedList = useMemo(() => {
-    interface UnifiedItem {
-      id: string;
-      fullName: string;
-      passportOrId?: string;
-      birthDate?: string;
-      assignedEmail?: string;
-      assignedPassword?: string;
-      status: 'pending' | 'certified' | 'error';
-      certificateLink?: string;
-      hasError?: boolean;
-      isTeacher: boolean;
-      badgeLabel: string;
-      rawStudent?: Student;
-      rawTeacher?: TeacherCertificate;
-    }
-
     const list: UnifiedItem[] = [];
 
     // Add students if not explicitly filtering only teachers
@@ -345,7 +401,52 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     return list;
   }, [students, teacherCertificates, classes, selectedClassId, searchQuery]);
 
-  const filteredStudents = unifiedList;
+  // Status toifasini aniqlash: 'certified' (Tayyor) | 'error' (Xatolik) | 'pending' (Kutilmoqda)
+  const getItemStatusCategory = (item: UnifiedItem): StatusFilterType => {
+    if (item.hasError || item.status === 'error') return 'error';
+    if (item.status === 'certified') return 'certified';
+    return 'pending';
+  };
+
+  // Statuslar bo'yicha aniq hisoblagich
+  const statusCounts = useMemo(() => {
+    let cert = 0;
+    let err = 0;
+    let pend = 0;
+    unifiedList.forEach(item => {
+      const cat = getItemStatusCategory(item);
+      if (cat === 'certified') cert++;
+      else if (cat === 'error') err++;
+      else pend++;
+    });
+    return { certified: cert, error: err, pending: pend, total: unifiedList.length };
+  }, [unifiedList]);
+
+  // Ko'p tanlovli (multi-select) holat filtrlash va saralash mantiqi
+  const filteredStudents = useMemo(() => {
+    const list = unifiedList;
+
+    // 1. Agar birontasi ham tanlanmagan bo'lsa (default):
+    // Barcha o'quvchilar chiqadi (standart aralash tartibda)
+    if (selectedStatusFilters.length === 0) {
+      return list;
+    }
+
+    // 2. Agar bir vaqtning o'zida barcha 3 tasi tanlansa ('certified', 'error', 'pending'):
+    // Hamma o'quvchilar chiqadi, lekin aniq KATEGORIYALANGAN tartibda:
+    // 1-o'rinda: Tayyor bo'lganlar ('certified')
+    // 2-o'rinda: Xatolik bo'lganlar ('error')
+    // 3-o'rinda: Kutilayotganlar ('pending')
+    if (selectedStatusFilters.length === 3) {
+      const certList = list.filter(item => getItemStatusCategory(item) === 'certified');
+      const errList = list.filter(item => getItemStatusCategory(item) === 'error');
+      const pendList = list.filter(item => getItemStatusCategory(item) === 'pending');
+      return [...certList, ...errList, ...pendList];
+    }
+
+    // 3. Agar 1 yoki 2 tasi tanlansa: faqat tanlangan holatlarga to'g'ri keladiganlar chiqadi
+    return list.filter(item => selectedStatusFilters.includes(getItemStatusCategory(item)));
+  }, [unifiedList, selectedStatusFilters]);
 
   // Assign unique emails to missing students in Email tab
   const handleAssignEmailsToMissingStudents = () => {
@@ -578,7 +679,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             {operatorAnalysis.isActive ? <Flame className="w-5 h-5 fill-white" /> : <Clock className="w-5 h-5" />}
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
                 {operatorAnalysis.isActive ? (
                   <>
@@ -597,6 +698,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   </>
                 )}
               </span>
+
+              {/* Bugun olingan sertifikatlar aniq miqdori */}
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-900 border border-emerald-300 shadow-2xs">
+                <Award className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+                <span>Bugun olingan sertifikatlar:</span>
+                <strong className="text-emerald-800 font-extrabold text-xs">{todayCertificatesCount} ta</strong>
+              </span>
+
               {operatorAnalysis.isActive && (
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-200/80 text-amber-950">
                   {operatorAnalysis.streakCount} ta ketma-ket
@@ -605,13 +714,20 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             </div>
             <p className="text-[11px] text-slate-500 mt-0.5">
               {operatorAnalysis.isActive
-                ? `Oxirgi kiritish: ${operatorAnalysis.currentIntervalFormatted}. Tahlil va grafikni ko'rish uchun bosing ↗`
-                : `Oxirgi kiritish: ${operatorAnalysis.currentIntervalFormatted}. (15 daqiqadan oshgani sababli ish to'xtatilgan deb hisoblandi) • Grafikni ochish ↗`}
+                ? `Oxirgi kiritish: ${operatorAnalysis.currentIntervalFormatted}. Bugun jami ${todayCertificatesCount} ta sertifikat muvaffaqiyatli topshirildi. Tahlil va grafikni ko'rish uchun bosing ↗`
+                : `Oxirgi kiritish: ${operatorAnalysis.currentIntervalFormatted} • Bugun olingan: ${todayCertificatesCount} ta sertifikat • Grafik va tahlilni ochish ↗`}
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2 sm:gap-3">
+          {/* Bugun olingan sertifikatlar mini bloki */}
+          <div className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-xl bg-emerald-50 text-emerald-950 border border-emerald-200 font-semibold shadow-2xs">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+            <span className="hidden sm:inline text-slate-600 font-medium">Bugun olingan:</span>
+            <span className="font-extrabold text-emerald-800">{todayCertificatesCount} ta</span>
+          </div>
+
           {operatorAnalysis.recordSeconds > 0 && (
             <div className="hidden sm:flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg bg-amber-50 text-amber-900 border border-amber-200">
               <Trophy className="w-3.5 h-3.5 text-amber-600" />
@@ -801,284 +917,28 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       {/* TAB 1: Classes & Students */}
       {activeTab === 'classes' && (
         <div className="space-y-5">
-          {/* Class Cards Row */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-            {classes.length === 0 ? (
-              <div className="col-span-full p-8 bg-white border border-dashed border-slate-300 rounded-2xl text-center space-y-4">
-                <div className="w-14 h-14 rounded-2xl bg-blue-50 text-blue-700 border border-blue-200 flex items-center justify-center mx-auto">
-                  <Upload className="w-7 h-7" />
-                </div>
-                <div className="space-y-1">
-                  <h3 className="text-base font-bold text-slate-900">Sinflar hali kiritilmagan</h3>
-                  <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
-                    Maktabingiz sinflari va o'quvchilarini kiritish uchun maktab hujjati (Excel, Word yoki matn)ni yuklang. Tizim avtomatik sinf nomi, ustoz va o'quvchilarni ajratib beradi.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => onOpenBulkUploadModal()}
-                  className="px-4 py-2.5 bg-blue-700 hover:bg-blue-800 text-white font-semibold text-xs rounded-xl shadow-xs inline-flex items-center gap-2 transition-colors cursor-pointer"
-                >
-                  <Sparkles className="w-4 h-4" />
-                  <span>Hujjat orqali yangi sinf yuklash</span>
-                </button>
-              </div>
-            ) : (
-              classes.map(c => {
-                const cStudents = students.filter(s => s.classId === c.id);
-                const cCertified = cStudents.filter(s => s.status === 'certified').length;
-                const cTotalCost = cCertified * 5000;
-                const cDebt = Math.max(0, cTotalCost - c.paidAmount);
-                const isPaid = cTotalCost > 0 && c.paidAmount >= cTotalCost;
-                const isSelected = selectedClassId === c.id;
-
-                return (
-                  <div
-                    key={c.id}
-                    className={`bg-white border rounded-2xl p-4 transition-all relative ${
-                      isSelected
-                        ? 'border-blue-600 ring-2 ring-blue-600/20 shadow-sm'
-                        : 'border-slate-200 hover:border-slate-300 shadow-xs'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-9 h-9 rounded-lg bg-blue-50 border border-blue-200 text-blue-800 font-bold text-sm flex items-center justify-center flex-shrink-0">
-                          {c.name}
-                        </div>
-                        <div className="min-w-0">
-                          <h4 className="text-sm font-bold text-slate-900 truncate">{c.teacherName}</h4>
-                          <span className="text-[11px] text-slate-500 block">{c.name} sinfi</span>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => setEditingClass(c)}
-                          className="p-1.5 text-slate-400 hover:text-slate-800 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
-                          title="Sinf ma'lumotlarini tahrirlash"
-                        >
-                          <Edit2 className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setDeleteConfirmation({
-                            isOpen: true,
-                            type: 'class',
-                            id: c.id,
-                            name: `${c.name} sinfi`,
-                            subtitle: `${c.teacherName} rahbarligidagi barcha ${cStudents.length} ta o'quvchi ham butunlay o'chiriladi.`
-                          })}
-                          className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition-colors cursor-pointer"
-                          title="Sinfni o'chirish"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Stats */}
-                    <div className="mt-3 pt-3 border-t border-slate-100 grid grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <span className="text-slate-400 block text-[11px]">O'quvchilar:</span>
-                        <span className="font-semibold text-slate-800">{cStudents.length} ta ({cCertified} tayyor)</span>
-                      </div>
-
-                      <div>
-                        <span className="text-slate-400 block text-[11px]">To'lov:</span>
-                        <button
-                          type="button"
-                          onClick={() => onOpenPaymentModal(c)}
-                          className={`font-semibold hover:underline cursor-pointer ${isPaid ? 'text-emerald-700' : 'text-amber-800'}`}
-                        >
-                          {isPaid ? "To'landi ✅" : `${cDebt.toLocaleString()} so'm`}
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Action buttons: Select + Bulk Add to this class */}
-                    <div className="mt-3 flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedClassId(isSelected ? 'all' : c.id)}
-                        className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer text-center ${
-                          isSelected
-                            ? 'bg-blue-700 text-white'
-                            : 'bg-slate-50 text-slate-700 hover:bg-slate-100 border border-slate-200'
-                        }`}
-                      >
-                        {isSelected ? "Tanlangan" : "Ko'rish"}
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => onOpenBulkUploadModal(c.id)}
-                        className="px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold rounded-lg border border-blue-200 flex items-center gap-1 transition-colors cursor-pointer"
-                        title="Ushbu sinfga fayldan yangi o'quvchilarni qo'shish"
-                      >
-                        <UserPlus className="w-3.5 h-3.5" />
-                        <span>+ O'quvchi</span>
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-
-          {/* Selected Class Control & Teacher Message Banner */}
-          {selectedClassId !== 'all' && (() => {
-            const currentClass = classes.find(c => c.id === selectedClassId);
-            if (!currentClass) return null;
-            const classMsgs = messages.filter(m => m.classId === currentClass.id);
-            const latestMsg = classMsgs.length > 0 ? classMsgs[classMsgs.length - 1] : null;
-            const unreadMsgsCount = classMsgs.filter(m => !m.isRead).length;
-
-            return (
-              <div className="bg-gradient-to-r from-blue-900 to-indigo-950 text-white rounded-2xl p-5 shadow-lg border border-blue-800/60 animate-fade-in">
-                <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-                  {/* Left: Class & Teacher Info */}
-                  <div className="flex items-center gap-3.5">
-                    <div className="w-12 h-12 rounded-2xl bg-white/10 border border-white/20 text-white font-black text-lg flex items-center justify-center flex-shrink-0 backdrop-blur-md shadow-inner">
-                      {currentClass.name}
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <h3 className="text-base font-extrabold text-white tracking-tight">
-                          {currentClass.name} sinfi boshqaruvi
-                        </h3>
-                        <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-blue-500/30 text-blue-200 border border-blue-400/30">
-                          Faol sinf
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-3 text-xs text-blue-200 mt-1">
-                        <span className="flex items-center gap-1 font-semibold text-white">
-                          <Users className="w-3.5 h-3.5 text-blue-300" />
-                          <span>Ustoz: {currentClass.teacherName}</span>
-                        </span>
-                        {currentClass.teacherPhone && (
-                          <span className="flex items-center gap-1 text-blue-300 font-mono">
-                            <Phone className="w-3 h-3" />
-                            <span>{currentClass.teacherPhone}</span>
-                          </span>
-                        )}
-                        <span className="bg-white/10 px-2 py-0.5 rounded text-[11px] text-blue-100 font-semibold">
-                          {students.filter(s => s.classId === currentClass.id).length} ta o'quvchi
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Middle / Right: Live Teacher Message Status & Action Buttons */}
-                  <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto justify-end">
-                    
-                    {/* Message Read Status Tag */}
-                    {latestMsg && (
-                      <div className="hidden lg:flex flex-col items-end text-right mr-2 bg-white/10 px-3 py-1.5 rounded-xl border border-white/15">
-                        <span className="text-[10px] text-blue-300 font-medium">Ustoz xabari holati:</span>
-                        {latestMsg.isRead ? (
-                          <span className="text-xs font-bold text-emerald-300 flex items-center gap-1">
-                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                            <span>Ko'rgan (O'qildi)</span>
-                          </span>
-                        ) : (
-                          <span className="text-xs font-bold text-amber-300 flex items-center gap-1">
-                            <Clock className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-                            <span>Hali ko'rmadi</span>
-                          </span>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Button 0: Whole Class Batch Aileaders Registration */}
-                    <button
-                      type="button"
-                      onClick={() => handleOpenClassBatch(currentClass)}
-                      className="px-4 py-2.5 bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-black text-xs rounded-xl shadow-lg border border-white/25 flex items-center gap-2 transition-all cursor-pointer transform hover:scale-[1.03] active:scale-[0.98]"
-                      title="Ushbu sinfdagi barcha o'quvchilarni Aileaders'dan bir boshidan avtomatik ro'yxatdan o'tkazish"
-                    >
-                      <Zap className="w-4 h-4 text-yellow-300 fill-yellow-300 animate-pulse" />
-                      <span>⚡️ Butun sinfni Aileaders'dan ro'yxatdan o'tkazish</span>
-                    </button>
-
-                    {/* Button 1: Send Message to Teacher */}
-                    <button
-                      type="button"
-                      onClick={() => onOpenTeacherMessageModal(currentClass)}
-                      className="px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-xl shadow-md flex items-center gap-2 transition-all cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]"
-                    >
-                      <Bell className="w-4 h-4 text-slate-950" />
-                      <span>Ustozga xabar yuborish</span>
-                      {unreadMsgsCount > 0 && (
-                        <span className="px-1.5 py-0.2 rounded-full bg-slate-950 text-amber-400 text-[10px] font-black">
-                          {unreadMsgsCount}
-                        </span>
-                      )}
-                    </button>
-
-                    {/* Button 2: Bulk Add Students to this specific class */}
-                    <button
-                      type="button"
-                      onClick={() => onOpenBulkUploadModal(currentClass.id)}
-                      className="px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-xl border border-blue-400/40 shadow-md flex items-center gap-2 transition-all cursor-pointer transform hover:scale-[1.02]"
-                      title="Ushbu sinfga fayl (Excel, Word) orqali yangi o'quvchilarni qo'shish"
-                    >
-                      <Upload className="w-4 h-4" />
-                      <span>+ Fayldan qo'shish</span>
-                    </button>
-
-                    {/* Button 2b: Single Student to this class */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAllowDuplicateName(false);
-                        setNewStudentName('');
-                        setNewStudentBirthDate('');
-                        setNewStudentPassport('');
-                        setNewStudentCertLink('');
-                        setNewStudentClassId(currentClass.id);
-                        setIsAddingStudent(true);
-                      }}
-                      className="px-3.5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl border border-emerald-400/40 shadow-md flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02]"
-                      title="Ushbu sinfga yakka o'quvchi kiritish"
-                    >
-                      <Plus className="w-4 h-4" />
-                      <span>+ Yakka o'quvchi</span>
-                    </button>
-
-                    {/* Button 3: Payment for this class */}
-                    <button
-                      type="button"
-                      onClick={() => onOpenPaymentModal(currentClass)}
-                      className="px-3 py-2.5 bg-white/10 hover:bg-white/20 text-white font-semibold text-xs rounded-xl border border-white/20 flex items-center gap-1.5 transition-colors cursor-pointer"
-                      title="Sinf to'lovini kiritish"
-                    >
-                      <CreditCard className="w-4 h-4 text-emerald-400" />
-                      <span>To'lov</span>
-                    </button>
-
-                    {/* Button 4: Delete this class */}
-                    <button
-                      type="button"
-                      onClick={() => setDeleteConfirmation({
-                        isOpen: true,
-                        type: 'class',
-                        id: currentClass.id,
-                        name: `${currentClass.name} sinfi`,
-                        subtitle: `${currentClass.teacherName} rahbarligidagi barcha o'quvchilar ham butunlay o'chiriladi.`
-                      })}
-                      className="px-3 py-2.5 bg-rose-500/20 hover:bg-rose-600/40 text-rose-200 hover:text-white font-semibold text-xs rounded-xl border border-rose-400/30 flex items-center gap-1.5 transition-colors cursor-pointer"
-                      title="Ushbu sinfni va uning o'quvchilarini o'chirish"
-                    >
-                      <Trash2 className="w-4 h-4 text-rose-400" />
-                      <span>Sinfni o'chirish</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
+          {/* Claude UI/UX Spec: Liquid Glass Class Selection Strip & Emergent Popover */}
+          <ClassLiquidGlassStrip
+            classes={classes}
+            students={students}
+            selectedClassId={selectedClassId}
+            onSelectClass={(cid) => setSelectedClassId(cid)}
+            onOpenBulkUploadModal={(cid) => onOpenBulkUploadModal(cid)}
+            onOpenPaymentModal={(cg) => onOpenPaymentModal(cg)}
+            onOpenTeacherMessageModal={(cg) => onOpenTeacherMessageModal(cg)}
+            onOpenClassBatch={(cg) => handleOpenClassBatch(cg)}
+            onEditClass={(cg) => setEditingClass(cg)}
+            onDeleteClass={(cg) => {
+              const cStudents = students.filter(s => s.classId === cg.id);
+              setDeleteConfirmation({
+                isOpen: true,
+                type: 'class',
+                id: cg.id,
+                name: `${cg.name} sinfi`,
+                subtitle: `${cg.teacherName} rahbarligidagi barcha ${cStudents.length} ta o'quvchi ham butunlay o'chiriladi.`
+              });
+            }}
+          />
 
           {/* Search & Filter Bar */}
           <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
@@ -1093,37 +953,217 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               />
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-500 font-medium">Sinf filtri:</span>
-              <select
-                value={selectedClassId}
-                onChange={e => setSelectedClassId(e.target.value)}
-                className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 text-xs font-medium focus:outline-none focus:bg-white focus:border-blue-700 cursor-pointer"
-              >
-                <option value="all">Barcha sinflar ({totalStudents})</option>
-                <option value="all_with_teachers">🎓 Barcha sertifikatlar (O'quvchilar + Ustozlar: {totalStudents + totalTeachers})</option>
-                <option value="only_teachers">👨‍🏫 Faqat Ustozlar ({totalTeachers})</option>
-                {classes.map(c => (
-                  <option key={c.id} value={c.id}>
-                    {c.name} sinfi ({c.teacherName})
-                  </option>
-                ))}
-              </select>
+            <div className="flex flex-wrap items-center gap-2.5">
+              {/* Sinf filtri */}
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-slate-500 font-medium whitespace-nowrap">Sinf filtri:</span>
+                <select
+                  value={selectedClassId}
+                  onChange={e => setSelectedClassId(e.target.value)}
+                  className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 text-xs font-semibold focus:outline-none focus:bg-white focus:border-blue-700 cursor-pointer"
+                >
+                  <option value="all">Barcha sinflar ({totalStudents})</option>
+                  <option value="all_with_teachers">🎓 Barcha sertifikatlar (O'quvchilar + Ustozlar: {totalStudents + totalTeachers})</option>
+                  <option value="only_teachers">👨‍🏫 Faqat Ustozlar ({totalTeachers})</option>
+                  {classes.map(c => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} sinfi ({c.teacherName})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Holat filtri: Yangi ixcham tugma & Dropdown panel (Tayyor / Xatolik / Kutilmoqda) */}
+              <div className="relative" ref={statusDropdownRef}>
+                <button
+                  type="button"
+                  onClick={() => setIsStatusDropdownOpen(prev => !prev)}
+                  className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition-all cursor-pointer ${
+                    selectedStatusFilters.length > 0
+                      ? 'bg-blue-50 border-blue-400 text-blue-900 shadow-2xs ring-1 ring-blue-300'
+                      : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100 hover:text-slate-900'
+                  }`}
+                  title="O'quvchilar holati bo'yicha saralash va filtrlash"
+                >
+                  <Filter className="w-3.5 h-3.5 text-blue-600 flex-shrink-0" />
+                  <span className="text-slate-500 font-normal">Holat:</span>
+                  <span className="font-bold">
+                    {selectedStatusFilters.length === 0
+                      ? 'Barchasi'
+                      : selectedStatusFilters.length === 3
+                      ? 'Kategoriyalangan (3 ta)'
+                      : selectedStatusFilters
+                          .map(s => (s === 'certified' ? 'Tayyor' : s === 'error' ? 'Xatolik' : 'Kutilmoqda'))
+                          .join(' + ')}
+                  </span>
+                  {selectedStatusFilters.length > 0 && (
+                    <span className="w-4 h-4 rounded-full bg-blue-600 text-white text-[10px] flex items-center justify-center font-bold">
+                      {selectedStatusFilters.length}
+                    </span>
+                  )}
+                  <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${isStatusDropdownOpen ? 'rotate-180 text-blue-600' : ''}`} />
+                </button>
+
+                {/* Dropdown panel */}
+                {isStatusDropdownOpen && (
+                  <div className="absolute right-0 top-full mt-2 w-72 z-50 bg-white border border-slate-200 rounded-2xl shadow-2xl p-3 space-y-2.5 animate-scale-up">
+                    <div className="flex items-center justify-between pb-1.5 border-b border-slate-100 px-1">
+                      <span className="text-[11px] font-bold text-slate-800 uppercase tracking-wider">
+                        Holat Bo'yicha Tanlash
+                      </span>
+                      {selectedStatusFilters.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedStatusFilters([])}
+                          className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 hover:underline cursor-pointer"
+                        >
+                          Tozalash
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="space-y-1.5">
+                      {/* Variant 1: Tayyor */}
+                      <div
+                        onClick={() => toggleStatusFilter('certified')}
+                        className={`flex items-center justify-between p-2 rounded-xl text-xs cursor-pointer select-none transition-colors border ${
+                          selectedStatusFilters.includes('certified')
+                            ? 'bg-emerald-50 text-emerald-950 font-bold border-emerald-300 ring-1 ring-emerald-200'
+                            : 'hover:bg-slate-50 text-slate-700 border-transparent'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={selectedStatusFilters.includes('certified')}
+                            onChange={() => {}}
+                            className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+                          />
+                          <span className="flex items-center gap-1.5">
+                            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+                            <span>Tayyor</span>
+                          </span>
+                        </div>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                          {statusCounts.certified} ta
+                        </span>
+                      </div>
+
+                      {/* Variant 2: Xatolik */}
+                      <div
+                        onClick={() => toggleStatusFilter('error')}
+                        className={`flex items-center justify-between p-2 rounded-xl text-xs cursor-pointer select-none transition-colors border ${
+                          selectedStatusFilters.includes('error')
+                            ? 'bg-rose-50 text-rose-950 font-bold border-rose-300 ring-1 ring-rose-200'
+                            : 'hover:bg-slate-50 text-slate-700 border-transparent'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={selectedStatusFilters.includes('error')}
+                            onChange={() => {}}
+                            className="w-4 h-4 rounded text-rose-600 focus:ring-rose-500 cursor-pointer"
+                          />
+                          <span className="flex items-center gap-1.5">
+                            <span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
+                            <span>Xatolik</span>
+                          </span>
+                        </div>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
+                          {statusCounts.error} ta
+                        </span>
+                      </div>
+
+                      {/* Variant 3: Kutilmoqda */}
+                      <div
+                        onClick={() => toggleStatusFilter('pending')}
+                        className={`flex items-center justify-between p-2 rounded-xl text-xs cursor-pointer select-none transition-colors border ${
+                          selectedStatusFilters.includes('pending')
+                            ? 'bg-amber-50 text-amber-950 font-bold border-amber-300 ring-1 ring-amber-200'
+                            : 'hover:bg-slate-50 text-slate-700 border-transparent'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={selectedStatusFilters.includes('pending')}
+                            onChange={() => {}}
+                            className="w-4 h-4 rounded text-amber-600 focus:ring-amber-500 cursor-pointer"
+                          />
+                          <span className="flex items-center gap-1.5">
+                            <span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                            <span>Kutilmoqda</span>
+                          </span>
+                        </div>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                          {statusCounts.pending} ta
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Footer Actions */}
+                    <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedStatusFilters(['certified', 'error', 'pending']);
+                        }}
+                        className="text-[11px] font-bold text-blue-700 hover:text-blue-900 hover:underline cursor-pointer"
+                        title="Uchalasini tanlab 1. Tayyor, 2. Xatolik, 3. Kutilmoqda tartibida chiqarish"
+                      >
+                        Barchasini tanlash (Kategoriyalash)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsStatusDropdownOpen(false)}
+                        className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-semibold cursor-pointer"
+                      >
+                        Yopish
+                      </button>
+                    </div>
+
+                    {/* Explanatory notes */}
+                    {selectedStatusFilters.length === 3 ? (
+                      <div className="p-2 rounded-xl bg-blue-50 border border-blue-200 text-[10px] text-blue-950 leading-relaxed font-medium">
+                        ✨ <strong>Kategoriyalangan tartib faol:</strong> O'quvchilar aniq tartib bilan: birinchi <strong>Tayyor</strong>, keyin <strong>Xatolik</strong>, so'ngra <strong>Kutilayotganlar</strong> bo'lib guruhlanadi.
+                      </div>
+                    ) : selectedStatusFilters.length === 0 ? (
+                      <div className="p-2 rounded-xl bg-slate-50 border border-slate-200 text-[10px] text-slate-600 leading-relaxed">
+                        ℹ️ Hech biri tanlanmaganda: Barcha o'quvchilar odatiy (aralash) tartibda chiqadi.
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
           {/* Students Table in High Contrast Clean White Style */}
           <div className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-xs">
-            <div className="px-5 py-3.5 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+            <div className="px-5 py-3.5 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h3 className="font-bold text-slate-900 text-sm">O'quvchilar Ro'yxati</h3>
                 <p className="text-xs text-slate-500">
                   <span className="text-blue-700 font-semibold">1 marta bosing</span> — nusxalash, <span className="text-blue-700 font-semibold">2 marta tez bosing</span> — tahrirlash
                 </p>
               </div>
-              <span className="text-xs text-slate-600 font-mono font-medium">
-                {filteredStudents.length} nafar ko'rsatilmoqda
-              </span>
+              <div className="flex items-center gap-2">
+                {selectedStatusFilters.length === 3 && (
+                  <span className="text-[10px] sm:text-[11px] px-2.5 py-1 rounded-lg bg-blue-100 text-blue-900 font-bold border border-blue-200 flex items-center gap-1.5 shadow-2xs">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-blue-700" />
+                    <span>Tartib: 1. Tayyor ➔ 2. Xatolik ➔ 3. Kutilmoqda</span>
+                  </span>
+                )}
+                {selectedStatusFilters.length > 0 && selectedStatusFilters.length < 3 && (
+                  <span className="text-[10px] sm:text-[11px] px-2 py-0.5 rounded-lg bg-slate-200 text-slate-800 font-semibold border border-slate-300">
+                    Holat: {selectedStatusFilters.map(s => (s === 'certified' ? 'Tayyor' : s === 'error' ? 'Xatolik' : 'Kutilmoqda')).join(', ')}
+                  </span>
+                )}
+                <span className="text-xs text-slate-700 font-mono font-bold bg-white px-2.5 py-1 rounded-lg border border-slate-200 shadow-2xs">
+                  {filteredStudents.length} nafar
+                </span>
+              </div>
             </div>
 
             <div className="overflow-x-auto">

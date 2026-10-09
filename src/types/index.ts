@@ -109,6 +109,7 @@ export interface TeacherCertificate {
   paymentStatus: 'pending' | 'partial' | 'paid';
   notes?: string;
   createdAt: string;
+  certifiedAt?: string; // Timestamp when teacher certificate was entered
 }
 
 export interface AppState {
