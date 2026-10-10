@@ -196,6 +196,7 @@ export const NavigationLiquidGlassTabs: React.FC<NavigationLiquidGlassTabsProps>
   // Sync on tab change and resize
   useEffect(() => {
     syncLensToActiveTab(activeTab);
+    triggerJumpTo(`nav-${activeTab}`);
     const timer = setTimeout(() => syncLensToActiveTab(activeTab), 80);
     const handleResize = () => syncLensToActiveTab(activeTab);
     window.addEventListener('resize', handleResize);
@@ -203,7 +204,7 @@ export const NavigationLiquidGlassTabs: React.FC<NavigationLiquidGlassTabsProps>
       clearTimeout(timer);
       window.removeEventListener('resize', handleResize);
     };
-  }, [activeTab, syncLensToActiveTab]);
+  }, [activeTab, syncLensToActiveTab, triggerJumpTo]);
 
   // Track global pointer for conic rim light & spotlight
   useEffect(() => {

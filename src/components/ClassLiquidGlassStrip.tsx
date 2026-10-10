@@ -350,10 +350,11 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
           const cy = tileEl.offsetTop + tileEl.offsetHeight / 2;
           springsRef.current.lx.t = cx;
           springsRef.current.ly.t = cy;
+          triggerJumpTo(`class-${classData[idx].id}`);
         }
       }
     }
-  }, [selectedClassId, classData]);
+  }, [selectedClassId, classData, triggerJumpTo]);
 
   // Reset to all classes explicitly
   const handleResetToAll = () => {
