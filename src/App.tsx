@@ -473,7 +473,7 @@ export default function App() {
 
   // Sessions and Device Management Handlers
   const handleRegisterSession = async (session: Partial<TeacherSession> & { deviceId: string }) => {
-    const fullSession: TeacherSession = {
+    let sessionToSave: TeacherSession = {
       id: session.id || session.deviceId,
       deviceId: session.deviceId,
       teacherName: session.teacherName || '',
@@ -486,21 +486,26 @@ export default function App() {
       lastActiveAt: session.lastActiveAt || new Date().toISOString(),
       createdAt: session.createdAt || new Date().toISOString(),
       isBlocked: session.isBlocked || false,
-      blockedReason: session.blockedReason,
+      ...(session.blockedReason ? { blockedReason: session.blockedReason } : {}),
     };
 
     setSessions(prev => {
       const existing = prev.find(s => s.deviceId === session.deviceId);
       const merged: TeacherSession = {
-        ...fullSession,
-        isBlocked: existing ? existing.isBlocked : false,
-        blockedReason: existing ? existing.blockedReason : undefined,
-        createdAt: existing ? existing.createdAt : fullSession.createdAt,
+        ...sessionToSave,
+        isBlocked: existing ? existing.isBlocked : (session.isBlocked || false),
+        ...(existing?.blockedReason
+          ? { blockedReason: existing.blockedReason }
+          : session.blockedReason
+          ? { blockedReason: session.blockedReason }
+          : {}),
+        createdAt: existing ? existing.createdAt : sessionToSave.createdAt,
       };
+      sessionToSave = merged;
       const filtered = prev.filter(s => s.deviceId !== session.deviceId);
       return [merged, ...filtered];
     });
-    await syncSaveSession(fullSession);
+    await syncSaveSession(sessionToSave);
   };
 
   const handleToggleBlockDevice = async (deviceId: string, isBlocked: boolean, reason?: string) => {

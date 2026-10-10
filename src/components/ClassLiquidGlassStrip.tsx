@@ -73,11 +73,13 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
   const svgDefsRef = useRef<SVGDefsElement>(null);
   const tileRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
-  // Springs & interactive state
+  const sleepTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Springs & interactive state with smooth critical damping (no backward jitter)
   const springsRef = useRef({
-    lx: new Spring(0, 200, 17),
-    ly: new Spring(0, 200, 17),
-    ls: new Spring(0, 260, 15),
+    lx: new Spring(0, 240, 28),
+    ly: new Spring(0, 240, 28),
+    ls: new Spring(1, 230, 24),
     pl: new Spring(0, 300, 22),
     pr: new Spring(0, 300, 22),
     tilePhysics: [] as { tx: number; ty: number; rx: number; ry: number; sc: Spring }[],
@@ -92,6 +94,23 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
     lw: 100,
     lh: 86,
   });
+
+  // 5-second idle auto-sleep mode for lens
+  const wakeUpLens = useCallback(() => {
+    springsRef.current.ls.t = 1;
+    if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
+    sleepTimerRef.current = setTimeout(() => {
+      // 5 seconds without interaction -> smooth sleep mode
+      springsRef.current.ls.t = 0;
+    }, 5000);
+  }, []);
+
+  useEffect(() => {
+    wakeUpLens();
+    return () => {
+      if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
+    };
+  }, [wakeUpLens]);
 
   // Numbers and data calculation
   const classData = useMemo(() => {
@@ -283,6 +302,7 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
 
   // Tile Selection logic: clicking selects class, sets persistent selection, opens compact details
   const handleSelectTile = useCallback((index: number, e?: React.MouseEvent) => {
+    wakeUpLens();
     if (e) handleButtonRipple(e);
     const target = classData[index];
     if (!target) return;
@@ -309,14 +329,16 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
     }
   }, [classData, activeTileIndex, selectedClassId, onSelectClass]);
 
-  // Sync with outer selectedClassId
+  // Sync with outer selectedClassId (prevents rubber-banding and oscillation during drag)
   useEffect(() => {
+    if (springsRef.current.drag) return;
+
     if (selectedClassId === 'all' || selectedClassId === 'all_with_teachers' || selectedClassId === 'only_teachers') {
       setActiveTileIndex(-1);
       springsRef.current.ls.t = 0;
     } else {
       const idx = classData.findIndex(c => c.id === selectedClassId);
-      if (idx >= 0 && idx !== activeTileIndex) {
+      if (idx >= 0) {
         setActiveTileIndex(idx);
         springsRef.current.ls.t = 1;
         const tileEl = tileRefs.current[idx];
@@ -328,7 +350,7 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
         }
       }
     }
-  }, [selectedClassId, classData, activeTileIndex]);
+  }, [selectedClassId, classData]);
 
   // Reset to all classes explicitly
   const handleResetToAll = () => {
@@ -407,15 +429,14 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
       pl.step(dt);
       pr.step(dt);
 
-      // 1. Refractive Lens velocity stretch & breathing
+      // 1. Refractive Lens playful jelly squash & stretch (no velocity angle rotation flip!)
       if (lensRef.current) {
-        const speed = Math.hypot(lx.v, ly.v);
-        const stretch = 1 + Math.min(speed / 2400, 0.35);
-        const angle = (Math.atan2(ly.v, lx.v) * 180) / Math.PI;
-        const scaleVal = Math.max(ls.x, 0) * (1 + 0.012 * Math.sin(now / 550));
+        const stretchX = 1 + Math.min(Math.abs(lx.v) / 1400, 0.38);
+        const stretchY = 1 / Math.sqrt(stretchX);
+        const scaleVal = Math.max(ls.x, 0);
 
-        lensRef.current.style.transform = `translate(${lx.x - lw / 2}px, ${ly.x - lh / 2}px) rotate(${angle}deg) scale(${stretch * scaleVal}, ${scaleVal / Math.sqrt(stretch)}) rotate(${-angle}deg)`;
-        lensRef.current.style.opacity = ls.x > 0.01 ? '1' : '0';
+        lensRef.current.style.transform = `translate(${lx.x - lw / 2}px, ${ly.x - lh / 2}px) scale(${stretchX * scaleVal}, ${stretchY * scaleVal})`;
+        lensRef.current.style.opacity = scaleVal > 0.01 ? `${Math.min(1, scaleVal)}` : '0';
 
         // Conic rim angle turning toward cursor
         const lr = lensRef.current.getBoundingClientRect();
@@ -1014,6 +1035,7 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
         <div
           ref={gridRef}
           onPointerDown={e => {
+            wakeUpLens();
             const gr = gridRef.current?.getBoundingClientRect();
             if (!gr) return;
             const hitIdx = tileRefs.current.findIndex(t => {
@@ -1029,6 +1051,7 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
             }
           }}
           onPointerMove={e => {
+            wakeUpLens();
             springsRef.current.ptr = [e.clientX, e.clientY];
             const hitIdx = tileRefs.current.findIndex(t => {
               if (!t) return false;
@@ -1043,15 +1066,48 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
                 t.style.setProperty('--my', `${e.clientY - r.top}px`);
               }
             }
-            if (springsRef.current.drag && hitIdx >= 0 && hitIdx !== activeTileIndex) {
+            if (springsRef.current.drag) {
               springsRef.current.moved = 1;
-              springsRef.current.pressed = hitIdx;
-              handleSelectTile(hitIdx);
+              if (hitIdx >= 0 && hitIdx !== activeTileIndex) {
+                springsRef.current.pressed = hitIdx;
+                const targetTile = tileRefs.current[hitIdx];
+                if (targetTile) {
+                  const cx = targetTile.offsetLeft + targetTile.offsetWidth / 2;
+                  const cy = targetTile.offsetTop + targetTile.offsetHeight / 2;
+                  springsRef.current.lx.t = cx;
+                  springsRef.current.ly.t = cy;
+                  // Playful liquid jelly stretch bounce
+                  springsRef.current.ls.x = 1.14;
+                  springsRef.current.ls.t = 1;
+                }
+                setActiveTileIndex(hitIdx);
+                const targetClass = classData[hitIdx];
+                if (targetClass) {
+                  onSelectClass(targetClass.id);
+                }
+              }
             }
           }}
           onPointerUp={() => {
-            springsRef.current.drag = 0;
-            springsRef.current.pressed = -1;
+            if (springsRef.current.drag) {
+              if (activeTileIndex >= 0) {
+                const target = classData[activeTileIndex];
+                if (target) {
+                  onSelectClass(target.id);
+                  setShowClassDetails(true);
+                  const tileEl = tileRefs.current[activeTileIndex];
+                  if (tileEl) {
+                    const cx = tileEl.offsetLeft + tileEl.offsetWidth / 2;
+                    const cy = tileEl.offsetTop + tileEl.offsetHeight / 2;
+                    springsRef.current.lx.t = cx;
+                    springsRef.current.ly.t = cy;
+                    triggerSonarPing(cx, cy);
+                  }
+                }
+              }
+              springsRef.current.drag = 0;
+              springsRef.current.pressed = -1;
+            }
           }}
           onPointerLeave={() => {
             if (!springsRef.current.drag) springsRef.current.ptr = null;

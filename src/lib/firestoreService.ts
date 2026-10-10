@@ -65,6 +65,30 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   }
 }
 
+/**
+ * Recursively strips out all `undefined` values from an object or array.
+ * Ensures Firestore setDoc / updateDoc / batch.set never throws:
+ * "Function setDoc() called with invalid data. Unsupported field value: undefined".
+ */
+export function removeUndefinedFields<T>(obj: T): T {
+  if (obj === null || obj === undefined || typeof obj !== 'object') {
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(item => removeUndefinedFields(item)) as unknown as T;
+  }
+  if (obj instanceof Date) {
+    return obj;
+  }
+  const clean: Record<string, any> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value !== undefined) {
+      clean[key] = removeUndefinedFields(value);
+    }
+  }
+  return clean as T;
+}
+
 // Real-time listener for classes
 export function subscribeToClasses(onUpdate: (classes: ClassGroup[]) => void) {
   try {
@@ -183,7 +207,7 @@ export function subscribeToTeacherMessages(onUpdate: (messages: TeacherMessage[]
 export async function syncSaveClass(classGroup: ClassGroup) {
   try {
     const docRef = doc(db, CLASSES_COLLECTION, classGroup.id);
-    await setDoc(docRef, classGroup, { merge: true });
+    await setDoc(docRef, removeUndefinedFields(classGroup), { merge: true });
   } catch (e) {
     handleFirestoreError(e, OperationType.WRITE, `${CLASSES_COLLECTION}/${classGroup.id}`);
   }
@@ -202,7 +226,7 @@ export async function syncDeleteClass(classId: string) {
 export async function syncSaveStudent(student: Student) {
   try {
     const docRef = doc(db, STUDENTS_COLLECTION, student.id);
-    await setDoc(docRef, student, { merge: true });
+    await setDoc(docRef, removeUndefinedFields(student), { merge: true });
   } catch (e) {
     handleFirestoreError(e, OperationType.WRITE, `${STUDENTS_COLLECTION}/${student.id}`);
   }
@@ -217,7 +241,7 @@ export async function syncSaveBatchStudents(students: Student[]) {
       const batch = writeBatch(db);
       chunk.forEach((st) => {
         const docRef = doc(db, STUDENTS_COLLECTION, st.id);
-        batch.set(docRef, st, { merge: true });
+        batch.set(docRef, removeUndefinedFields(st), { merge: true });
       });
       await batch.commit();
     }
@@ -243,7 +267,7 @@ export async function syncSaveSingleEmail(emailItem: EmailAccount) {
   const safeId = emailItem.email.replace(/[@.]/g, '_');
   try {
     const docRef = doc(db, EMAIL_POOL_COLLECTION, safeId);
-    await setDoc(docRef, emailItem, { merge: true });
+    await setDoc(docRef, removeUndefinedFields(emailItem), { merge: true });
   } catch (e) {
     handleFirestoreError(e, OperationType.WRITE, `${EMAIL_POOL_COLLECTION}/${safeId}`);
   }
@@ -259,7 +283,7 @@ export async function syncSaveEmailPool(emails: EmailAccount[]) {
       chunk.forEach((emailItem) => {
         const safeId = emailItem.email.replace(/[@.]/g, '_');
         const docRef = doc(db, EMAIL_POOL_COLLECTION, safeId);
-        batch.set(docRef, emailItem, { merge: true });
+        batch.set(docRef, removeUndefinedFields(emailItem), { merge: true });
       });
       await batch.commit();
     }
@@ -284,12 +308,12 @@ export async function syncUpdateDeviceActivity(data: {
 }) {
   try {
     const docRef = doc(db, SESSIONS_COLLECTION, data.deviceId);
-    await setDoc(docRef, {
+    await setDoc(docRef, removeUndefinedFields({
       ...data,
       id: data.deviceId,
       deviceId: data.deviceId,
       lastActiveAt: data.lastActiveAt || new Date().toISOString(),
-    }, { merge: true });
+    }), { merge: true });
   } catch (e) {
     handleFirestoreError(e, OperationType.WRITE, `${SESSIONS_COLLECTION}/${data.deviceId}`);
   }
@@ -300,7 +324,7 @@ export async function syncSaveSession(session: TeacherSession) {
   const docId = session.id || session.deviceId;
   try {
     const docRef = doc(db, SESSIONS_COLLECTION, docId);
-    await setDoc(docRef, session, { merge: true });
+    await setDoc(docRef, removeUndefinedFields(session), { merge: true });
   } catch (e) {
     handleFirestoreError(e, OperationType.WRITE, `${SESSIONS_COLLECTION}/${docId}`);
   }
@@ -310,14 +334,14 @@ export async function syncSaveSession(session: TeacherSession) {
 export async function syncSetDeviceBlockStatus(deviceId: string, isBlocked: boolean, reason?: string) {
   try {
     const docRef = doc(db, SESSIONS_COLLECTION, deviceId);
-    await setDoc(docRef, {
+    await setDoc(docRef, removeUndefinedFields({
       id: deviceId,
       deviceId,
       isBlocked,
       blockedReason: isBlocked ? (reason || 'Administrator tomonidan bloklandi') : '',
       blockedAt: isBlocked ? new Date().toISOString() : '',
       updatedAt: new Date().toISOString(),
-    }, { merge: true });
+    }), { merge: true });
   } catch (e) {
     handleFirestoreError(e, OperationType.WRITE, `${SESSIONS_COLLECTION}/${deviceId}`);
   }
@@ -336,7 +360,7 @@ export async function syncDeleteSession(sessionId: string) {
 export async function syncSendTeacherMessage(message: TeacherMessage) {
   try {
     const docRef = doc(db, TEACHER_MESSAGES_COLLECTION, message.id);
-    await setDoc(docRef, message, { merge: true });
+    await setDoc(docRef, removeUndefinedFields(message), { merge: true });
   } catch (e) {
     handleFirestoreError(e, OperationType.WRITE, `${TEACHER_MESSAGES_COLLECTION}/${message.id}`);
   }
@@ -346,11 +370,11 @@ export async function syncSendTeacherMessage(message: TeacherMessage) {
 export async function syncMarkMessageAsRead(messageId: string, readDeviceName?: string) {
   try {
     const docRef = doc(db, TEACHER_MESSAGES_COLLECTION, messageId);
-    await setDoc(docRef, {
+    await setDoc(docRef, removeUndefinedFields({
       isRead: true,
       readAt: new Date().toISOString(),
       readDeviceName: readDeviceName || 'Ustoz qurilmasi'
-    }, { merge: true });
+    }), { merge: true });
   } catch (e) {
     handleFirestoreError(e, OperationType.WRITE, `${TEACHER_MESSAGES_COLLECTION}/${messageId}`);
   }
