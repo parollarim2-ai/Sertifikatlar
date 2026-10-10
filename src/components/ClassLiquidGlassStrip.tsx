@@ -13,6 +13,7 @@ import {
   CreditCard,
   Layers
 } from 'lucide-react';
+import { useUnifiedGlass } from '../context/UnifiedGlassContext';
 
 interface ClassLiquidGlassStripProps {
   classes: ClassGroup[];
@@ -59,6 +60,7 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
   onEditClass,
   onDeleteClass,
 }) => {
+  const { registerTargetElement, triggerJumpTo } = useUnifiedGlass();
   const [searchQuery, setSearchQuery] = useState('');
   const [filterMode, setFilterMode] = useState<'all' | 'debt' | 'low'>('all');
   const [activeTileIndex, setActiveTileIndex] = useState<number>(-1);
@@ -325,9 +327,10 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
         triggerSonarPing(cx, cy);
       }
 
+      triggerJumpTo(`class-${target.id}`);
       onSelectClass(target.id);
     }
-  }, [classData, activeTileIndex, selectedClassId, onSelectClass]);
+  }, [classData, activeTileIndex, selectedClassId, onSelectClass, triggerJumpTo, wakeUpLens]);
 
   // Sync with outer selectedClassId (prevents rubber-banding and oscillation during drag)
   useEffect(() => {
@@ -882,15 +885,7 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
         }
 
         .liquid-lens {
-          position: absolute;
-          left: 0;
-          top: 0;
-          pointer-events: none;
-          z-index: 3;
-          border-radius: 22px;
-          background: rgba(255, 255, 255, 0.12);
-          box-shadow: inset 0 1px 0 #fff, 0 14px 30px -8px var(--liquid-sh);
-          will-change: transform;
+          display: none !important;
         }
 
         .liquid-ping {
@@ -1095,6 +1090,7 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
                 if (target) {
                   onSelectClass(target.id);
                   setShowClassDetails(true);
+                  triggerJumpTo(`class-${target.id}`);
                   const tileEl = tileRefs.current[activeTileIndex];
                   if (tileEl) {
                     const cx = tileEl.offsetLeft + tileEl.offsetWidth / 2;
@@ -1133,6 +1129,7 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
                 key={c.id}
                 ref={el => {
                   tileRefs.current[i] = el;
+                  registerTargetElement(`class-${c.id}`, el, 16);
                 }}
                 type="button"
                 onClick={() => handleSelectTile(i)}

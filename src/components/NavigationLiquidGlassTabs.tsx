@@ -8,6 +8,8 @@ import {
   Send 
 } from 'lucide-react';
 
+import { useUnifiedGlass } from '../context/UnifiedGlassContext';
+
 export type AdminTabType = 'classes' | 'teachers' | 'finance' | 'emails' | 'sessions' | 'telegram';
 
 interface NavigationLiquidGlassTabsProps {
@@ -47,6 +49,7 @@ export const NavigationLiquidGlassTabs: React.FC<NavigationLiquidGlassTabsProps>
   hasBlockedSession,
   telegramUsersCount,
 }) => {
+  const { registerTargetElement, triggerJumpTo } = useUnifiedGlass();
   const containerRef = useRef<HTMLDivElement>(null);
   const lensRef = useRef<HTMLDivElement>(null);
   const spotRef = useRef<HTMLDivElement>(null);
@@ -355,16 +358,7 @@ export const NavigationLiquidGlassTabs: React.FC<NavigationLiquidGlassTabsProps>
         }
 
         .liquid-nav-lens {
-          position: absolute;
-          left: 0;
-          top: 0;
-          pointer-events: none;
-          z-index: 2;
-          border-radius: 14px;
-          background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(239, 246, 255, 0.75));
-          box-shadow: inset 0 1px 0 #fff, inset 0 -6px 12px -8px rgba(37, 99, 235, 0.3), 0 4px 14px -3px rgba(37, 99, 235, 0.22);
-          will-change: transform, width, height, opacity;
-          transition: opacity 0.4s ease-out;
+          display: none !important;
         }
         .liquid-nav-lens::after {
           content: "";
@@ -432,10 +426,12 @@ export const NavigationLiquidGlassTabs: React.FC<NavigationLiquidGlassTabsProps>
               key={tab.id}
               ref={el => {
                 tabButtonRefs.current[tab.id] = el;
+                registerTargetElement(`nav-${tab.id}`, el, 14);
               }}
               type="button"
               onClick={() => {
                 wakeUpLens();
+                triggerJumpTo(`nav-${tab.id}`);
                 onSelectTab(tab.id);
               }}
               className={`liquid-nav-btn flex-shrink-0 sm:flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 sm:gap-2 cursor-pointer whitespace-nowrap ${

@@ -4,12 +4,13 @@ import { SessionsManagementTab } from './SessionsManagementTab';
 import { TelegramBotTab } from './TelegramBotTab';
 import { TeacherCertificatesTab } from './TeacherCertificatesTab';
 import { GmailGeneratorModal } from './GmailGeneratorModal';
-import { OperatorSpeedAnalyticsModal } from './OperatorSpeedAnalyticsModal';
 import { ClassBatchAutomationModal } from './ClassBatchAutomationModal';
 import { ClassLiquidGlassStrip } from './ClassLiquidGlassStrip';
 import { NavigationLiquidGlassTabs } from './NavigationLiquidGlassTabs';
+import { AnimatedGlassSearchInput } from './AnimatedGlassSearchInput';
+import { UnifiedGlassProvider } from '../context/UnifiedGlassContext';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
-import { analyzeOperatorSpeed, getStoredCertifyLogs } from '../utils/operatorSpeedTracker';
+import { getStoredCertifyLogs } from '../utils/operatorSpeedTracker';
 import { 
   Users, 
   Award, 
@@ -139,12 +140,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [selectedClassId, setSelectedClassId] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [isGmailGeneratorOpen, setIsGmailGeneratorOpen] = useState(false);
-  const [isSpeedModalOpen, setIsSpeedModalOpen] = useState(false);
   const [isClassBatchModalOpen, setIsClassBatchModalOpen] = useState(false);
   const [batchTargetClass, setBatchTargetClass] = useState<ClassGroup | null>(null);
-
-  // Compact / Expanded state for top class selection panel
-  const [isClassCardsExpanded, setIsClassCardsExpanded] = useState(false);
 
   // Multi-select status filter: 'certified' (Tayyor), 'error' (Xatolik), 'pending' (Kutilmoqda)
   type StatusFilterType = 'certified' | 'error' | 'pending';
@@ -189,9 +186,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setBatchTargetClass(cg);
     setIsClassBatchModalOpen(true);
   };
-
-  // Real-time operator speed & activity analysis with 15-minute gap threshold
-  const operatorAnalysis = useMemo(() => analyzeOperatorSpeed(getStoredCertifyLogs(students)), [students]);
   
   // Non-blocking quick toast without OK button
   const [quickToast, setQuickToast] = useState('');
@@ -601,7 +595,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   };
 
   return (
-    <div className="space-y-6 animate-fade-in pb-12">
+    <UnifiedGlassProvider>
+      <div className="space-y-6 animate-fade-in pb-12">
       
       {/* Floating Quick Toast Alert without OK button */}
       {quickToast && (
@@ -790,18 +785,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             }}
           />
 
-          {/* Search & Filter Bar */}
+          {/* Search & Filter Bar with Samsung Keyboard Glass Letter Popups */}
           <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
-            <div className="relative flex-1">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
-              <input
-                type="text"
-                placeholder="O'quvchini ismi, pasporti yoki emaili orqali qidirish..."
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 text-xs sm:text-sm focus:outline-none focus:bg-white focus:border-blue-700"
-              />
-            </div>
+            <AnimatedGlassSearchInput
+              value={searchQuery}
+              onChange={setSearchQuery}
+              placeholder="O'quvchini ismi, pasporti yoki emaili orqali qidirish..."
+            />
 
             <div className="flex flex-wrap items-center gap-2.5">
               {/* Sinf filtri */}
@@ -1972,13 +1962,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         }}
       />
 
-      {/* Operator Speed Analytics & Predictions Modal */}
-      <OperatorSpeedAnalyticsModal
-        isOpen={isSpeedModalOpen}
-        onClose={() => setIsSpeedModalOpen(false)}
-        analysis={operatorAnalysis}
-      />
-
       {/* Whole Class Batch Aileaders Registration Modal */}
       {isClassBatchModalOpen && batchTargetClass && (
         <ClassBatchAutomationModal
@@ -2051,6 +2034,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </UnifiedGlassProvider>
   );
 };
