@@ -1,19 +1,25 @@
-// 100% Free, Tokenless, Natural Uzbek Male Voice (Microsoft Edge Neural: uz-UZ-SardorNeural)
+// 100% Free, Tokenless, Natural Uzbek Voice Service (Microsoft Edge Neural)
+
+export type UzbekVoiceId = 'uz-UZ-SardorNeural' | 'uz-UZ-MadinaNeural';
 
 export interface VoiceAssistantSettings {
   wakeWord: string;
+  voice: UzbekVoiceId;
+  requireHeyPrefix: boolean;
   autoCopyEmailSeconds: number; // e.g. 3.5 seconds
   soundFeedback: boolean;
 }
 
-const SETTINGS_KEY = 'b1m_voice_assistant_settings_v2';
+const SETTINGS_KEY = 'b1m_voice_assistant_settings_v3';
 const DEFAULT_SETTINGS: VoiceAssistantSettings = {
   wakeWord: 'keyingisi',
+  voice: 'uz-UZ-SardorNeural',
+  requireHeyPrefix: true,
   autoCopyEmailSeconds: 3.5,
   soundFeedback: true,
 };
 
-// Reliable Clipboard helper
+// Reliable Clipboard write helper
 export async function copyToClipboard(text: string): Promise<boolean> {
   if (!text) return false;
   try {
@@ -41,10 +47,24 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
+// Reliable Clipboard read helper (for pasting Coursera certificate)
+export async function readFromClipboard(): Promise<string> {
+  try {
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      const text = await navigator.clipboard.readText();
+      if (text && typeof text === 'string') {
+        return text.trim();
+      }
+    }
+  } catch (err) {
+    console.warn('Clipboard read permission warning:', err);
+  }
+  return '';
+}
+
 // Persistent HTML5 Audio for bypassing browser async autoplay restrictions
 let persistentAudio: HTMLAudioElement | null = null;
 let isAudioUnlocked = false;
-const audioCache = new Map<string, string>();
 
 /**
  * Call on any user gesture (e.g. click microphone button) to unlock audio playback
@@ -55,7 +75,7 @@ export function unlockAudioPlayback(): void {
     if (!persistentAudio) {
       persistentAudio = new Audio();
     }
-    // Silent WAV base64
+    // Silent tiny WAV
     persistentAudio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
     persistentAudio.play().then(() => {
       persistentAudio?.pause();
@@ -65,12 +85,12 @@ export function unlockAudioPlayback(): void {
 }
 
 /**
- * Speaks Uzbek text using Microsoft Edge Neural Uzbek Male voice (uz-UZ-SardorNeural)
- * 100% natural human male voice, polite and expressive.
+ * Speaks Uzbek text using Microsoft Edge Neural Uzbek voice
  * Zero tokens, zero robotic voices!
  */
-export async function speakUzbekMale(
+export async function speakUzbekVoice(
   text: string,
+  voice: UzbekVoiceId = 'uz-UZ-SardorNeural',
   onStart?: () => void,
   onEnd?: () => void
 ): Promise<void> {
@@ -79,7 +99,6 @@ export async function speakUzbekMale(
     return;
   }
 
-  // Ensure persistent audio instance
   if (!persistentAudio) {
     persistentAudio = new Audio();
   }
@@ -94,25 +113,9 @@ export async function speakUzbekMale(
   try {
     onStart?.();
 
-    let audioUrl = audioCache.get(cleanText);
-
-    if (!audioUrl) {
-      const response = await fetch('/api/tts/speak', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: cleanText, voice: 'uz-UZ-SardorNeural' }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`TTS server error ${response.status}`);
-      }
-
-      const blob = await response.blob();
-      audioUrl = URL.createObjectURL(blob);
-      audioCache.set(cleanText, audioUrl);
-    }
-
-    persistentAudio.src = audioUrl;
+    // Direct streaming URL from server endpoint
+    const url = `/api/tts/speak?text=${encodeURIComponent(cleanText)}&voice=${encodeURIComponent(voice)}`;
+    persistentAudio.src = url;
 
     await new Promise<void>((resolve) => {
       if (!persistentAudio) {
@@ -133,7 +136,7 @@ export async function speakUzbekMale(
       };
 
       persistentAudio.play().catch((playErr) => {
-        console.error('TTS play blocked:', playErr);
+        console.warn('TTS play promise warning:', playErr);
         onEnd?.();
         resolve();
       });

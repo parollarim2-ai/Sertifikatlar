@@ -663,6 +663,7 @@ export default function App() {
             onMarkMessageAsRead={handleMarkMessageAsRead}
             onOpenStudentModal={(student) => setActiveStudentModal(student)}
             onToggleStudentPayment={handleToggleStudentPayment}
+            onSaveStudent={handleSaveStudent}
           />
         ) : (
           <div className="animate-fade-in">

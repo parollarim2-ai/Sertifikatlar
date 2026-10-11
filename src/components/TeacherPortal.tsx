@@ -50,6 +50,7 @@ interface TeacherPortalProps {
   onMarkMessageAsRead: (messageId: string, deviceName?: string) => void;
   onOpenStudentModal?: (student: Student, focusField?: 'passport' | 'name' | 'email') => void;
   onToggleStudentPayment?: (studentId: string, currentPaidState: boolean) => void;
+  onSaveStudent?: (student: Student) => Promise<void> | void;
 }
 
 export const TeacherPortal: React.FC<TeacherPortalProps> = ({
@@ -61,6 +62,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   onMarkMessageAsRead,
   onOpenStudentModal,
   onToggleStudentPayment,
+  onSaveStudent,
 }) => {
   // Device detection
   const currentDevice = useMemo(() => detectCurrentDevice(), []);
@@ -1207,6 +1209,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         students={students}
         activeClassId={selectedClassId}
         onSelectClass={(cid) => setSelectedClassId(cid)}
+        onSaveStudent={onSaveStudent}
       />
 
     </div>

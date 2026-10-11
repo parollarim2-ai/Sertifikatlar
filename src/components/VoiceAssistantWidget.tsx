@@ -1,14 +1,17 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { ClassGroup, Student } from '../types';
 import { 
-  speakUzbekMale, 
+  speakUzbekVoice, 
   stopSpeaking,
   copyToClipboard, 
+  readFromClipboard,
   unlockAudioPlayback,
   loadVoiceAssistantSettings, 
   saveVoiceAssistantSettings,
-  VoiceAssistantSettings 
+  VoiceAssistantSettings,
+  UzbekVoiceId 
 } from '../services/voiceAssistantService';
+import { recordCertifyEvent } from '../utils/operatorSpeedTracker';
 import { 
   Mic, 
   MicOff, 
@@ -20,24 +23,24 @@ import {
   Sparkles, 
   Minimize2, 
   Maximize2, 
-  User, 
   Mail, 
   Check, 
   GripHorizontal,
-  Clock,
-  VolumeX
+  ClipboardPaste,
+  ShieldCheck,
+  Award
 } from 'lucide-react';
 
 interface VoiceAssistantWidgetProps {
   classes: ClassGroup[];
   students: Student[];
-  activeClassId: string; // The class where the liquid glass currently is!
-  selectedStatusFilters?: string[]; // Current category filter in AdminPanel (e.g. ['pending'])
+  activeClassId: string;
+  selectedStatusFilters?: string[];
   onSelectClass?: (classId: string) => void;
   onSaveStudent?: (student: Student) => Promise<void> | void;
 }
 
-const STORAGE_POS_KEY = 'b1m_voice_widget_position_v2';
+const STORAGE_POS_KEY = 'b1m_voice_widget_position_v3';
 
 export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
   classes,
@@ -51,17 +54,15 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
   const [settings, setSettings] = useState<VoiceAssistantSettings>(() => loadVoiceAssistantSettings());
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
-  const [customWakeWord, setCustomWakeWord] = useState(settings.wakeWord);
 
-  // Widget Position (Draggable & persistent)
+  // Widget Position (Draggable & persistent across sessions)
   const [position, setPosition] = useState<{ x: number; y: number }>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_POS_KEY);
       if (saved) return JSON.parse(saved);
     } catch {}
-    // Default top-right position
     const winW = typeof window !== 'undefined' ? window.innerWidth : 1200;
-    return { x: Math.max(20, winW - 360), y: 100 };
+    return { x: Math.max(20, winW - 350), y: 95 };
   });
 
   const isDraggingRef = useRef(false);
@@ -72,7 +73,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
     posY: 0,
   });
 
-  // Assistant State
+  // Assistant Live State
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [micSupported, setMicSupported] = useState(true);
@@ -84,10 +85,10 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
   const autoEmailTimerRef = useRef<NodeJS.Timeout | null>(null);
   const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Student Navigation State
+  // Student Navigation Index in Candidate List
   const [studentPointerIndex, setStudentPointerIndex] = useState(0);
 
-  // Target Class determination (matches liquid glass lens)
+  // Target Class Determination (matches liquid glass lens)
   const currentClass = useMemo(() => {
     if (activeClassId && activeClassId !== 'all' && activeClassId !== 'all_with_teachers' && activeClassId !== 'only_teachers') {
       const found = classes.find(c => c.id === activeClassId);
@@ -100,13 +101,12 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
     return withPending || classes[0] || null;
   }, [classes, activeClassId, students]);
 
-  // CATEGORY FILTERING:
-  // Strictly filter according to the user's selected category in AdminPanel (e.g. faqat kutilayotganlar)
+  // CATEGORY-RESPECTING CANDIDATE FILTER:
+  // Strictly respects the category selected by user in AdminPanel (e.g. kutilayotganlar)
   const candidateStudents = useMemo(() => {
     if (!currentClass) return [];
     let list = students.filter(s => s.classId === currentClass.id);
 
-    // Apply active category filters from AdminPanel if present
     if (selectedStatusFilters && selectedStatusFilters.length > 0) {
       list = list.filter(s => {
         const isCertified = s.status === 'certified';
@@ -126,14 +126,14 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
     return list;
   }, [students, currentClass, selectedStatusFilters]);
 
-  // Currently focused student in the candidate pool
+  // Active Student in Candidate List
   const activeStudent = useMemo(() => {
     if (candidateStudents.length === 0) return null;
     const safeIndex = Math.min(Math.max(0, studentPointerIndex), candidateStudents.length - 1);
     return candidateStudents[safeIndex] || null;
   }, [candidateStudents, studentPointerIndex]);
 
-  // Reset pointer if candidates change
+  // Reset pointer when candidates change
   useEffect(() => {
     if (studentPointerIndex >= candidateStudents.length && candidateStudents.length > 0) {
       setStudentPointerIndex(0);
@@ -179,14 +179,14 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
     isSpeakingRef.current = true;
     setIsSpeaking(true);
 
-    // 1. Physically STOP recognition so mic NEVER hears its own output
+    // Physically pause recognition while assistant is speaking
     try {
       recognitionRef.current?.stop();
     } catch {}
 
-    // 2. Play 100% natural Microsoft Sardor voice
-    await speakUzbekMale(
+    await speakUzbekVoice(
       phrase,
+      settings.voice || 'uz-UZ-SardorNeural',
       () => {
         setIsSpeaking(true);
         isSpeakingRef.current = true;
@@ -194,7 +194,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
       () => {
         setIsSpeaking(false);
         isSpeakingRef.current = false;
-        // 3. ONLY restart mic after 1.2s of absolute silence
+        // Resume microphone after 1.2s of silence
         setTimeout(() => {
           isProcessingCommandRef.current = false;
           if (isListeningRef.current) {
@@ -205,17 +205,14 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
         }, 1200);
       }
     );
-  }, []);
+  }, [settings.voice]);
 
   // CORE SEQUENTIAL ACTION:
-  // 1. Copies Name immediately and speaks polite Uzbek male phrase
-  // 2. Automatically copies Email 3.5s later without needing any extra action!
-  const executeSequentialCopy = useCallback(async (targetSt?: Student | null) => {
+  // 1. Copies Name immediately and speaks polite phrase
+  // 2. Automatically copies Email 3.5s later without extra clicks
+  const executeSequentialCopy = useCallback(async (targetSt?: Student | null, isPrevious: boolean = false) => {
     const student = targetSt || activeStudent;
 
-    // Check if category is completed or empty:
-    // "agarda hamma o'quvchilarga serifikat olib bo'linsa yoki o'sha kotegoriya bo'yicha o'quvchi qolmasa...
-    // Oliy hazrat, barcha o'quvchilarga sertifikat olib bo'ldik desin"
     if (!student || candidateStudents.length === 0) {
       const allDoneMsg = "Oliy hazrat, barcha o'quvchilarga sertifikat olib bo'ldik!";
       showToast(allDoneMsg, 'info');
@@ -226,13 +223,14 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
     clearAutoEmailTimers();
 
     // STEP 1: Copy Name
-    const nameCopied = await copyToClipboard(student.fullName);
+    await copyToClipboard(student.fullName);
     setCopyStep('name_copied');
     showToast(`1. Ism nusxalandi: "${student.fullName}"`, 'success');
 
-    // Polite Uzbek gentleman phrase
-    const politeNamePhrase = `Oliy hazrat, ${student.fullName}ning ismini nusxalab oldim!`;
-    speakPolitely(politeNamePhrase);
+    const prefixPhrase = isPrevious 
+      ? `Oliy hazrat, avvalgi o'quvchi ${student.fullName}ning ismini nusxalab oldim!`
+      : `Oliy hazrat, ${student.fullName}ning ismini nusxalab oldim!`;
+    speakPolitely(prefixPhrase);
 
     // STEP 2: Automatic Email Copy after 3.5 seconds
     const emailToCopy = student.assignedEmail || `${student.fullName.toLowerCase().replace(/[^a-z0-9]/g, '')}@gmail.com`;
@@ -261,7 +259,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
 
   }, [activeStudent, candidateStudents.length, settings.autoCopyEmailSeconds, clearAutoEmailTimers, showToast, speakPolitely]);
 
-  // Action: Next Student
+  // ACTION 1: Next Student ("Hey keyingisi")
   const handleNextStudent = useCallback(() => {
     if (candidateStudents.length === 0) {
       executeSequentialCopy(null);
@@ -274,26 +272,70 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
     const nextIdx = (studentPointerIndex + 1) % candidateStudents.length;
     setStudentPointerIndex(nextIdx);
     const nextSt = candidateStudents[nextIdx];
-    executeSequentialCopy(nextSt);
+    executeSequentialCopy(nextSt, false);
   }, [candidateStudents, studentPointerIndex, activeStudent, executeSequentialCopy]);
 
-  // Action: Previous Student (stays strictly within current category!)
+  // ACTION 2: Previous Student ("Hey avvalgisi")
   const handlePrevStudent = useCallback(() => {
-    if (candidateStudents.length <= 1) return;
-    const prevIdx = (studentPointerIndex - 1 + candidateStudents.length) % candidateStudents.length;
+    if (candidateStudents.length === 0) {
+      speakPolitely("Oliy hazrat, ro'yxatda o'quvchilar mavjud emas!");
+      return;
+    }
+
+    if (studentPointerIndex <= 0) {
+      // Reached the very top!
+      const topMsg = "Oliy hazrat, bu o'quvchidan oldin boshqa o'quvchi mavjud emas, ro'yxatning boshidasiz!";
+      showToast(topMsg, 'info');
+      speakPolitely(topMsg);
+      return;
+    }
+
+    const prevIdx = studentPointerIndex - 1;
     setStudentPointerIndex(prevIdx);
     const prevSt = candidateStudents[prevIdx];
-    executeSequentialCopy(prevSt);
-  }, [candidateStudents, studentPointerIndex, executeSequentialCopy]);
+    executeSequentialCopy(prevSt, true);
+  }, [candidateStudents, studentPointerIndex, executeSequentialCopy, showToast, speakPolitely]);
+
+  // ACTION 3: Paste Certificate Link & Mark Certified ("Hey qo'yish")
+  const handlePasteCertificate = useCallback(async () => {
+    if (!activeStudent) {
+      speakPolitely("Oliy hazrat, sertifikat qo'yish uchun o'quvchi tanlanmadi!");
+      return;
+    }
+
+    // Read clipboard text
+    const clipText = await readFromClipboard();
+    const certUrl = clipText || activeStudent.certificateLink || 'https://coursera.org/verify';
+
+    const updatedStudent: Student = {
+      ...activeStudent,
+      status: 'certified',
+      certificateLink: certUrl,
+      certifiedAt: new Date().toISOString(),
+    };
+
+    if (onSaveStudent) {
+      await onSaveStudent(updatedStudent);
+    }
+    recordCertifyEvent(activeStudent.id, activeStudent.fullName);
+
+    showToast(`✅ Sertifikat saqlandi: ${activeStudent.fullName}`, 'success');
+    await speakPolitely(`Oliy hazrat, ${activeStudent.fullName}ning sertifikati muvaffaqiyatli joylashtirildi va saqlandi!`);
+
+    // Advance to next student in line
+    setTimeout(() => {
+      handleNextStudent();
+    }, 1500);
+  }, [activeStudent, onSaveStudent, showToast, speakPolitely, handleNextStudent]);
 
   // Test Voice sample
   const handleTestVoice = useCallback(() => {
     const sample = "Assalomu alaykum, Oliy hazrat! Men sizning sodiq yordamchingizman. Buyruqlaringizga muntazirman!";
-    showToast("🔊 Tabiiy o'zbekcha ovoz sinovdan o'tmoqda...", 'info');
+    showToast("🔊 Tabiiy o'zbekcha ovoz yangramoqda...", 'info');
     speakPolitely(sample);
   }, [showToast, speakPolitely]);
 
-  // Speech Recognition Continuous Listener
+  // Speech Recognition Continuous Listener with "Hey" Prefix enforcement
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -303,7 +345,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
 
     const recognition = new SpeechRecognition();
     recognition.continuous = true;
-    recognition.interimResults = false; // Only final speech to prevent 0.5s jitter
+    recognition.interimResults = false;
     recognition.lang = 'uz-UZ';
     recognitionRef.current = recognition;
 
@@ -314,31 +356,65 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
       const transcript = event.results[lastIdx][0]?.transcript || '';
       const lower = transcript.toLowerCase().trim();
 
-      const wake = (settings.wakeWord || 'keyingisi').toLowerCase().trim();
-      const wakeMatches = [
-        wake,
-        'keyingisi',
-        'keyingi',
-        'keyingisini',
-        'sertifikat',
-        'nusxa',
-        'nusxala',
-        'nusxalash',
-        'siri',
-        'bixby',
-        'yordamchi',
-      ];
+      // Check "Hey" Prefix requirement:
+      // "har bir buyruqdan oldin 'hey' iborasini ishlatishni majburiy qil: 'hey keyingisi', 'hey qo'yish' kabi"
+      const hasHeyPrefix = lower.startsWith('hey') || 
+                           lower.startsWith('hay') || 
+                           lower.startsWith('хей') || 
+                           lower.startsWith('эй') ||
+                           lower.includes('hey ') ||
+                           lower.includes('hay ');
 
-      const isWakeWordDetected = wakeMatches.some(w => lower.includes(w)) || (wake && lower.includes(wake));
+      if (settings.requireHeyPrefix && !hasHeyPrefix) {
+        // Ignored to prevent false triggers during ordinary speech
+        return;
+      }
 
-      if (isWakeWordDetected) {
+      // Remove "hey" prefix for command matching
+      const cleanedCommand = lower
+        .replace(/^(hey|hay|хей|эй)\s*/g, '')
+        .trim();
+
+      // COMMAND 1: "Hey keyingisi" / "Hey keyingi"
+      if (
+        cleanedCommand.includes('keyingi') || 
+        cleanedCommand.includes('keyingisi') ||
+        cleanedCommand.includes('sertifikat') ||
+        cleanedCommand.includes('nusxa')
+      ) {
         isProcessingCommandRef.current = true;
         handleNextStudent();
         return;
       }
 
-      // Explicit Email copy command
-      if (lower.includes('email') || lower.includes('pochta') || lower.includes('pochta')) {
+      // COMMAND 2: "Hey avvalgisi" / "Hey oldingisi" / "Hey orqaga"
+      if (
+        cleanedCommand.includes('avvalgi') || 
+        cleanedCommand.includes('avvalgisi') || 
+        cleanedCommand.includes('oldingi') || 
+        cleanedCommand.includes('oldingisi') ||
+        cleanedCommand.includes('orqaga')
+      ) {
+        isProcessingCommandRef.current = true;
+        handlePrevStudent();
+        return;
+      }
+
+      // COMMAND 3: "Hey qo'yish" / "Hey joylashtir" / "Hey saqla"
+      if (
+        cleanedCommand.includes('qo\'y') || 
+        cleanedCommand.includes('qoy') || 
+        cleanedCommand.includes('joylashtir') || 
+        cleanedCommand.includes('saqla') ||
+        cleanedCommand.includes('tasdiq')
+      ) {
+        isProcessingCommandRef.current = true;
+        handlePasteCertificate();
+        return;
+      }
+
+      // COMMAND 4: "Hey pochta" / "Hey email"
+      if (cleanedCommand.includes('pochta') || cleanedCommand.includes('email')) {
         if (activeStudent) {
           isProcessingCommandRef.current = true;
           const email = activeStudent.assignedEmail || `${activeStudent.fullName.toLowerCase().replace(/[^a-z0-9]/g, '')}@gmail.com`;
@@ -371,7 +447,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
         recognition.stop();
       } catch {}
     };
-  }, [settings.wakeWord, handleNextStudent, activeStudent, showToast, speakPolitely]);
+  }, [settings.requireHeyPrefix, handleNextStudent, handlePrevStudent, handlePasteCertificate, activeStudent, showToast, speakPolitely]);
 
   // Toggle Microphone
   const toggleListening = useCallback(() => {
@@ -417,7 +493,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
     if (!isDraggingRef.current) return;
     const dx = e.clientX - dragStartRef.current.startX;
     const dy = e.clientY - dragStartRef.current.startY;
-    const nextX = Math.max(10, Math.min(window.innerWidth - 320, dragStartRef.current.posX + dx));
+    const nextX = Math.max(10, Math.min(window.innerWidth - 330, dragStartRef.current.posX + dx));
     const nextY = Math.max(10, Math.min(window.innerHeight - 150, dragStartRef.current.posY + dy));
     setPosition({ x: nextX, y: nextY });
   };
@@ -451,16 +527,15 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
         </div>
       )}
 
-      {/* DRAGGABLE FLOATING VOICE ASSISTANT (Xohlagan joyga siljitiladi!) */}
+      {/* DRAGGABLE FLOATING VOICE ASSISTANT */}
       <aside 
         aria-label="Ovozli Yordamchi"
         style={{ left: `${position.x}px`, top: `${position.y}px` }}
-        className="fixed z-[9000] select-none font-sans transition-shadow"
+        className="fixed z-[9000] select-none font-sans"
       >
         {isMinimized ? (
-          /* MINIMIZED PILL: Super Compact, Movable anywhere */
+          /* MINIMIZED PILL: Compact & Movable anywhere */
           <div className="flex items-center gap-2 bg-slate-900/95 text-white p-2 rounded-full shadow-2xl border border-white/20 backdrop-blur-xl">
-            {/* Drag Grip */}
             <div 
               onMouseDown={handleMouseDown}
               className="p-1 cursor-grab active:cursor-grabbing text-slate-400 hover:text-white"
@@ -499,7 +574,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
             </button>
           </div>
         ) : (
-          /* EXPANDED COMPACT DRAGGABLE HUD */
+          /* EXPANDED DRAGGABLE HUD */
           <div className="w-[310px] sm:w-[330px] bg-slate-900/95 text-white rounded-2xl shadow-2xl border border-white/20 backdrop-blur-2xl overflow-hidden ring-1 ring-black/50">
             {/* Header: Draggable Grip Handle */}
             <div 
@@ -548,39 +623,65 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
 
             {/* SETTINGS SUB-DRAWER */}
             {isSettingsOpen && (
-              <div className="p-3 bg-slate-950/95 border-b border-white/10 space-y-2 text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-slate-200">Kalit so'z:</span>
-                  <span className="text-[10px] text-blue-400 font-mono">"{settings.wakeWord}"</span>
-                </div>
-                <div className="flex flex-wrap gap-1">
-                  {['keyingisi', 'sertifikat', 'nusxa', 'siri', 'yordamchi'].map(w => (
+              <div className="p-3 bg-slate-950/95 border-b border-white/10 space-y-2.5 text-xs">
+                {/* Voice Selection */}
+                <div className="space-y-1">
+                  <div className="font-bold text-slate-200 text-[11px]">Ovozni tanlash:</div>
+                  <div className="grid grid-cols-2 gap-1.5">
                     <button
-                      key={w}
                       type="button"
                       onClick={() => {
-                        const newS = { ...settings, wakeWord: w };
+                        const newS = { ...settings, voice: 'uz-UZ-SardorNeural' as UzbekVoiceId };
                         setSettings(newS);
                         saveVoiceAssistantSettings(newS);
-                        showToast(`Kalit so'z: "${w}"`, 'success');
+                        showToast("Sardor ovozi tanlandi", 'success');
                       }}
-                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer ${
-                        settings.wakeWord === w
-                          ? 'bg-blue-600 text-white font-bold'
-                          : 'bg-white/5 hover:bg-white/15 text-slate-300'
+                      className={`p-1.5 rounded-lg text-[10px] font-medium border text-center transition-all cursor-pointer ${
+                        settings.voice === 'uz-UZ-SardorNeural'
+                          ? 'bg-blue-600 text-white border-blue-400 font-bold'
+                          : 'bg-white/5 text-slate-300 border-white/10 hover:bg-white/10'
                       }`}
                     >
-                      {w}
+                      👨‍💼 Sardor (Erkak)
                     </button>
-                  ))}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newS = { ...settings, voice: 'uz-UZ-MadinaNeural' as UzbekVoiceId };
+                        setSettings(newS);
+                        saveVoiceAssistantSettings(newS);
+                        showToast("Madina ovozi tanlandi", 'success');
+                      }}
+                      className={`p-1.5 rounded-lg text-[10px] font-medium border text-center transition-all cursor-pointer ${
+                        settings.voice === 'uz-UZ-MadinaNeural'
+                          ? 'bg-blue-600 text-white border-blue-400 font-bold'
+                          : 'bg-white/5 text-slate-300 border-white/10 hover:bg-white/10'
+                      }`}
+                    >
+                      👩‍💼 Madina (Ayol)
+                    </button>
+                  </div>
                 </div>
 
-                <div className="pt-1.5 border-t border-white/10 flex items-center justify-between text-[10px] text-slate-400">
-                  <span className="text-emerald-400 font-medium">Microsoft Sardor (Tabiiy erkak ovozi)</span>
+                {/* Hey Prefix Toggle */}
+                <div className="flex items-center justify-between pt-1 border-t border-white/10">
+                  <label className="text-[11px] text-slate-300 cursor-pointer flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      checked={settings.requireHeyPrefix}
+                      onChange={(e) => {
+                        const newS = { ...settings, requireHeyPrefix: e.target.checked };
+                        setSettings(newS);
+                        saveVoiceAssistantSettings(newS);
+                      }}
+                      className="rounded text-blue-600 cursor-pointer"
+                    />
+                    <span>"Hey" so'zini majburiy qilish</span>
+                  </label>
                   <button
                     type="button"
                     onClick={handleTestVoice}
-                    className="text-blue-400 hover:text-blue-300 font-bold underline cursor-pointer"
+                    className="text-blue-400 hover:text-blue-300 font-bold text-[10px] underline cursor-pointer"
                   >
                     Ovozni sinash
                   </button>
@@ -588,7 +689,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
               </div>
             )}
 
-            {/* Student Info Card (NO blue buttons as requested!) */}
+            {/* Student Info Card (NO blue copy buttons!) */}
             <div className="p-3.5 space-y-3">
               {activeStudent ? (
                 <div className="p-3 rounded-xl bg-white/5 border border-white/10 space-y-2">
@@ -652,40 +753,43 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
                 </div>
               )}
 
-              {/* Prev & Next Controls (Stays strictly within selected category!) */}
-              <div className="flex items-center justify-between gap-2">
+              {/* Prev, Paste/Certify, and Next Action Controls */}
+              <div className="flex items-center justify-between gap-1.5">
+                {/* Prev Student Button */}
                 <button
                   type="button"
                   onClick={handlePrevStudent}
-                  disabled={candidateStudents.length <= 1}
-                  className="p-2 rounded-xl bg-white/5 hover:bg-white/15 disabled:opacity-30 disabled:pointer-events-none text-slate-300 hover:text-white transition-all cursor-pointer"
-                  title="Oldingi o'quvchi (faqat tanlangan toifadan)"
+                  className="p-2 rounded-xl bg-white/5 hover:bg-white/15 text-slate-300 hover:text-white transition-all cursor-pointer"
+                  title="Avvalgi o'quvchi (Hey avvalgisi)"
                 >
                   <ChevronLeft className="w-4 h-4" />
                 </button>
 
-                {/* Primary Voice Action Button */}
+                {/* Paste Certificate Link Button ("Hey qo'yish") */}
                 <button
                   type="button"
-                  onClick={handleNextStudent}
-                  className="flex-1 py-2 px-3 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 hover:from-blue-500 hover:to-indigo-500 active:scale-[0.98] text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-md shadow-blue-600/30 transition-all cursor-pointer group"
+                  onClick={handlePasteCertificate}
+                  className="py-2 px-2.5 rounded-xl bg-emerald-600/90 hover:bg-emerald-600 text-white font-bold text-[11px] flex items-center gap-1 shadow-sm transition-all cursor-pointer"
+                  title="Buferdagi Coursera havolasini qo'yish va sertifikatlash ('Hey qo'yish')"
                 >
-                  <Sparkles className="w-3.5 h-3.5 text-amber-300 group-hover:rotate-12 transition-transform" />
-                  <span>Keyingi o'quvchi ({settings.wakeWord})</span>
+                  <ClipboardPaste className="w-3.5 h-3.5" />
+                  <span>Qo'yish</span>
                 </button>
 
+                {/* Next Student Button ("Hey keyingisi") */}
                 <button
                   type="button"
                   onClick={handleNextStudent}
-                  disabled={candidateStudents.length <= 1}
-                  className="p-2 rounded-xl bg-white/5 hover:bg-white/15 disabled:opacity-30 disabled:pointer-events-none text-slate-300 hover:text-white transition-all cursor-pointer"
-                  title="Keyingi o'quvchi (faqat tanlangan toifadan)"
+                  className="flex-1 py-2 px-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 active:scale-[0.98] text-white font-extrabold text-[11px] flex items-center justify-center gap-1 shadow-md transition-all cursor-pointer group"
+                  title="Keyingi o'quvchi ('Hey keyingisi')"
                 >
-                  <ChevronRight className="w-4 h-4" />
+                  <Sparkles className="w-3 h-3 text-amber-300" />
+                  <span>Keyingisi</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
                 </button>
               </div>
 
-              {/* Microphone & Status Bar */}
+              {/* Microphone & Voice Commands Helper */}
               <div className="pt-2 border-t border-white/10 flex items-center justify-between text-xs">
                 <button
                   type="button"
@@ -706,8 +810,8 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
                     <span>Gapirmoqda...</span>
                   </span>
                 ) : (
-                  <span className="text-[10px] text-slate-400">
-                    Kalit so'z: <strong className="text-white">"{settings.wakeWord}"</strong>
+                  <span className="text-[10px] text-slate-400 font-mono">
+                    "Hey keyingisi" / "Hey qo'yish"
                   </span>
                 )}
               </div>
