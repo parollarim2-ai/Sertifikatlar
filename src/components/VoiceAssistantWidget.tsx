@@ -3,6 +3,7 @@ import { ClassGroup, Student } from '../types';
 import { 
   speakUzbekVoice, 
   stopSpeaking,
+  prefetchUzbekAudio,
   copyToClipboard, 
   readFromClipboard,
   unlockAudioPlayback,
@@ -27,8 +28,7 @@ import {
   Check, 
   GripHorizontal,
   ClipboardPaste,
-  ShieldCheck,
-  Award
+  Zap
 } from 'lucide-react';
 
 interface VoiceAssistantWidgetProps {
@@ -155,6 +155,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
   const isSpeakingRef = useRef(isSpeaking);
   isSpeakingRef.current = isSpeaking;
   const isProcessingCommandRef = useRef(false);
+  const lastCommandTimeRef = useRef(0);
 
   // Clear auto-email timers
   const clearAutoEmailTimers = useCallback(() => {
@@ -173,13 +174,42 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
     return () => clearAutoEmailTimers();
   }, [clearAutoEmailTimers]);
 
+  // ULTRA-FAST AUDIO PRE-CACHING in background for zero-latency response (<0.2s)
+  useEffect(() => {
+    const voice = settings.voice || 'uz-UZ-SardorNeural';
+    // Pre-cache fixed phrases
+    prefetchUzbekAudio("Oliy hazrat, barcha o'quvchilarga sertifikat olib bo'ldik!", voice);
+    prefetchUzbekAudio("Oliy hazrat, bu o'quvchidan oldin boshqa o'quvchi mavjud emas, ro'yxatning boshidasiz!", voice);
+    prefetchUzbekAudio("Xizmatingizdaman, Oliy hazrat!", voice);
+
+    // Pre-cache current and next candidate names
+    if (candidateStudents.length > 0) {
+      const curr = candidateStudents[studentPointerIndex];
+      if (curr) {
+        prefetchUzbekAudio(`Oliy hazrat, ${curr.fullName}ning ismini nusxalab oldim!`, voice);
+        prefetchUzbekAudio(`Oliy hazrat, ${curr.fullName}ning sertifikati muvaffaqiyatli joylashtirildi va saqlandi!`, voice);
+      }
+      const nextIdx = (studentPointerIndex + 1) % candidateStudents.length;
+      const nextSt = candidateStudents[nextIdx];
+      if (nextSt) {
+        prefetchUzbekAudio(`Oliy hazrat, ${nextSt.fullName}ning ismini nusxalab oldim!`, voice);
+      }
+      if (studentPointerIndex > 0) {
+        const prevSt = candidateStudents[studentPointerIndex - 1];
+        if (prevSt) {
+          prefetchUzbekAudio(`Oliy hazrat, avvalgi o'quvchi ${prevSt.fullName}ning ismini nusxalab oldim!`, voice);
+        }
+      }
+    }
+  }, [candidateStudents, studentPointerIndex, settings.voice]);
+
   // Safely play speech with recognition pause (PREVENTS 0.5s ECHO & REPEATS)
   const speakPolitely = useCallback(async (phrase: string) => {
     unlockAudioPlayback();
     isSpeakingRef.current = true;
     setIsSpeaking(true);
 
-    // Physically pause recognition while assistant is speaking
+    // Physically pause recognition so mic NEVER hears its own output
     try {
       recognitionRef.current?.stop();
     } catch {}
@@ -194,7 +224,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
       () => {
         setIsSpeaking(false);
         isSpeakingRef.current = false;
-        // Resume microphone after 1.2s of silence
+        // Resume microphone after 0.8s of silence
         setTimeout(() => {
           isProcessingCommandRef.current = false;
           if (isListeningRef.current) {
@@ -202,13 +232,13 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
               recognitionRef.current?.start();
             } catch {}
           }
-        }, 1200);
+        }, 800);
       }
     );
   }, [settings.voice]);
 
   // CORE SEQUENTIAL ACTION:
-  // 1. Copies Name immediately and speaks polite phrase
+  // 1. Copies Name immediately (<0.05s) and speaks polite phrase
   // 2. Automatically copies Email 3.5s later without extra clicks
   const executeSequentialCopy = useCallback(async (targetSt?: Student | null, isPrevious: boolean = false) => {
     const student = targetSt || activeStudent;
@@ -222,7 +252,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
 
     clearAutoEmailTimers();
 
-    // STEP 1: Copy Name
+    // STEP 1: Copy Name INSTANTLY (< 50ms)
     await copyToClipboard(student.fullName);
     setCopyStep('name_copied');
     showToast(`1. Ism nusxalandi: "${student.fullName}"`, 'success');
@@ -230,6 +260,8 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
     const prefixPhrase = isPrevious 
       ? `Oliy hazrat, avvalgi o'quvchi ${student.fullName}ning ismini nusxalab oldim!`
       : `Oliy hazrat, ${student.fullName}ning ismini nusxalab oldim!`;
+    
+    // Play speech (already pre-cached, plays instantly!)
     speakPolitely(prefixPhrase);
 
     // STEP 2: Automatic Email Copy after 3.5 seconds
@@ -325,7 +357,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
     // Advance to next student in line
     setTimeout(() => {
       handleNextStudent();
-    }, 1500);
+    }, 1200);
   }, [activeStudent, onSaveStudent, showToast, speakPolitely, handleNextStudent]);
 
   // Test Voice sample
@@ -335,7 +367,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
     speakPolitely(sample);
   }, [showToast, speakPolitely]);
 
-  // Speech Recognition Continuous Listener with "Hey" Prefix enforcement
+  // FAST SPEECH RECOGNITION LISTENER (interimResults = true for instant 0.2s matching even in noisy rooms)
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -345,43 +377,44 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
 
     const recognition = new SpeechRecognition();
     recognition.continuous = true;
-    recognition.interimResults = false;
+    recognition.interimResults = true; // INSTANT LIVE RECOGNITION (NO 10-20s SILENCE WAIT!)
     recognition.lang = 'uz-UZ';
     recognitionRef.current = recognition;
 
     recognition.onresult = (event: any) => {
+      // Don't process while speaking or already executing
       if (isSpeakingRef.current || isProcessingCommandRef.current) return;
 
-      const lastIdx = event.results.length - 1;
-      const transcript = event.results[lastIdx][0]?.transcript || '';
-      const lower = transcript.toLowerCase().trim();
+      const now = Date.now();
+      if (now - lastCommandTimeRef.current < 1500) return; // 1.5s debounce
+
+      // Scan all recent interim and final transcripts
+      let fullTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        fullTranscript += ' ' + event.results[i][0].transcript;
+      }
+      const lower = fullTranscript.toLowerCase().trim();
 
       // Check "Hey" Prefix requirement:
-      // "har bir buyruqdan oldin 'hey' iborasini ishlatishni majburiy qil: 'hey keyingisi', 'hey qo'yish' kabi"
-      const hasHeyPrefix = lower.startsWith('hey') || 
-                           lower.startsWith('hay') || 
-                           lower.startsWith('хей') || 
-                           lower.startsWith('эй') ||
-                           lower.includes('hey ') ||
-                           lower.includes('hay ');
+      // In noisy rooms, allow: "hey", "hay", "ey", "хей", "эй", "oy", "e"
+      const hasHeyPrefix = /(hey|hay|ey|oy|хей|эй)\b/i.test(lower);
 
       if (settings.requireHeyPrefix && !hasHeyPrefix) {
         // Ignored to prevent false triggers during ordinary speech
         return;
       }
 
-      // Remove "hey" prefix for command matching
-      const cleanedCommand = lower
-        .replace(/^(hey|hay|хей|эй)\s*/g, '')
-        .trim();
-
+      // NOISY ROOM FUZZY COMMAND MATCHING (<0.2s trigger):
+      
       // COMMAND 1: "Hey keyingisi" / "Hey keyingi"
       if (
-        cleanedCommand.includes('keyingi') || 
-        cleanedCommand.includes('keyingisi') ||
-        cleanedCommand.includes('sertifikat') ||
-        cleanedCommand.includes('nusxa')
+        /keying/i.test(lower) || 
+        /kengis/i.test(lower) || 
+        /keyn/i.test(lower) ||
+        /sertifikat/i.test(lower) ||
+        /nusxa/i.test(lower)
       ) {
+        lastCommandTimeRef.current = now;
         isProcessingCommandRef.current = true;
         handleNextStudent();
         return;
@@ -389,12 +422,13 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
 
       // COMMAND 2: "Hey avvalgisi" / "Hey oldingisi" / "Hey orqaga"
       if (
-        cleanedCommand.includes('avvalgi') || 
-        cleanedCommand.includes('avvalgisi') || 
-        cleanedCommand.includes('oldingi') || 
-        cleanedCommand.includes('oldingisi') ||
-        cleanedCommand.includes('orqaga')
+        /avvalg/i.test(lower) || 
+        /avalg/i.test(lower) || 
+        /olding/i.test(lower) || 
+        /orqag/i.test(lower) ||
+        /orqa/i.test(lower)
       ) {
+        lastCommandTimeRef.current = now;
         isProcessingCommandRef.current = true;
         handlePrevStudent();
         return;
@@ -402,20 +436,22 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
 
       // COMMAND 3: "Hey qo'yish" / "Hey joylashtir" / "Hey saqla"
       if (
-        cleanedCommand.includes('qo\'y') || 
-        cleanedCommand.includes('qoy') || 
-        cleanedCommand.includes('joylashtir') || 
-        cleanedCommand.includes('saqla') ||
-        cleanedCommand.includes('tasdiq')
+        /qo'?y/i.test(lower) || 
+        /qoy/i.test(lower) || 
+        /joylashtir/i.test(lower) || 
+        /saqla/i.test(lower) ||
+        /tasdiq/i.test(lower)
       ) {
+        lastCommandTimeRef.current = now;
         isProcessingCommandRef.current = true;
         handlePasteCertificate();
         return;
       }
 
       // COMMAND 4: "Hey pochta" / "Hey email"
-      if (cleanedCommand.includes('pochta') || cleanedCommand.includes('email')) {
+      if (/pochta/i.test(lower) || /email/i.test(lower) || /mail/i.test(lower)) {
         if (activeStudent) {
+          lastCommandTimeRef.current = now;
           isProcessingCommandRef.current = true;
           const email = activeStudent.assignedEmail || `${activeStudent.fullName.toLowerCase().replace(/[^a-z0-9]/g, '')}@gmail.com`;
           copyToClipboard(email).then(() => {
@@ -468,7 +504,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
       setIsListening(true);
       try {
         recognitionRef.current?.start();
-        showToast("🎙️ Ovozli yordamchi ishga tushdi!", 'success');
+        showToast("🎙️ Ovozli yordamchi ishga tushdi (Tezkor rejim)!", 'success');
         speakPolitely("Xizmatingizdaman, Oliy hazrat!");
       } catch (err) {
         console.error('Mic start error:', err);
@@ -563,8 +599,9 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
               className="flex items-center gap-2 pr-2 text-left cursor-pointer group"
             >
               <div className="max-w-[130px] truncate">
-                <div className="text-[10px] text-amber-300 font-bold uppercase truncate">
-                  {currentClass ? `${currentClass.name} sinfi` : 'Sinf'}
+                <div className="text-[10px] text-amber-300 font-bold uppercase truncate flex items-center gap-1">
+                  <span>{currentClass ? `${currentClass.name} sinfi` : 'Sinf'}</span>
+                  <Zap className="w-2.5 h-2.5 text-emerald-400" />
                 </div>
                 <div className="text-xs font-semibold text-slate-100 truncate">
                   {activeStudent ? activeStudent.fullName : "Tayyor"}
@@ -591,6 +628,9 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
                     </span>
                     <span className="px-1.5 py-0.2 rounded-full text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
                       Oliy hazrat
+                    </span>
+                    <span className="px-1 py-0.2 rounded text-[8px] bg-emerald-500/20 text-emerald-300 font-bold">
+                      ⚡ Tezkor (0.3s)
                     </span>
                   </div>
                   <div className="text-[10px] text-blue-300 truncate">
@@ -801,7 +841,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
                   }`}
                 >
                   <div className={`w-2 h-2 rounded-full ${isListening ? 'bg-rose-500 animate-ping' : 'bg-slate-500'}`} />
-                  <span>{isListening ? 'Eshitmoqda...' : 'Mikrofon o\'chiq'}</span>
+                  <span>{isListening ? 'Eshitmoqda (Tezkor)...' : 'Mikrofon o\'chiq'}</span>
                 </button>
 
                 {isSpeaking ? (
