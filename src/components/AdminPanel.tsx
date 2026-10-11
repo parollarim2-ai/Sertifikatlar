@@ -9,6 +9,7 @@ import { ClassLiquidGlassStrip } from './ClassLiquidGlassStrip';
 import { NavigationLiquidGlassTabs } from './NavigationLiquidGlassTabs';
 import { AnimatedGlassSearchInput } from './AnimatedGlassSearchInput';
 import { UnifiedGlassProvider } from '../context/UnifiedGlassContext';
+import { VoiceAssistantWidget } from './VoiceAssistantWidget';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
 import { getStoredCertifyLogs } from '../utils/operatorSpeedTracker';
 import { 
@@ -2034,6 +2035,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           </div>
         </div>
       )}
+
+      {/* 100% Natural Free Uzbek Voice Assistant with Edge TTS & Wake Word */}
+      <VoiceAssistantWidget
+        classes={classes}
+        students={students}
+        activeClassId={selectedClassId}
+        onSelectClass={(cid) => setSelectedClassId(cid)}
+        onSaveStudent={onSaveStudent}
+      />
       </div>
     </UnifiedGlassProvider>
   );

@@ -22,6 +22,7 @@ import {
   ensureFreshFirestoreData,
 } from './server-telegram.ts';
 import { solveStudentCourseraQuizzes } from './server-coursera-quiz.ts';
+import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
 
 let sharedBrowser: Browser | null = null;
 
@@ -72,6 +73,68 @@ async function startServer() {
   // Cloud Run / container health check endpoints
   app.get(['/health', '/healthz', '/_health'], (_req, res) => {
     res.status(200).json({ status: 'ok', uptime: process.uptime() });
+  });
+
+  // 100% Natural, Free, Tokenless Uzbek Male Voice TTS (Microsoft Edge TTS: uz-UZ-SardorNeural)
+  app.get('/api/tts/speak', async (req, res) => {
+    try {
+      const text = (req.query.text as string) || '';
+      const voice = (req.query.voice as string) || 'uz-UZ-SardorNeural';
+      if (!text || typeof text !== 'string') {
+        return res.status(400).json({ error: "Matn kiritilmagan" });
+      }
+
+      const cleanText = text.trim().slice(0, 600);
+      const tts = new MsEdgeTTS();
+      await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+      const { audioStream } = tts.toStream(cleanText);
+
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      audioStream.pipe(res);
+
+      audioStream.on('error', (err) => {
+        console.error('TTS GET audioStream error:', err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'TTS ovoz hosil qilishda xatolik' });
+        }
+      });
+    } catch (err: any) {
+      console.error('TTS GET error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: err?.message || 'TTS xatolik' });
+      }
+    }
+  });
+
+  app.post('/api/tts/speak', async (req, res) => {
+    try {
+      const { text, voice = 'uz-UZ-SardorNeural' } = req.body;
+      if (!text || typeof text !== 'string') {
+        return res.status(400).json({ error: "Matn kiritilmagan" });
+      }
+
+      const cleanText = text.trim().slice(0, 600);
+      const tts = new MsEdgeTTS();
+      await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+      const { audioStream } = tts.toStream(cleanText);
+
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      audioStream.pipe(res);
+
+      audioStream.on('error', (err) => {
+        console.error('TTS POST audioStream error:', err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'TTS ovoz hosil qilishda xatolik' });
+        }
+      });
+    } catch (err: any) {
+      console.error('TTS POST error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: err?.message || 'TTS xatolik' });
+      }
+    }
   });
 
   // AI Document parsing endpoint using Gemini

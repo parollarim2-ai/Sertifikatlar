@@ -10,6 +10,7 @@ import {
   downloadAllCertificatesAsZip,
   generateUnifiedCertificatesPdf,
 } from '../utils/certificateGenerator';
+import { VoiceAssistantWidget } from './VoiceAssistantWidget';
 import confetti from 'canvas-confetti';
 import { 
   Users, 
@@ -1199,6 +1200,14 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
 
       {/* Teacher Picker Modal (When switching class from dashboard) */}
       {renderTeacherPickerModal()}
+
+      {/* Voice Assistant Widget */}
+      <VoiceAssistantWidget
+        classes={classes}
+        students={students}
+        activeClassId={selectedClassId}
+        onSelectClass={(cid) => setSelectedClassId(cid)}
+      />
 
     </div>
   );
