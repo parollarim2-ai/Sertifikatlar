@@ -2,7 +2,9 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { ClassGroup, Student } from '../types';
 import { 
   speakUzbekMale, 
+  stopSpeaking,
   copyToClipboard, 
+  unlockAudioPlayback,
   loadVoiceAssistantSettings, 
   saveVoiceAssistantSettings,
   VoiceAssistantSettings 
@@ -11,37 +13,37 @@ import {
   Mic, 
   MicOff, 
   Volume2, 
-  Copy, 
   CheckCircle, 
   ChevronRight, 
   ChevronLeft, 
   Settings, 
   Sparkles, 
-  X, 
   Minimize2, 
   Maximize2, 
   User, 
   Mail, 
   Check, 
-  VolumeX, 
-  Radio, 
-  HelpCircle,
-  Play,
-  RotateCcw
+  GripHorizontal,
+  Clock,
+  VolumeX
 } from 'lucide-react';
 
 interface VoiceAssistantWidgetProps {
   classes: ClassGroup[];
   students: Student[];
   activeClassId: string; // The class where the liquid glass currently is!
+  selectedStatusFilters?: string[]; // Current category filter in AdminPanel (e.g. ['pending'])
   onSelectClass?: (classId: string) => void;
   onSaveStudent?: (student: Student) => Promise<void> | void;
 }
+
+const STORAGE_POS_KEY = 'b1m_voice_widget_position_v2';
 
 export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
   classes,
   students,
   activeClassId,
+  selectedStatusFilters = [],
   onSelectClass,
   onSaveStudent,
 }) => {
@@ -51,56 +53,94 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
   const [isMinimized, setIsMinimized] = useState(false);
   const [customWakeWord, setCustomWakeWord] = useState(settings.wakeWord);
 
+  // Widget Position (Draggable & persistent)
+  const [position, setPosition] = useState<{ x: number; y: number }>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_POS_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    // Default top-right position
+    const winW = typeof window !== 'undefined' ? window.innerWidth : 1200;
+    return { x: Math.max(20, winW - 360), y: 100 };
+  });
+
+  const isDraggingRef = useRef(false);
+  const dragStartRef = useRef<{ startX: number; startY: number; posX: number; posY: number }>({
+    startX: 0,
+    startY: 0,
+    posX: 0,
+    posY: 0,
+  });
+
   // Assistant State
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [micSupported, setMicSupported] = useState(true);
-  const [lastTranscript, setLastTranscript] = useState('');
   const [actionToast, setActionToast] = useState<{ text: string; type: 'success' | 'info' | 'warn' } | null>(null);
+
+  // Sequential Copying State (1. Ism -> 2. Pochta)
+  const [copyStep, setCopyStep] = useState<'idle' | 'name_copied' | 'email_copied'>('idle');
+  const [autoEmailCountdown, setAutoEmailCountdown] = useState<number | null>(null);
+  const autoEmailTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Student Navigation State
   const [studentPointerIndex, setStudentPointerIndex] = useState(0);
-  const [lastCopiedField, setLastCopiedField] = useState<'name' | 'email' | 'both' | null>(null);
 
-  // Target Class determination:
-  // "o'sha men qaysi sinf ga sertifikat olaoytgan bo'lsam, yani qaysi sinf ni ustida haligi suyuq shisha turgan bo'lsa"
+  // Target Class determination (matches liquid glass lens)
   const currentClass = useMemo(() => {
     if (activeClassId && activeClassId !== 'all' && activeClassId !== 'all_with_teachers' && activeClassId !== 'only_teachers') {
       const found = classes.find(c => c.id === activeClassId);
       if (found) return found;
     }
-    // Fallback: first class with uncertified students or first class
-    const withUncertified = classes.find(c => {
+    const withPending = classes.find(c => {
       const cSt = students.filter(s => s.classId === c.id);
       return cSt.some(s => s.status !== 'certified' && !s.hasError && s.status !== 'error');
     });
-    return withUncertified || classes[0] || null;
+    return withPending || classes[0] || null;
   }, [classes, activeClassId, students]);
 
-  // All valid uncertified students in the target class in chronological/top-to-bottom order:
-  // "shu sinf dan sertifkat olmagan o'quvchilarni qidiradi (ma'lumoti xato bo'lganlarni emas) ... bir boshdan eng birinchida turganini"
-  const uncertifiedStudents = useMemo(() => {
+  // CATEGORY FILTERING:
+  // Strictly filter according to the user's selected category in AdminPanel (e.g. faqat kutilayotganlar)
+  const candidateStudents = useMemo(() => {
     if (!currentClass) return [];
-    return students
-      .filter(s => s.classId === currentClass.id)
-      .filter(s => s.status !== 'certified' && !s.hasError && s.status !== 'error');
-  }, [students, currentClass]);
+    let list = students.filter(s => s.classId === currentClass.id);
 
-  // Currently focused student in the uncertified queue
+    // Apply active category filters from AdminPanel if present
+    if (selectedStatusFilters && selectedStatusFilters.length > 0) {
+      list = list.filter(s => {
+        const isCertified = s.status === 'certified';
+        const isError = Boolean(s.hasError || s.status === 'error');
+        const isPending = !isCertified && !isError;
+
+        if (selectedStatusFilters.includes('certified') && isCertified) return true;
+        if (selectedStatusFilters.includes('error') && isError) return true;
+        if (selectedStatusFilters.includes('pending') && isPending) return true;
+        return false;
+      });
+    } else {
+      // Default: strictly pending (uncertified, without errors)
+      list = list.filter(s => s.status !== 'certified' && !s.hasError && s.status !== 'error');
+    }
+
+    return list;
+  }, [students, currentClass, selectedStatusFilters]);
+
+  // Currently focused student in the candidate pool
   const activeStudent = useMemo(() => {
-    if (uncertifiedStudents.length === 0) return null;
-    const safeIndex = Math.min(Math.max(0, studentPointerIndex), uncertifiedStudents.length - 1);
-    return uncertifiedStudents[safeIndex] || null;
-  }, [uncertifiedStudents, studentPointerIndex]);
+    if (candidateStudents.length === 0) return null;
+    const safeIndex = Math.min(Math.max(0, studentPointerIndex), candidateStudents.length - 1);
+    return candidateStudents[safeIndex] || null;
+  }, [candidateStudents, studentPointerIndex]);
 
-  // Keep pointer in bounds when uncertified count changes
+  // Reset pointer if candidates change
   useEffect(() => {
-    if (studentPointerIndex >= uncertifiedStudents.length && uncertifiedStudents.length > 0) {
+    if (studentPointerIndex >= candidateStudents.length && candidateStudents.length > 0) {
       setStudentPointerIndex(0);
     }
-  }, [uncertifiedStudents.length, studentPointerIndex]);
+  }, [candidateStudents.length, studentPointerIndex]);
 
-  // Audio / Speech Toast helper
+  // Helper Toast
   const showToast = useCallback((text: string, type: 'success' | 'info' | 'warn' = 'success') => {
     setActionToast({ text, type });
     setTimeout(() => {
@@ -108,123 +148,152 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
     }, 3500);
   }, []);
 
-  // Speech Recognition Reference
+  // Speech Recognition & Echo Prevention Refs
   const recognitionRef = useRef<any>(null);
   const isListeningRef = useRef(isListening);
   isListeningRef.current = isListening;
   const isSpeakingRef = useRef(isSpeaking);
   isSpeakingRef.current = isSpeaking;
-  const lastActionTimeRef = useRef(0);
+  const isProcessingCommandRef = useRef(false);
 
-  // Core Action: Copy Student Name and/or Email and Speak in 100% Natural Male Voice
-  const executeCopyStudent = useCallback(async (
-    targetSt?: Student | null, 
-    advance: boolean = false,
-    fieldToCopy: 'name' | 'email' | 'both' = 'name'
-  ) => {
+  // Clear auto-email timers
+  const clearAutoEmailTimers = useCallback(() => {
+    if (autoEmailTimerRef.current) {
+      clearTimeout(autoEmailTimerRef.current);
+      autoEmailTimerRef.current = null;
+    }
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    setAutoEmailCountdown(null);
+  }, []);
+
+  useEffect(() => {
+    return () => clearAutoEmailTimers();
+  }, [clearAutoEmailTimers]);
+
+  // Safely play speech with recognition pause (PREVENTS 0.5s ECHO & REPEATS)
+  const speakPolitely = useCallback(async (phrase: string) => {
+    unlockAudioPlayback();
+    isSpeakingRef.current = true;
+    setIsSpeaking(true);
+
+    // 1. Physically STOP recognition so mic NEVER hears its own output
+    try {
+      recognitionRef.current?.stop();
+    } catch {}
+
+    // 2. Play 100% natural Microsoft Sardor voice
+    await speakUzbekMale(
+      phrase,
+      () => {
+        setIsSpeaking(true);
+        isSpeakingRef.current = true;
+      },
+      () => {
+        setIsSpeaking(false);
+        isSpeakingRef.current = false;
+        // 3. ONLY restart mic after 1.2s of absolute silence
+        setTimeout(() => {
+          isProcessingCommandRef.current = false;
+          if (isListeningRef.current) {
+            try {
+              recognitionRef.current?.start();
+            } catch {}
+          }
+        }, 1200);
+      }
+    );
+  }, []);
+
+  // CORE SEQUENTIAL ACTION:
+  // 1. Copies Name immediately and speaks polite Uzbek male phrase
+  // 2. Automatically copies Email 3.5s later without needing any extra action!
+  const executeSequentialCopy = useCallback(async (targetSt?: Student | null) => {
     const student = targetSt || activeStudent;
 
-    if (!student) {
-      if (currentClass) {
-        const finishedMsg = `${currentClass.name} sinfidagi barcha o'quvchilar sertifikat olib bo'lgan!`;
-        showToast(finishedMsg, 'info');
-        speakUzbekMale(finishedMsg, () => setIsSpeaking(true), () => setIsSpeaking(false));
-      } else {
-        showToast("Sinf tanlanmadi", 'warn');
-      }
+    // Check if category is completed or empty:
+    // "agarda hamma o'quvchilarga serifikat olib bo'linsa yoki o'sha kotegoriya bo'yicha o'quvchi qolmasa...
+    // Oliy hazrat, barcha o'quvchilarga sertifikat olib bo'ldik desin"
+    if (!student || candidateStudents.length === 0) {
+      const allDoneMsg = "Oliy hazrat, barcha o'quvchilarga sertifikat olib bo'ldik!";
+      showToast(allDoneMsg, 'info');
+      await speakPolitely(allDoneMsg);
       return;
     }
 
-    let copiedValue = '';
-    let speechMessage = '';
+    clearAutoEmailTimers();
 
-    if (fieldToCopy === 'email') {
-      const email = student.assignedEmail || `${student.fullName.toLowerCase().replace(/[^a-z0-9]/g, '')}@gmail.com`;
-      copiedValue = email;
-      speechMessage = `${student.fullName}ning elektron pochtasidan nusxa olindi.`;
-      setLastCopiedField('email');
-    } else if (fieldToCopy === 'both') {
-      const email = student.assignedEmail || '';
-      copiedValue = `${student.fullName}\n${email}`;
-      speechMessage = `${student.fullName}ning ismi va pochtasidan nusxa olindi.`;
-      setLastCopiedField('both');
-    } else {
-      // Default: copy Full Name
-      copiedValue = student.fullName;
-      speechMessage = `${student.fullName}ning ma'lumotlaridan nusxa olindi.`;
-      setLastCopiedField('name');
-    }
+    // STEP 1: Copy Name
+    const nameCopied = await copyToClipboard(student.fullName);
+    setCopyStep('name_copied');
+    showToast(`1. Ism nusxalandi: "${student.fullName}"`, 'success');
 
-    // 1. Write to Clipboard with guaranteed fallback
-    const ok = await copyToClipboard(copiedValue);
-    if (ok) {
-      showToast(`📋 Nusxalandi: "${copiedValue}"`, 'success');
-    } else {
-      showToast(`⚠️ Nusxalandi: "${copiedValue}"`, 'info');
-    }
+    // Polite Uzbek gentleman phrase
+    const politeNamePhrase = `Oliy hazrat, ${student.fullName}ning ismini nusxalab oldim!`;
+    speakPolitely(politeNamePhrase);
 
-    // 2. Announce in 100% Natural Uzbek Male Voice (Microsoft Sardor)
-    speakUzbekMale(
-      speechMessage,
-      () => setIsSpeaking(true),
-      () => setIsSpeaking(false)
-    );
+    // STEP 2: Automatic Email Copy after 3.5 seconds
+    const emailToCopy = student.assignedEmail || `${student.fullName.toLowerCase().replace(/[^a-z0-9]/g, '')}@gmail.com`;
+    let timeLeft = Math.round(settings.autoCopyEmailSeconds || 3.5);
+    setAutoEmailCountdown(timeLeft);
 
-    // 3. Optionally advance pointer if requested
-    if (advance) {
-      setStudentPointerIndex(prev => (prev + 1) % Math.max(1, uncertifiedStudents.length));
-    }
-  }, [activeStudent, currentClass, uncertifiedStudents.length, showToast]);
+    countdownIntervalRef.current = setInterval(() => {
+      timeLeft -= 1;
+      if (timeLeft <= 0) {
+        if (countdownIntervalRef.current) {
+          clearInterval(countdownIntervalRef.current);
+          countdownIntervalRef.current = null;
+        }
+        setAutoEmailCountdown(null);
+      } else {
+        setAutoEmailCountdown(timeLeft);
+      }
+    }, 1000);
 
-  // Action: Copy Email specifically
-  const handleCopyEmail = useCallback(async () => {
-    if (!activeStudent) return;
-    await executeCopyStudent(activeStudent, false, 'email');
-  }, [activeStudent, executeCopyStudent]);
+    autoEmailTimerRef.current = setTimeout(async () => {
+      await copyToClipboard(emailToCopy);
+      setCopyStep('email_copied');
+      showToast(`2. Pochta nusxalandi: "${emailToCopy}"`, 'success');
+      clearAutoEmailTimers();
+    }, (settings.autoCopyEmailSeconds || 3.5) * 1000);
+
+  }, [activeStudent, candidateStudents.length, settings.autoCopyEmailSeconds, clearAutoEmailTimers, showToast, speakPolitely]);
 
   // Action: Next Student
   const handleNextStudent = useCallback(() => {
-    if (uncertifiedStudents.length <= 1) {
-      executeCopyStudent(activeStudent, false, 'name');
+    if (candidateStudents.length === 0) {
+      executeSequentialCopy(null);
       return;
     }
-    const nextIdx = (studentPointerIndex + 1) % uncertifiedStudents.length;
+    if (candidateStudents.length === 1) {
+      executeSequentialCopy(activeStudent);
+      return;
+    }
+    const nextIdx = (studentPointerIndex + 1) % candidateStudents.length;
     setStudentPointerIndex(nextIdx);
-    const nextSt = uncertifiedStudents[nextIdx];
-    executeCopyStudent(nextSt, false, 'name');
-  }, [uncertifiedStudents, studentPointerIndex, activeStudent, executeCopyStudent]);
+    const nextSt = candidateStudents[nextIdx];
+    executeSequentialCopy(nextSt);
+  }, [candidateStudents, studentPointerIndex, activeStudent, executeSequentialCopy]);
 
-  // Action: Previous Student
+  // Action: Previous Student (stays strictly within current category!)
   const handlePrevStudent = useCallback(() => {
-    if (uncertifiedStudents.length <= 1) return;
-    const prevIdx = (studentPointerIndex - 1 + uncertifiedStudents.length) % uncertifiedStudents.length;
+    if (candidateStudents.length <= 1) return;
+    const prevIdx = (studentPointerIndex - 1 + candidateStudents.length) % candidateStudents.length;
     setStudentPointerIndex(prevIdx);
-    const prevSt = uncertifiedStudents[prevIdx];
-    executeCopyStudent(prevSt, false, 'name');
-  }, [uncertifiedStudents, studentPointerIndex, executeCopyStudent]);
-
-  // Action: Mark current student as Certified
-  const handleMarkAsCertified = useCallback(async () => {
-    if (!activeStudent || !onSaveStudent) return;
-    const updated: Student = {
-      ...activeStudent,
-      status: 'certified',
-      certificateLink: activeStudent.certificateLink || 'https://coursera.org/verify/certificate'
-    };
-    await onSaveStudent(updated);
-    const msg = `${activeStudent.fullName} sertifikatlandi!`;
-    showToast(`✅ ${msg}`, 'success');
-    speakUzbekMale(msg, () => setIsSpeaking(true), () => setIsSpeaking(false));
-  }, [activeStudent, onSaveStudent, showToast]);
+    const prevSt = candidateStudents[prevIdx];
+    executeSequentialCopy(prevSt);
+  }, [candidateStudents, studentPointerIndex, executeSequentialCopy]);
 
   // Test Voice sample
   const handleTestVoice = useCallback(() => {
-    const sample = "Assalomu alaykum! Men sizning ovozli yordamchingizman. Kalit so'zni aytsangiz, o'quvchi ma'lumotlaridan bir zumda nusxa olaman.";
-    showToast("🔊 Tabiiy erkak ovozi sinovdan o'tmoqda...", 'info');
-    speakUzbekMale(sample, () => setIsSpeaking(true), () => setIsSpeaking(false));
-  }, [showToast]);
+    const sample = "Assalomu alaykum, Oliy hazrat! Men sizning sodiq yordamchingizman. Buyruqlaringizga muntazirman!";
+    showToast("🔊 Tabiiy o'zbekcha ovoz sinovdan o'tmoqda...", 'info');
+    speakPolitely(sample);
+  }, [showToast, speakPolitely]);
 
-  // Speech Recognition Setup & Continuous Loop
+  // Speech Recognition Continuous Listener
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -234,27 +303,17 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
 
     const recognition = new SpeechRecognition();
     recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'uz-UZ'; // Uzbek language recognition
+    recognition.interimResults = false; // Only final speech to prevent 0.5s jitter
+    recognition.lang = 'uz-UZ';
     recognitionRef.current = recognition;
 
     recognition.onresult = (event: any) => {
-      // Don't process user's microphone while the TTS assistant itself is talking (prevents echo loop)
-      if (isSpeakingRef.current) return;
+      if (isSpeakingRef.current || isProcessingCommandRef.current) return;
 
-      const now = Date.now();
-      if (now - lastActionTimeRef.current < 2000) return; // 2s cooldown between commands
+      const lastIdx = event.results.length - 1;
+      const transcript = event.results[lastIdx][0]?.transcript || '';
+      const lower = transcript.toLowerCase().trim();
 
-      let currentTranscript = '';
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        currentTranscript += event.results[i][0].transcript;
-      }
-
-      const lower = currentTranscript.toLowerCase().trim();
-      setLastTranscript(lower);
-
-      // Check Wake Word:
-      // Default: "keyingisi", "sertifikat", "nusxa", "siri", "bixby", or custom word!
       const wake = (settings.wakeWord || 'keyingisi').toLowerCase().trim();
       const wakeMatches = [
         wake,
@@ -265,40 +324,29 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
         'nusxa',
         'nusxala',
         'nusxalash',
-        'kopirovat',
         'siri',
         'bixby',
         'yordamchi',
-        'robot'
       ];
 
       const isWakeWordDetected = wakeMatches.some(w => lower.includes(w)) || (wake && lower.includes(wake));
 
       if (isWakeWordDetected) {
-        lastActionTimeRef.current = now;
-        // Trigger next student copy!
+        isProcessingCommandRef.current = true;
         handleNextStudent();
         return;
       }
 
-      // Voice sub-command: "email" / "pochta"
-      if (lower.includes('email') || lower.includes('pochta') || lower.includes('elektron')) {
-        lastActionTimeRef.current = now;
-        handleCopyEmail();
-        return;
-      }
-
-      // Voice sub-command: "ism" / "ismi"
-      if (lower.includes('ism') || lower.includes('ismi') || lower.includes('familiya')) {
-        lastActionTimeRef.current = now;
-        executeCopyStudent(activeStudent, false, 'name');
-        return;
-      }
-
-      // Voice sub-command: "tayyor" / "sertifikatlandi"
-      if (lower.includes('tayyor') || lower.includes('oldi') || lower.includes('tasdiq')) {
-        lastActionTimeRef.current = now;
-        handleMarkAsCertified();
+      // Explicit Email copy command
+      if (lower.includes('email') || lower.includes('pochta') || lower.includes('pochta')) {
+        if (activeStudent) {
+          isProcessingCommandRef.current = true;
+          const email = activeStudent.assignedEmail || `${activeStudent.fullName.toLowerCase().replace(/[^a-z0-9]/g, '')}@gmail.com`;
+          copyToClipboard(email).then(() => {
+            showToast(`Pochta nusxalandi: "${email}"`, 'success');
+            speakPolitely(`Oliy hazrat, ${activeStudent.fullName}ning elektron pochtasini ham nusxaladim!`);
+          });
+        }
         return;
       }
     };
@@ -311,8 +359,7 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
     };
 
     recognition.onend = () => {
-      // Auto-restart if user still wants listening active
-      if (isListeningRef.current) {
+      if (isListeningRef.current && !isSpeakingRef.current && !isProcessingCommandRef.current) {
         try {
           recognition.start();
         } catch {}
@@ -324,14 +371,16 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
         recognition.stop();
       } catch {}
     };
-  }, [settings.wakeWord, handleNextStudent, handleCopyEmail, executeCopyStudent, activeStudent, handleMarkAsCertified, showToast]);
+  }, [settings.wakeWord, handleNextStudent, activeStudent, showToast, speakPolitely]);
 
   // Toggle Microphone
   const toggleListening = useCallback(() => {
     if (!micSupported) {
-      showToast("Brauzeringizda ovoz tanish (SpeechRecognition) qo'llab-quvvatlanmaydi", 'warn');
+      showToast("Brauzeringizda SpeechRecognition qo'llab-quvvatlanmaydi", 'warn');
       return;
     }
+
+    unlockAudioPlayback();
 
     if (isListening) {
       setIsListening(false);
@@ -343,170 +392,181 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
       setIsListening(true);
       try {
         recognitionRef.current?.start();
-        showToast("🎙️ Ovozli yordamchi eshitishni boshladi!", 'success');
-        // Welcome voice cue
-        speakUzbekMale("Eshitmoqdaman", () => setIsSpeaking(true), () => setIsSpeaking(false));
+        showToast("🎙️ Ovozli yordamchi ishga tushdi!", 'success');
+        speakPolitely("Xizmatingizdaman, Oliy hazrat!");
       } catch (err) {
         console.error('Mic start error:', err);
       }
     }
-  }, [isListening, micSupported, showToast]);
+  }, [isListening, micSupported, showToast, speakPolitely]);
 
-  // Global Keyboard Shortcut: Pressing 'Alt + C' or 'Ctrl + Space' triggers voice assistant copy
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if user is currently typing in an input or textarea
-      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea') return;
-
-      if ((e.altKey && e.code === 'KeyC') || (e.ctrlKey && e.code === 'Space')) {
-        e.preventDefault();
-        handleNextStudent();
-      }
+  // Draggable Mouse Handlers
+  const handleMouseDown = (e: React.MouseEvent) => {
+    isDraggingRef.current = true;
+    dragStartRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      posX: position.x,
+      posY: position.y,
     };
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleNextStudent]);
+  const handleMouseMove = (e: MouseEvent) => {
+    if (!isDraggingRef.current) return;
+    const dx = e.clientX - dragStartRef.current.startX;
+    const dy = e.clientY - dragStartRef.current.startY;
+    const nextX = Math.max(10, Math.min(window.innerWidth - 320, dragStartRef.current.posX + dx));
+    const nextY = Math.max(10, Math.min(window.innerHeight - 150, dragStartRef.current.posY + dy));
+    setPosition({ x: nextX, y: nextY });
+  };
 
-  // Save settings helper
-  const handleUpdateWakeWord = (word: string) => {
-    const newSettings = { ...settings, wakeWord: word.toLowerCase().trim() };
-    setSettings(newSettings);
-    saveVoiceAssistantSettings(newSettings);
-    showToast(`Kalit so'z yangilandi: "${word}"`, 'success');
+  const handleMouseUp = () => {
+    isDraggingRef.current = false;
+    window.removeEventListener('mousemove', handleMouseMove);
+    window.removeEventListener('mouseup', handleMouseUp);
+    try {
+      localStorage.setItem(STORAGE_POS_KEY, JSON.stringify(position));
+    } catch {}
   };
 
   return (
     <>
       {/* FLOATING ACTION TOAST */}
       {actionToast && (
-        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[9999] animate-bounce-subtle pointer-events-none">
-          <div className={`px-4 py-2.5 rounded-2xl shadow-2xl border text-xs sm:text-sm font-semibold flex items-center gap-2.5 backdrop-blur-xl ${
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[9999] pointer-events-none animate-fade-in">
+          <div className={`px-4 py-2 rounded-2xl shadow-2xl border text-xs sm:text-sm font-semibold flex items-center gap-2.5 backdrop-blur-xl ${
             actionToast.type === 'success'
-              ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/40'
+              ? 'bg-slate-950/95 text-emerald-300 border-emerald-500/50'
               : actionToast.type === 'warn'
-              ? 'bg-rose-950/90 text-rose-200 border-rose-500/40'
-              : 'bg-slate-950/90 text-blue-200 border-blue-500/40'
+              ? 'bg-slate-950/95 text-rose-300 border-rose-500/50'
+              : 'bg-slate-950/95 text-amber-300 border-amber-500/50'
           }`}>
             {actionToast.type === 'success' && <CheckCircle className="w-4 h-4 text-emerald-400" />}
-            {actionToast.type === 'warn' && <Radio className="w-4 h-4 text-rose-400" />}
-            {actionToast.type === 'info' && <Sparkles className="w-4 h-4 text-blue-400" />}
+            {actionToast.type === 'warn' && <MicOff className="w-4 h-4 text-rose-400" />}
+            {actionToast.type === 'info' && <Sparkles className="w-4 h-4 text-amber-400" />}
             <span>{actionToast.text}</span>
           </div>
         </div>
       )}
 
-      {/* FLOATING VOICE ASSISTANT DOCK (Draggable / Sleek Apple Glass HUD) */}
+      {/* DRAGGABLE FLOATING VOICE ASSISTANT (Xohlagan joyga siljitiladi!) */}
       <aside 
         aria-label="Ovozli Yordamchi"
-        className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-[9000] select-none font-sans"
+        style={{ left: `${position.x}px`, top: `${position.y}px` }}
+        className="fixed z-[9000] select-none font-sans transition-shadow"
       >
         {isMinimized ? (
-          /* MINIMIZED PILL: Compact Glowing Button */
-          <div className="flex items-center gap-2 bg-slate-900/90 hover:bg-slate-900 text-white p-2 sm:p-2.5 rounded-full shadow-2xl border border-white/20 backdrop-blur-xl transition-all active:scale-95">
+          /* MINIMIZED PILL: Super Compact, Movable anywhere */
+          <div className="flex items-center gap-2 bg-slate-900/95 text-white p-2 rounded-full shadow-2xl border border-white/20 backdrop-blur-xl">
+            {/* Drag Grip */}
+            <div 
+              onMouseDown={handleMouseDown}
+              className="p-1 cursor-grab active:cursor-grabbing text-slate-400 hover:text-white"
+              title="Surish uchun bosing"
+            >
+              <GripHorizontal className="w-4 h-4" />
+            </div>
+
             <button
               type="button"
               onClick={toggleListening}
-              className={`w-10 h-10 rounded-full flex items-center justify-center transition-all cursor-pointer ${
+              className={`w-9 h-9 rounded-full flex items-center justify-center transition-all cursor-pointer ${
                 isListening
                   ? 'bg-rose-600 text-white shadow-lg shadow-rose-500/50 animate-pulse'
                   : 'bg-blue-600 text-white shadow-md hover:bg-blue-500'
               }`}
               title={isListening ? "Mikrofonni o'chirish" : "Mikrofonni yoqish"}
             >
-              {isListening ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5 text-white/80" />}
+              {isListening ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4 text-white/80" />}
             </button>
 
             <button
               type="button"
               onClick={() => setIsMinimized(false)}
-              className="flex items-center gap-2 pl-1 pr-3 text-left cursor-pointer group"
+              className="flex items-center gap-2 pr-2 text-left cursor-pointer group"
             >
-              <div className="max-w-[140px] sm:max-w-[180px] truncate">
-                <div className="text-[10px] text-blue-300 font-bold uppercase tracking-wider flex items-center gap-1">
-                  <span>{currentClass ? `${currentClass.name} sinfi` : 'Sinf'}</span>
-                  {isSpeaking && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />}
+              <div className="max-w-[130px] truncate">
+                <div className="text-[10px] text-amber-300 font-bold uppercase truncate">
+                  {currentClass ? `${currentClass.name} sinfi` : 'Sinf'}
                 </div>
                 <div className="text-xs font-semibold text-slate-100 truncate">
-                  {activeStudent ? activeStudent.fullName : "O'quvchi tayyor"}
+                  {activeStudent ? activeStudent.fullName : "Tayyor"}
                 </div>
               </div>
-              <Maximize2 className="w-4 h-4 text-slate-400 group-hover:text-white transition-colors" />
+              <Maximize2 className="w-3.5 h-3.5 text-slate-400 group-hover:text-white transition-colors" />
             </button>
           </div>
         ) : (
-          /* EXPANDED EXECUTIVE HUD */
-          <div className="w-[340px] sm:w-[380px] bg-slate-900/95 text-white rounded-3xl shadow-2xl border border-white/15 backdrop-blur-2xl overflow-hidden transition-all animate-fade-in ring-1 ring-black/40">
-            {/* Header: Class Badge & Controls */}
-            <div className="p-3.5 sm:p-4 bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border-b border-white/10 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-all ${
-                  isListening 
-                    ? 'bg-gradient-to-br from-rose-500 to-red-600 text-white shadow-lg shadow-rose-500/40 animate-pulse' 
-                    : 'bg-gradient-to-br from-blue-600 to-indigo-600 text-white shadow-md'
-                }`}>
-                  <Mic className="w-4 h-4" />
-                </div>
+          /* EXPANDED COMPACT DRAGGABLE HUD */
+          <div className="w-[310px] sm:w-[330px] bg-slate-900/95 text-white rounded-2xl shadow-2xl border border-white/20 backdrop-blur-2xl overflow-hidden ring-1 ring-black/50">
+            {/* Header: Draggable Grip Handle */}
+            <div 
+              onMouseDown={handleMouseDown}
+              className="p-2.5 bg-gradient-to-r from-slate-950 via-indigo-950 to-slate-950 border-b border-white/10 flex items-center justify-between cursor-grab active:cursor-grabbing"
+              title="Panelni ekranning xohlagan joyiga surishingiz mumkin"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <GripHorizontal className="w-4 h-4 text-slate-400" />
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5">
-                    <span className="font-extrabold text-xs sm:text-sm tracking-tight text-white block truncate">
+                    <span className="font-extrabold text-xs text-white truncate">
                       Ovozli Yordamchi
                     </span>
-                    <span className="px-1.5 py-0.2 rounded-full text-[9px] font-bold bg-blue-500/20 text-blue-300 border border-blue-400/30">
-                      AI Studio
+                    <span className="px-1.5 py-0.2 rounded-full text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                      Oliy hazrat
                     </span>
                   </div>
-                  <div className="text-[11px] text-slate-300 truncate flex items-center gap-1">
-                    <span className="text-amber-400">🌊 Suyuq shisha:</span>
-                    <span className="font-bold text-white">{currentClass ? `${currentClass.name} sinfi` : 'Tanlanmadi'}</span>
+                  <div className="text-[10px] text-blue-300 truncate">
+                    🌊 {currentClass ? `${currentClass.name} sinfi` : 'Sinf tanlanmadi'}
                   </div>
                 </div>
               </div>
 
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1" onMouseDown={(e) => e.stopPropagation()}>
                 <button
                   type="button"
                   onClick={() => setIsSettingsOpen(!isSettingsOpen)}
-                  className={`p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer ${
-                    isSettingsOpen ? 'bg-white/15 text-white' : ''
+                  className={`p-1 rounded-lg text-slate-400 hover:text-white transition-colors cursor-pointer ${
+                    isSettingsOpen ? 'bg-white/20 text-white' : ''
                   }`}
                   title="Sozlamalar"
                 >
-                  <Settings className="w-4 h-4" />
+                  <Settings className="w-3.5 h-3.5" />
                 </button>
                 <button
                   type="button"
                   onClick={() => setIsMinimized(true)}
-                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                  className="p-1 rounded-lg text-slate-400 hover:text-white transition-colors cursor-pointer"
                   title="Kichraytirish"
                 >
-                  <Minimize2 className="w-4 h-4" />
+                  <Minimize2 className="w-3.5 h-3.5" />
                 </button>
               </div>
             </div>
 
             {/* SETTINGS SUB-DRAWER */}
             {isSettingsOpen && (
-              <div className="p-3.5 bg-slate-950/90 border-b border-white/10 space-y-3 text-xs animate-fade-in">
+              <div className="p-3 bg-slate-950/95 border-b border-white/10 space-y-2 text-xs">
                 <div className="flex items-center justify-between">
-                  <span className="font-bold text-slate-200">Kalit so'z (Wake Word):</span>
+                  <span className="font-bold text-slate-200">Kalit so'z:</span>
                   <span className="text-[10px] text-blue-400 font-mono">"{settings.wakeWord}"</span>
                 </div>
-
-                {/* Quick preset buttons */}
-                <div className="flex flex-wrap gap-1.5">
-                  {['keyingisi', 'sertifikat', 'nusxa', 'siri', 'bixby', 'yordamchi'].map(w => (
+                <div className="flex flex-wrap gap-1">
+                  {['keyingisi', 'sertifikat', 'nusxa', 'siri', 'yordamchi'].map(w => (
                     <button
                       key={w}
                       type="button"
                       onClick={() => {
-                        setCustomWakeWord(w);
-                        handleUpdateWakeWord(w);
+                        const newS = { ...settings, wakeWord: w };
+                        setSettings(newS);
+                        saveVoiceAssistantSettings(newS);
+                        showToast(`Kalit so'z: "${w}"`, 'success');
                       }}
-                      className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
+                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer ${
                         settings.wakeWord === w
-                          ? 'bg-blue-600 text-white font-bold ring-1 ring-blue-400 shadow-sm'
+                          ? 'bg-blue-600 text-white font-bold'
                           : 'bg-white/5 hover:bg-white/15 text-slate-300'
                       }`}
                     >
@@ -515,34 +575,12 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
                   ))}
                 </div>
 
-                {/* Custom Wake Word input */}
-                <div className="flex items-center gap-1.5 pt-1">
-                  <input
-                    type="text"
-                    value={customWakeWord}
-                    onChange={(e) => setCustomWakeWord(e.target.value)}
-                    placeholder="Boshqa so'z yozing..."
-                    className="flex-1 px-2.5 py-1.5 bg-white/5 border border-white/15 rounded-xl text-white text-xs placeholder:text-slate-500 focus:outline-none focus:border-blue-500 font-mono"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => handleUpdateWakeWord(customWakeWord)}
-                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl cursor-pointer text-xs"
-                  >
-                    Saqlash
-                  </button>
-                </div>
-
-                {/* Voice info & test */}
-                <div className="pt-2 border-t border-white/10 flex items-center justify-between text-[11px] text-slate-400">
-                  <div className="flex items-center gap-1.5">
-                    <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Microsoft Sardor (O'zbekcha erkak ovozi)</span>
-                  </div>
+                <div className="pt-1.5 border-t border-white/10 flex items-center justify-between text-[10px] text-slate-400">
+                  <span className="text-emerald-400 font-medium">Microsoft Sardor (Tabiiy erkak ovozi)</span>
                   <button
                     type="button"
                     onClick={handleTestVoice}
-                    className="text-blue-400 hover:text-blue-300 font-bold hover:underline cursor-pointer"
+                    className="text-blue-400 hover:text-blue-300 font-bold underline cursor-pointer"
                   >
                     Ovozni sinash
                   </button>
@@ -550,136 +588,128 @@ export const VoiceAssistantWidget: React.FC<VoiceAssistantWidgetProps> = ({
               </div>
             )}
 
-            {/* Current Student Card & Live Status */}
-            <div className="p-4 space-y-3.5">
-              {/* Active Student Detail Box */}
+            {/* Student Info Card (NO blue buttons as requested!) */}
+            <div className="p-3.5 space-y-3">
               {activeStudent ? (
-                <div className="p-3.5 rounded-2xl bg-gradient-to-br from-white/10 to-white/5 border border-white/10 space-y-2.5 relative overflow-hidden group">
-                  <div className="flex items-center justify-between text-[11px] text-slate-400">
-                    <span className="flex items-center gap-1 text-blue-300 font-bold uppercase tracking-wider">
-                      <User className="w-3 h-3" />
-                      <span>{uncertifiedStudents.length} tadan {studentPointerIndex + 1}-o'quvchi</span>
+                <div className="p-3 rounded-xl bg-white/5 border border-white/10 space-y-2">
+                  <div className="flex items-center justify-between text-[10px] text-slate-400">
+                    <span className="text-blue-300 font-bold uppercase">
+                      {candidateStudents.length} tadan {studentPointerIndex + 1}-o'quvchi
                     </span>
-                    <span className="text-[10px] px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold">
-                      Sertifikat olmagan
+                    <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 font-semibold text-[10px]">
+                      Kutilmoqda
                     </span>
                   </div>
 
                   {/* Student Full Name */}
-                  <div className="space-y-0.5">
-                    <div className="text-base font-extrabold text-white tracking-tight leading-snug">
-                      {activeStudent.fullName}
-                    </div>
-                    {/* Student Email */}
-                    <div className="text-xs text-blue-200/90 font-mono flex items-center gap-1 truncate">
-                      <Mail className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
-                      <span className="truncate">{activeStudent.assignedEmail || "Pochta biriktirilmagan"}</span>
-                    </div>
+                  <div className="text-sm sm:text-base font-extrabold text-white tracking-tight leading-snug">
+                    {activeStudent.fullName}
                   </div>
 
-                  {/* Action Badges: Quick Copy Name & Quick Copy Email */}
-                  <div className="grid grid-cols-2 gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => executeCopyStudent(activeStudent, false, 'name')}
-                      className="py-2 px-2.5 rounded-xl bg-blue-600/80 hover:bg-blue-600 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-sm shadow-blue-600/30"
-                      title="Ism va familiyani nusxalash"
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                      <span>Ismni nusxalash</span>
-                    </button>
+                  {/* Student Email */}
+                  <div className="text-[11px] text-blue-200/90 font-mono flex items-center gap-1 truncate">
+                    <Mail className="w-3 h-3 text-blue-400 flex-shrink-0" />
+                    <span className="truncate">{activeStudent.assignedEmail || "Pochta biriktirilmagan"}</span>
+                  </div>
 
-                    <button
-                      type="button"
-                      onClick={handleCopyEmail}
-                      className="py-2 px-2.5 rounded-xl bg-indigo-600/80 hover:bg-indigo-600 active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-sm shadow-indigo-600/30"
-                      title="Elektron pochtani nusxalash"
-                    >
-                      <Mail className="w-3.5 h-3.5" />
-                      <span>Email nusxalash</span>
-                    </button>
+                  {/* Sequential Copy Progress Bar (1. Ism -> 2. Pochta) */}
+                  <div className="pt-1 border-t border-white/10 flex items-center justify-between text-[10px]">
+                    <div className="flex items-center gap-1.5">
+                      <span className={`px-1.5 py-0.5 rounded font-bold ${
+                        copyStep === 'name_copied' || copyStep === 'email_copied'
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                          : 'bg-white/10 text-slate-400'
+                      }`}>
+                        1. Ism
+                      </span>
+                      <span className="text-slate-500">➔</span>
+                      <span className={`px-1.5 py-0.5 rounded font-bold ${
+                        copyStep === 'email_copied'
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                          : autoEmailCountdown !== null
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse'
+                          : 'bg-white/10 text-slate-400'
+                      }`}>
+                        2. Pochta {autoEmailCountdown !== null ? `(${autoEmailCountdown}s)` : ''}
+                      </span>
+                    </div>
+
+                    {copyStep === 'email_copied' && (
+                      <span className="text-emerald-400 font-semibold flex items-center gap-0.5">
+                        <Check className="w-3 h-3" />
+                        <span>Ikkalasi tayyor</span>
+                      </span>
+                    )}
                   </div>
                 </div>
               ) : (
-                /* No uncertified students in target class */
-                <div className="p-4 rounded-2xl bg-white/5 border border-white/10 text-center space-y-1.5">
-                  <CheckCircle className="w-8 h-8 text-emerald-400 mx-auto" />
-                  <div className="font-bold text-sm text-slate-100">
-                    {currentClass ? `${currentClass.name} sinfi to'liq tayyor!` : "Sinf tanlanmadi"}
+                /* No students in this category */
+                <div className="p-3 rounded-xl bg-white/5 border border-white/10 text-center space-y-1">
+                  <CheckCircle className="w-6 h-6 text-emerald-400 mx-auto" />
+                  <div className="font-bold text-xs text-slate-100">
+                    Oliy hazrat, barcha o'quvchilarga sertifikat olib bo'ldik!
                   </div>
-                  <p className="text-xs text-slate-400 leading-relaxed">
-                    Ushbu sinfda barcha o'quvchilar sertifikat olgan yoki muammoli holatlar yo'q.
-                  </p>
                 </div>
               )}
 
-              {/* Navigation Controls: Prev, Next, Mark Done */}
-              <div className="flex items-center justify-between gap-2 pt-0.5">
+              {/* Prev & Next Controls (Stays strictly within selected category!) */}
+              <div className="flex items-center justify-between gap-2">
                 <button
                   type="button"
                   onClick={handlePrevStudent}
-                  disabled={uncertifiedStudents.length <= 1}
-                  className="p-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-40 disabled:pointer-events-none text-slate-300 hover:text-white transition-all cursor-pointer"
-                  title="Oldingi o'quvchi"
+                  disabled={candidateStudents.length <= 1}
+                  className="p-2 rounded-xl bg-white/5 hover:bg-white/15 disabled:opacity-30 disabled:pointer-events-none text-slate-300 hover:text-white transition-all cursor-pointer"
+                  title="Oldingi o'quvchi (faqat tanlangan toifadan)"
                 >
                   <ChevronLeft className="w-4 h-4" />
                 </button>
 
-                {/* Primary Voice Action Button: Say wake word or click */}
+                {/* Primary Voice Action Button */}
                 <button
                   type="button"
-                  onClick={() => handleNextStudent()}
-                  className="flex-1 py-2.5 px-3 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 hover:from-blue-500 hover:to-indigo-500 active:scale-[0.98] text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow-lg shadow-blue-600/30 transition-all cursor-pointer group"
+                  onClick={handleNextStudent}
+                  className="flex-1 py-2 px-3 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 hover:from-blue-500 hover:to-indigo-500 active:scale-[0.98] text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-md shadow-blue-600/30 transition-all cursor-pointer group"
                 >
-                  <Sparkles className="w-4 h-4 text-amber-300 group-hover:rotate-12 transition-transform" />
+                  <Sparkles className="w-3.5 h-3.5 text-amber-300 group-hover:rotate-12 transition-transform" />
                   <span>Keyingi o'quvchi ({settings.wakeWord})</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={handleNextStudent}
-                  disabled={uncertifiedStudents.length <= 1}
-                  className="p-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-40 disabled:pointer-events-none text-slate-300 hover:text-white transition-all cursor-pointer"
-                  title="Keyingi o'quvchi"
+                  disabled={candidateStudents.length <= 1}
+                  className="p-2 rounded-xl bg-white/5 hover:bg-white/15 disabled:opacity-30 disabled:pointer-events-none text-slate-300 hover:text-white transition-all cursor-pointer"
+                  title="Keyingi o'quvchi (faqat tanlangan toifadan)"
                 >
                   <ChevronRight className="w-4 h-4" />
                 </button>
               </div>
 
-              {/* Microphone Status Bar & Wave Pulse */}
-              <div className="pt-2 border-t border-white/10 flex items-center justify-between gap-2 text-xs">
-                {/* Live Mic Toggle Switch */}
+              {/* Microphone & Status Bar */}
+              <div className="pt-2 border-t border-white/10 flex items-center justify-between text-xs">
                 <button
                   type="button"
                   onClick={toggleListening}
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-full font-bold text-xs transition-all cursor-pointer ${
+                  className={`flex items-center gap-2 px-2.5 py-1 rounded-full font-bold text-[11px] transition-all cursor-pointer ${
                     isListening
-                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30'
+                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
                       : 'bg-white/5 text-slate-300 border border-white/10 hover:bg-white/10'
                   }`}
                 >
-                  <div className={`w-2.5 h-2.5 rounded-full ${isListening ? 'bg-rose-500 animate-ping' : 'bg-slate-500'}`} />
-                  <span>{isListening ? 'Tinglamoqda...' : 'Mikrofon o\'chiq'}</span>
+                  <div className={`w-2 h-2 rounded-full ${isListening ? 'bg-rose-500 animate-ping' : 'bg-slate-500'}`} />
+                  <span>{isListening ? 'Eshitmoqda...' : 'Mikrofon o\'chiq'}</span>
                 </button>
 
-                {/* Speaking wave / Hotkey hint */}
-                <div className="text-[11px] text-slate-400 font-mono flex items-center gap-1.5">
-                  {isSpeaking ? (
-                    <span className="text-emerald-400 font-bold flex items-center gap-1 animate-pulse">
-                      <Volume2 className="w-3.5 h-3.5" />
-                      <span>Gapirmoqda...</span>
-                    </span>
-                  ) : (
-                    <span className="text-slate-400 hover:text-slate-200" title="Tezkor tugma">
-                      Alt + C
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Sub-text guide */}
-              <div className="text-[10px] text-slate-400 text-center leading-relaxed">
-                🎙️ Mikrofon yoniqligida <span className="text-blue-300 font-bold">"{settings.wakeWord}"</span> deb aytsangiz, avtomatik o'quvchi ismi nusxalanadi va tabiiy o'zbekcha ovozda xabar beradi.
+                {isSpeaking ? (
+                  <span className="text-emerald-400 font-bold text-[11px] flex items-center gap-1 animate-pulse">
+                    <Volume2 className="w-3.5 h-3.5" />
+                    <span>Gapirmoqda...</span>
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-slate-400">
+                    Kalit so'z: <strong className="text-white">"{settings.wakeWord}"</strong>
+                  </span>
+                )}
               </div>
             </div>
           </div>

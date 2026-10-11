@@ -1,21 +1,19 @@
-// 100% Free, Tokenless, Natural Uzbek Male Voice & Speech Recognition Service
+// 100% Free, Tokenless, Natural Uzbek Male Voice (Microsoft Edge Neural: uz-UZ-SardorNeural)
 
 export interface VoiceAssistantSettings {
   wakeWord: string;
-  autoCopyEmailAfterName: boolean;
-  copyMode: 'name_first' | 'email_first' | 'both';
+  autoCopyEmailSeconds: number; // e.g. 3.5 seconds
   soundFeedback: boolean;
 }
 
-const SETTINGS_KEY = 'b1m_voice_assistant_settings_v1';
+const SETTINGS_KEY = 'b1m_voice_assistant_settings_v2';
 const DEFAULT_SETTINGS: VoiceAssistantSettings = {
   wakeWord: 'keyingisi',
-  autoCopyEmailAfterName: false,
-  copyMode: 'name_first',
+  autoCopyEmailSeconds: 3.5,
   soundFeedback: true,
 };
 
-// Clipboard fallback to ensure 100% copy reliability in speech callbacks
+// Reliable Clipboard helper
 export async function copyToClipboard(text: string): Promise<boolean> {
   if (!text) return false;
   try {
@@ -23,9 +21,7 @@ export async function copyToClipboard(text: string): Promise<boolean> {
       await navigator.clipboard.writeText(text);
       return true;
     }
-  } catch (err) {
-    // Fall back to execCommand
-  }
+  } catch (err) {}
 
   try {
     const textarea = document.createElement('textarea');
@@ -45,14 +41,33 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
-// Current active Audio element
-let currentAudio: HTMLAudioElement | null = null;
+// Persistent HTML5 Audio for bypassing browser async autoplay restrictions
+let persistentAudio: HTMLAudioElement | null = null;
+let isAudioUnlocked = false;
 const audioCache = new Map<string, string>();
 
 /**
+ * Call on any user gesture (e.g. click microphone button) to unlock audio playback
+ */
+export function unlockAudioPlayback(): void {
+  if (isAudioUnlocked && persistentAudio) return;
+  try {
+    if (!persistentAudio) {
+      persistentAudio = new Audio();
+    }
+    // Silent WAV base64
+    persistentAudio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+    persistentAudio.play().then(() => {
+      persistentAudio?.pause();
+      isAudioUnlocked = true;
+    }).catch(() => {});
+  } catch {}
+}
+
+/**
  * Speaks Uzbek text using Microsoft Edge Neural Uzbek Male voice (uz-UZ-SardorNeural)
- * 100% natural, free, unlimited, tokenless.
- * Falls back seamlessly to browser SpeechSynthesis if offline.
+ * 100% natural human male voice, polite and expressive.
+ * Zero tokens, zero robotic voices!
  */
 export async function speakUzbekMale(
   text: string,
@@ -64,23 +79,21 @@ export async function speakUzbekMale(
     return;
   }
 
-  // Stop any currently playing audio
-  if (currentAudio) {
-    try {
-      currentAudio.pause();
-      currentAudio.currentTime = 0;
-    } catch {}
-    currentAudio = null;
+  // Ensure persistent audio instance
+  if (!persistentAudio) {
+    persistentAudio = new Audio();
   }
-  if (window.speechSynthesis) {
-    window.speechSynthesis.cancel();
-  }
+
+  try {
+    persistentAudio.pause();
+    persistentAudio.currentTime = 0;
+  } catch {}
 
   const cleanText = text.trim();
 
-  // Try Server Edge TTS endpoint first (100% Natural Male Voice: uz-UZ-SardorNeural)
   try {
     onStart?.();
+
     let audioUrl = audioCache.get(cleanText);
 
     if (!audioUrl) {
@@ -91,7 +104,7 @@ export async function speakUzbekMale(
       });
 
       if (!response.ok) {
-        throw new Error(`TTS server responded with status ${response.status}`);
+        throw new Error(`TTS server error ${response.status}`);
       }
 
       const blob = await response.blob();
@@ -99,58 +112,44 @@ export async function speakUzbekMale(
       audioCache.set(cleanText, audioUrl);
     }
 
-    const audio = new Audio(audioUrl);
-    currentAudio = audio;
+    persistentAudio.src = audioUrl;
 
-    await new Promise<void>((resolve, reject) => {
-      audio.onended = () => {
-        currentAudio = null;
+    await new Promise<void>((resolve) => {
+      if (!persistentAudio) {
+        onEnd?.();
+        resolve();
+        return;
+      }
+
+      persistentAudio.onended = () => {
         onEnd?.();
         resolve();
       };
-      audio.onerror = (e) => {
-        currentAudio = null;
-        reject(e);
+
+      persistentAudio.onerror = (e) => {
+        console.error('TTS playback error:', e);
+        onEnd?.();
+        resolve();
       };
-      audio.play().catch(reject);
+
+      persistentAudio.play().catch((playErr) => {
+        console.error('TTS play blocked:', playErr);
+        onEnd?.();
+        resolve();
+      });
     });
-    return;
-  } catch (edgeErr) {
-    console.warn('Edge TTS server fallback to browser speech synthesis:', edgeErr);
-  }
-
-  // Browser SpeechSynthesis Fallback
-  try {
-    if ('speechSynthesis' in window) {
-      onStart?.();
-      const utterance = new SpeechSynthesisUtterance(cleanText);
-      utterance.lang = 'uz-UZ';
-      utterance.rate = 1.0;
-      utterance.pitch = 0.85; // Lower pitch for masculine tone
-
-      // Try finding an Uzbek or Russian voice with low pitch
-      const voices = window.speechSynthesis.getVoices();
-      const uzVoice = voices.find(v => v.lang.startsWith('uz')) ||
-                      voices.find(v => v.name.toLowerCase().includes('uzbek')) ||
-                      voices.find(v => v.name.toLowerCase().includes('male')) ||
-                      voices.find(v => v.lang.startsWith('ru'));
-      if (uzVoice) {
-        utterance.voice = uzVoice;
-      }
-
-      utterance.onend = () => {
-        onEnd?.();
-      };
-      utterance.onerror = () => {
-        onEnd?.();
-      };
-
-      window.speechSynthesis.speak(utterance);
-    } else {
-      onEnd?.();
-    }
-  } catch {
+  } catch (err) {
+    console.error('Edge TTS request failed:', err);
     onEnd?.();
+  }
+}
+
+export function stopSpeaking(): void {
+  if (persistentAudio) {
+    try {
+      persistentAudio.pause();
+      persistentAudio.currentTime = 0;
+    } catch {}
   }
 }
 
@@ -164,7 +163,7 @@ export function loadVoiceAssistantSettings(): VoiceAssistantSettings {
   return DEFAULT_SETTINGS;
 }
 
-export function saveVoiceAssistantSettings(settings: VoiceAssistantSettings) {
+export function saveVoiceAssistantSettings(settings: VoiceAssistantSettings): void {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   } catch {}

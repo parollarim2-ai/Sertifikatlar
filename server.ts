@@ -93,7 +93,12 @@ async function startServer() {
       res.setHeader('Cache-Control', 'public, max-age=86400');
       audioStream.pipe(res);
 
+      audioStream.on('end', () => {
+        try { tts.close(); } catch {}
+      });
+
       audioStream.on('error', (err) => {
+        try { tts.close(); } catch {}
         console.error('TTS GET audioStream error:', err);
         if (!res.headersSent) {
           res.status(500).json({ error: 'TTS ovoz hosil qilishda xatolik' });
@@ -123,7 +128,12 @@ async function startServer() {
       res.setHeader('Cache-Control', 'public, max-age=86400');
       audioStream.pipe(res);
 
+      audioStream.on('end', () => {
+        try { tts.close(); } catch {}
+      });
+
       audioStream.on('error', (err) => {
+        try { tts.close(); } catch {}
         console.error('TTS POST audioStream error:', err);
         if (!res.headersSent) {
           res.status(500).json({ error: 'TTS ovoz hosil qilishda xatolik' });

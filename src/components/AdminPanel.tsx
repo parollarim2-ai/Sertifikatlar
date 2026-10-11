@@ -2041,6 +2041,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         classes={classes}
         students={students}
         activeClassId={selectedClassId}
+        selectedStatusFilters={selectedStatusFilters}
         onSelectClass={(cid) => setSelectedClassId(cid)}
         onSaveStudent={onSaveStudent}
       />
