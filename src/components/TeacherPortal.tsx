@@ -38,7 +38,9 @@ import {
   Bell,
   BellRing,
   Info,
-  ArrowLeft
+  ArrowLeft,
+  MessageSquare,
+  ShieldAlert
 } from 'lucide-react';
 
 interface TeacherPortalProps {
@@ -128,6 +130,50 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   // Problem view modal for teachers
   const [viewingProblemStudent, setViewingProblemStudent] = useState<Student | null>(null);
 
+  // External School Access Restriction and Telegram Contact State
+  const [externalAccessAlert, setExternalAccessAlert] = useState<{
+    isOpen: boolean;
+    attemptCount: number;
+    attemptedClass: ClassGroup | null;
+    boundClass: ClassGroup | null;
+  } | null>(null);
+
+  // Load bound class id for this device from localStorage or session
+  const [boundClassId, setBoundClassId] = useState<string>(() => {
+    try {
+      return localStorage.getItem(`teacher_bound_class_${currentDevice.deviceId}`) || '';
+    } catch {
+      return '';
+    }
+  });
+
+  // Load unauthorized attempts count
+  const [unauthorizedAttempts, setUnauthorizedAttempts] = useState<number>(() => {
+    try {
+      return parseInt(localStorage.getItem(`teacher_wrong_attempts_${currentDevice.deviceId}`) || '0', 10);
+    } catch {
+      return 0;
+    }
+  });
+
+  // Check if admin has unlocked this device to allow picking another class once
+  const currentSession = sessions.find(s => s.deviceId === currentDevice.deviceId);
+  const isUnlockedByAdmin = currentSession?.allowClassChangeOnce || 
+    (typeof window !== 'undefined' && localStorage.getItem(`unlock_external_device_${currentDevice.deviceId}`) === 'true');
+
+  useEffect(() => {
+    if (isUnlockedByAdmin) {
+      // If admin unlocked, clear bound class and reset attempts so they can pick again!
+      try {
+        localStorage.removeItem(`teacher_bound_class_${currentDevice.deviceId}`);
+        localStorage.removeItem(`teacher_wrong_attempts_${currentDevice.deviceId}`);
+        localStorage.removeItem(`unlock_external_device_${currentDevice.deviceId}`);
+      } catch {}
+      setBoundClassId('');
+      setUnauthorizedAttempts(0);
+    }
+  }, [isUnlockedByAdmin, currentDevice.deviceId]);
+
   const currentClass = classes.find(c => c.id === selectedClassId);
   const classStudents = currentClass ? students.filter(s => s.classId === currentClass.id) : [];
 
@@ -148,9 +194,11 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         os: currentDevice.os,
         screen: currentDevice.screen,
         lastActiveAt: new Date().toISOString(),
+        boundClassId: boundClassId || (currentClass.isExternalSchool ? currentClass.id : undefined),
+        isExternalTeacher: Boolean(currentClass.isExternalSchool || boundClassId),
       });
     }
-  }, [currentClass?.id, currentDevice.deviceId, currentDevice.deviceName, currentDevice.browser, currentDevice.os, currentDevice.screen]);
+  }, [currentClass?.id, currentClass?.isExternalSchool, boundClassId, currentDevice.deviceId, currentDevice.deviceName, currentDevice.browser, currentDevice.os, currentDevice.screen]);
 
   // Clean up timer on unmount
   useEffect(() => {
@@ -324,6 +372,39 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     }
   };
 
+  const handleSelectClass = (targetClass: ClassGroup) => {
+    // 1. Agar ushbu qurilmada allaqachon boshqa maktab sinfi belgilangan bo'lsa (boundClassId)
+    // va yangi tanlanayotgan sinf o'sha biriktirilgan sinf bo'lmasa:
+    if (boundClassId && boundClassId !== targetClass.id && !isUnlockedByAdmin) {
+      const boundCls = classes.find(c => c.id === boundClassId) || null;
+      const newAttempts = unauthorizedAttempts + 1;
+      setUnauthorizedAttempts(newAttempts);
+      try {
+        localStorage.setItem(`teacher_wrong_attempts_${currentDevice.deviceId}`, newAttempts.toString());
+      } catch {}
+
+      setExternalAccessAlert({
+        isOpen: true,
+        attemptCount: newAttempts,
+        attemptedClass: targetClass,
+        boundClass: boundCls,
+      });
+      return;
+    }
+
+    // 2. Agar tanlanayotgan sinf boshqa maktab bo'lsa (isExternalSchool) va qurilmada hali birikma bo'lmasa:
+    if (targetClass.isExternalSchool) {
+      setBoundClassId(targetClass.id);
+      try {
+        localStorage.setItem(`teacher_bound_class_${currentDevice.deviceId}`, targetClass.id);
+      } catch {}
+    }
+
+    setSelectedClassId(targetClass.id);
+    setIsTeacherPickerOpen(false);
+    setTeacherSearchQuery('');
+  };
+
   // Teacher Picker Modal (Accessible both on landing and in active class dashboard)
   const renderTeacherPickerModal = () => {
     if (!isTeacherPickerOpen) return null;
@@ -381,12 +462,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                   <button
                     key={c.id}
                     type="button"
-                    onClick={() => {
-                      setSelectedClassId(c.id);
-                      setIsTeacherPickerOpen(false);
-                      setTeacherSearchQuery('');
-                    }}
-                    className={`w-full p-3 rounded-xl border flex items-center justify-between text-left transition-all cursor-pointer group ${
+                    onClick={() => handleSelectClass(c)}
+                    className={`w-full p-3 rounded-xl border flex items-center justify-between text-left transition-all cursor-pointer group relative ${
                       isCurrent 
                         ? 'border-blue-500 bg-blue-50/70 ring-1 ring-blue-500' 
                         : 'border-slate-200/80 hover:border-blue-500 hover:bg-blue-50/50'
@@ -401,6 +478,15 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                         {c.name}
                       </div>
                       <div className="min-w-0">
+                        {/* Boshqa maktab qizil yozuvli yorliq */}
+                        {c.isExternalSchool && (
+                          <div className="mb-0.5">
+                            <span className="text-[11px] font-black text-rose-600 tracking-wide uppercase flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse"></span>
+                              {c.schoolName || '27-maktab'}
+                            </span>
+                          </div>
+                        )}
                         <div className="flex items-center gap-2">
                           <span className="font-bold text-slate-900 text-xs sm:text-sm block truncate group-hover:text-blue-700">
                             {c.teacherName}
@@ -451,6 +537,103 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
               className="px-3.5 py-1.5 apple-btn-secondary text-slate-700 rounded-lg font-medium cursor-pointer"
             >
               Yopish
+            </button>
+          </div>
+
+        </div>
+      </div>
+    );
+  };
+
+  // External School Access Restriction Alert Modal (with Telegram contact button)
+  const renderExternalAccessAlertModal = () => {
+    if (!externalAccessAlert || !externalAccessAlert.isOpen) return null;
+
+    const { attemptCount, attemptedClass, boundClass } = externalAccessAlert;
+    const isOverLimit = attemptCount >= 3;
+
+    // Telegram link with pre-filled message
+    // "agarda 3 martadan keyin yana qayta kirishga urinsa, 'agarda xatolik yuzaga kelayotgan bo'lsa, bu sizning sinfingiz ekanligiga amin bo'lsangiz, Akramxon bilan bog'laning' deb aytadi va meni telegramimga yozish uchun havola beradi, yani bitta tugma, shuni bossa meni telegramim ochiladi va tayyor matn ham yoziladi, yani sinf ni o'sha ustozniki ekanligi, va xatolik yuzaga kelgani haqida (matn da qaysi sinf ekanligini ham aniq yozilgan bo'ladi va u qaysi sinf ustozi ekanligi qaysi sinf ga kirmoqchi bo'lib 3 marta xato kirgan bo'lsa shu sinf demak shu ustozniki ekan deb o'ylab manashu sinf deb biladi) yozilgan bo'ladi, ustoz telegramdan shu yuborish tugmasini bossa o'sha xabar meni telegramimga yuboriladi, meni telegram username: @qiziqyabsimi"
+    const targetClassName = attemptedClass ? attemptedClass.name : 'Noma\'lum sinf';
+    const targetTeacherName = attemptedClass ? attemptedClass.teacherName : 'Ustoz';
+    const boundClassName = boundClass ? `${boundClass.name} (${boundClass.schoolName || 'Boshqa maktab'})` : 'Boshqa maktab';
+
+    const telegramMessage = encodeURIComponent(
+      `Assalomu alaykum Akramxon! Men ${targetTeacherName}man. Saytda ${targetClassName} sinfiga kirmoqchi bo'lganimda boshqa maktab cheklovi bo'yicha xatolik yuzaga keldi (3 martadan ortiq urinildi). Aslida ${targetClassName} sinfi aynan mening sinfim hisoblanadi. Iltimos, ushbu sinfni tanlashim uchun tizimda ruxsat berib yuborsangiz!`
+    );
+    const telegramUrl = `https://t.me/qiziqyabsimi?text=${telegramMessage}`;
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-fade-in">
+        <div className="relative w-full max-w-md bg-white border border-rose-300 rounded-3xl shadow-2xl p-6 text-center space-y-4 animate-scale-up">
+          
+          <div className="w-16 h-16 rounded-2xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center mx-auto shadow-sm">
+            <ShieldAlert className="w-9 h-9 text-rose-600 animate-pulse" />
+          </div>
+
+          <div className="space-y-1.5">
+            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase bg-rose-100 text-rose-800 border border-rose-300">
+              Kirish Cheklovi • {attemptCount}-urinish
+            </span>
+            <h3 className="text-lg font-bold text-slate-900">
+              Bu sizning maktabingizdagi sinf emas!
+            </h3>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Sizning qurilmangiz <b>{boundClassName}</b> sinfiga biriktirilgan. 
+              Siz boshqa maktab sinflarini va maktabimizning ichki sinflarini ko'ra olmaysiz.
+            </p>
+          </div>
+
+          {attemptedClass && (
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs space-y-1 text-left font-mono">
+              <div className="flex justify-between text-slate-500">
+                <span>Kirilmoqchi bo'lingan:</span>
+                <span className="font-bold text-slate-900 font-sans">{attemptedClass.name} sinfi</span>
+              </div>
+              <div className="flex justify-between text-slate-500">
+                <span>Sinf rahbari:</span>
+                <span className="font-semibold text-slate-800 font-sans">{attemptedClass.teacherName}</span>
+              </div>
+              <div className="flex justify-between text-slate-500">
+                <span>Qayta urinishlar:</span>
+                <span className={`font-bold ${isOverLimit ? 'text-rose-600' : 'text-amber-600'}`}>
+                  {attemptCount} / 3 marta
+                </span>
+              </div>
+            </div>
+          )}
+
+          {isOverLimit ? (
+            <div className="p-4 bg-rose-50 border border-rose-300 rounded-2xl text-left space-y-3">
+              <p className="text-xs font-semibold text-rose-950 leading-relaxed">
+                Agarda xatolik yuzaga kelayotgan bo'lsa, bu sizning sinfingiz ekanligiga amin bo'lsangiz, Akramxon bilan bog'laning.
+              </p>
+              <a
+                href={telegramUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full py-3 px-4 bg-gradient-to-r from-blue-600 to-sky-600 hover:from-blue-700 hover:to-sky-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-md transition-all active:scale-95 cursor-pointer"
+              >
+                <MessageSquare className="w-4 h-4" />
+                <span>Akramxonga Telegramdan yozish (@qiziqyabsimi)</span>
+              </a>
+              <p className="text-[10px] text-slate-500 text-center">
+                Tugmani bossangiz, Telegramda tayyor matn ochiladi va faqat yuborishni bosasiz.
+              </p>
+            </div>
+          ) : (
+            <p className="text-[11px] text-amber-700 font-medium bg-amber-50 p-2.5 rounded-xl border border-amber-200">
+              Diqqat: 3 martadan keyin noto'g'ri urinish amalga oshirilsa, admin bilan bog'lanish uchun havola paydo bo'ladi.
+            </p>
+          )}
+
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => setExternalAccessAlert(null)}
+              className="w-full py-2.5 apple-btn-secondary text-slate-800 text-xs font-bold rounded-xl transition-all cursor-pointer"
+            >
+              Tushundim, yopish
             </button>
           </div>
 
@@ -543,6 +726,9 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         {/* MODAL: TEACHER PICKER POPUP */}
         {renderTeacherPickerModal()}
 
+        {/* MODAL: EXTERNAL ACCESS RESTRICTION ALERT POPUP */}
+        {renderExternalAccessAlertModal()}
+
       </div>
     );
   }
@@ -567,6 +753,14 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
               {currentClass.name}
             </div>
             <div className="min-w-0">
+              {currentClass.isExternalSchool && (
+                <div className="mb-1">
+                  <span className="text-xs font-black text-rose-600 tracking-wide uppercase inline-flex items-center gap-1.5 bg-rose-50 px-2.5 py-0.5 rounded-md border border-rose-200">
+                    <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
+                    {currentClass.schoolName || '27-maktab'}
+                  </span>
+                </div>
+              )}
               <span className="text-xs text-blue-700 font-bold block uppercase tracking-wider">
                 {currentClass.name} sinf rahbari
               </span>
@@ -1202,6 +1396,9 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
 
       {/* Teacher Picker Modal (When switching class from dashboard) */}
       {renderTeacherPickerModal()}
+
+      {/* External School Access Restriction Alert Modal */}
+      {renderExternalAccessAlertModal()}
 
       {/* Voice Assistant Widget */}
       <VoiceAssistantWidget

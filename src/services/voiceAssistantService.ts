@@ -1,4 +1,4 @@
-// 100% Free, Tokenless, Natural Uzbek Voice Service with Instant Pre-caching
+// 100% Free, Tokenless, Natural Uzbek Voice Service with Instant Pre-caching and Resilient Fallback
 
 export type UzbekVoiceId = 'uz-UZ-SardorNeural' | 'uz-UZ-MadinaNeural';
 
@@ -23,24 +23,52 @@ const DEFAULT_SETTINGS: VoiceAssistantSettings = {
 const audioBlobCache = new Map<string, string>();
 
 /**
+ * Fetch and cache TTS audio blob in browser memory
+ */
+export async function getOrFetchAudioBlob(text: string, voice: UzbekVoiceId = 'uz-UZ-SardorNeural'): Promise<string> {
+  const clean = text.trim();
+  if (!clean) return '';
+  const cacheKey = `${voice}:::${clean}`;
+  if (audioBlobCache.has(cacheKey)) {
+    return audioBlobCache.get(cacheKey)!;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const resp = await fetch(`/api/tts/speak?text=${encodeURIComponent(clean)}&voice=${encodeURIComponent(voice)}`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!resp.ok) {
+      throw new Error(`TTS server HTTP ${resp.status}`);
+    }
+
+    const blob = await resp.blob();
+    if (blob.size < 200) {
+      throw new Error('TTS audio data too small');
+    }
+
+    const objectUrl = URL.createObjectURL(blob);
+    audioBlobCache.set(cacheKey, objectUrl);
+    return objectUrl;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    throw err;
+  }
+}
+
+/**
  * Pre-fetches and caches TTS audio in browser memory
  * When called later, playback starts in < 10 milliseconds!
  */
 export async function prefetchUzbekAudio(text: string, voice: UzbekVoiceId = 'uz-UZ-SardorNeural'): Promise<void> {
-  const clean = text.trim();
-  if (!clean) return;
-  const cacheKey = `${voice}:::${clean}`;
-  if (audioBlobCache.has(cacheKey)) return;
-
   try {
-    const resp = await fetch(`/api/tts/speak?text=${encodeURIComponent(clean)}&voice=${encodeURIComponent(voice)}`);
-    if (resp.ok) {
-      const blob = await resp.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      audioBlobCache.set(cacheKey, objectUrl);
-    }
-  } catch (err) {
-    // Ignore prefetch errors
+    await getOrFetchAudioBlob(text, voice);
+  } catch {
+    // Ignore prefetch errors in background
   }
 }
 
@@ -52,7 +80,7 @@ export async function copyToClipboard(text: string): Promise<boolean> {
       await navigator.clipboard.writeText(text);
       return true;
     }
-  } catch (err) {}
+  } catch {}
 
   try {
     const textarea = document.createElement('textarea');
@@ -87,25 +115,54 @@ export async function readFromClipboard(): Promise<string> {
   return '';
 }
 
-// Persistent HTML5 Audio for bypassing browser async autoplay restrictions
-let persistentAudio: HTMLAudioElement | null = null;
+// Web Speech API fallback in case server TTS is unreachable
+function speakWithBrowserSynthesis(text: string, onStart?: () => void, onEnd?: () => void): void {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+    onEnd?.();
+    return;
+  }
+  try {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'uz-UZ';
+    utterance.rate = 1.0;
+    utterance.pitch = 0.95;
+
+    // Look for Uzbek or Turkic or standard male voice
+    const voices = window.speechSynthesis.getVoices();
+    const uzVoice = voices.find(v => v.lang.toLowerCase().includes('uz')) ||
+                    voices.find(v => v.lang.toLowerCase().includes('tr') || v.name.toLowerCase().includes('male'));
+    if (uzVoice) {
+      utterance.voice = uzVoice;
+    }
+
+    utterance.onstart = () => onStart?.();
+    utterance.onend = () => onEnd?.();
+    utterance.onerror = () => onEnd?.();
+
+    window.speechSynthesis.speak(utterance);
+  } catch {
+    onEnd?.();
+  }
+}
+
+let activeAudioElement: HTMLAudioElement | null = null;
 let isAudioUnlocked = false;
 
 /**
  * Call on any user gesture (e.g. click microphone button) to unlock audio playback
  */
 export function unlockAudioPlayback(): void {
-  if (isAudioUnlocked && persistentAudio) return;
+  if (isAudioUnlocked) return;
   try {
-    if (!persistentAudio) {
-      persistentAudio = new Audio();
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (AudioContextClass) {
+      const ctx = new AudioContextClass();
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
     }
-    // Silent tiny WAV
-    persistentAudio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
-    persistentAudio.play().then(() => {
-      persistentAudio?.pause();
-      isAudioUnlocked = true;
-    }).catch(() => {});
+    isAudioUnlocked = true;
   } catch {}
 }
 
@@ -119,68 +176,86 @@ export async function speakUzbekVoice(
   onStart?: () => void,
   onEnd?: () => void
 ): Promise<void> {
-  if (!text || !text.trim()) {
+  const cleanText = text?.trim();
+  if (!cleanText) {
     onEnd?.();
     return;
   }
 
-  if (!persistentAudio) {
-    persistentAudio = new Audio();
-  }
-
-  try {
-    persistentAudio.pause();
-    persistentAudio.currentTime = 0;
-  } catch {}
-
-  const cleanText = text.trim();
-  const cacheKey = `${voice}:::${cleanText}`;
+  // Cancel any currently running speech or audio
+  stopSpeaking();
 
   try {
     onStart?.();
 
-    // Use pre-cached audio if available (instant 0ms play!), or stream directly
-    const cachedUrl = audioBlobCache.get(cacheKey);
-    const audioUrl = cachedUrl || `/api/tts/speak?text=${encodeURIComponent(cleanText)}&voice=${encodeURIComponent(voice)}`;
+    // Fetch or lookup pre-cached Blob URL
+    let audioUrl = '';
+    try {
+      audioUrl = await getOrFetchAudioBlob(cleanText, voice);
+    } catch {
+      // If server TTS fetch failed, seamlessly fallback to browser synthesis
+      speakWithBrowserSynthesis(cleanText, onStart, onEnd);
+      return;
+    }
 
-    persistentAudio.src = audioUrl;
+    const audio = new Audio();
+    activeAudioElement = audio;
 
     await new Promise<void>((resolve) => {
-      if (!persistentAudio) {
-        onEnd?.();
-        resolve();
-        return;
-      }
-
-      persistentAudio.onended = () => {
-        onEnd?.();
-        resolve();
+      let isDone = false;
+      const finish = () => {
+        if (!isDone) {
+          isDone = true;
+          if (activeAudioElement === audio) {
+            activeAudioElement = null;
+          }
+          onEnd?.();
+          resolve();
+        }
       };
 
-      persistentAudio.onerror = (e) => {
-        console.error('TTS playback error:', e);
-        onEnd?.();
-        resolve();
+      audio.onended = () => {
+        finish();
       };
 
-      persistentAudio.play().catch((playErr) => {
-        console.warn('TTS play promise warning:', playErr);
-        onEnd?.();
-        resolve();
+      audio.onerror = () => {
+        // If aborted intentionally by another sound, do nothing
+        if (audio.error && audio.error.code === 1) {
+          finish();
+          return;
+        }
+        // If audio format failed to decode, fallback gracefully without throwing console error
+        speakWithBrowserSynthesis(cleanText, onStart, finish);
+      };
+
+      audio.src = audioUrl;
+      audio.play().catch((playErr: any) => {
+        // Autoplay policy or abort
+        if (playErr.name !== 'AbortError') {
+          speakWithBrowserSynthesis(cleanText, onStart, finish);
+        } else {
+          finish();
+        }
       });
     });
-  } catch (err) {
-    console.error('Edge TTS request failed:', err);
-    onEnd?.();
+  } catch {
+    speakWithBrowserSynthesis(cleanText, onStart, onEnd);
   }
 }
 
 export function stopSpeaking(): void {
-  if (persistentAudio) {
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
     try {
-      persistentAudio.pause();
-      persistentAudio.currentTime = 0;
+      window.speechSynthesis.cancel();
     } catch {}
+  }
+  if (activeAudioElement) {
+    try {
+      activeAudioElement.pause();
+      activeAudioElement.currentTime = 0;
+      activeAudioElement.src = '';
+    } catch {}
+    activeAudioElement = null;
   }
 }
 

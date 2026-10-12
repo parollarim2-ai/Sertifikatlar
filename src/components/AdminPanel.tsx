@@ -10,11 +10,13 @@ import { NavigationLiquidGlassTabs } from './NavigationLiquidGlassTabs';
 import { AnimatedGlassSearchInput } from './AnimatedGlassSearchInput';
 import { UnifiedGlassProvider } from '../context/UnifiedGlassContext';
 import { VoiceAssistantWidget } from './VoiceAssistantWidget';
+import { MetrikaAiScannerModal } from './MetrikaAiScannerModal';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
 import { getStoredCertifyLogs } from '../utils/operatorSpeedTracker';
 import { 
   Users, 
   Award, 
+  Camera,
   AlertTriangle, 
   Plus, 
   Mail, 
@@ -103,6 +105,8 @@ interface AdminPanelProps {
   onAddGeneratedEmails?: (newEmails: EmailAccount[]) => Promise<void> | void;
   onToggleStudentPayment?: (studentId: string, currentPaidState: boolean) => void;
   onSaveStudent?: (student: Student) => Promise<void> | void;
+  onSaveClassAndStudents?: (targetClass: ClassGroup, newStudents: Student[], updatedEmailPool: EmailAccount[]) => void;
+  onUnlockExternalTeacher?: (deviceId: string) => void;
 }
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({
@@ -136,11 +140,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   onAddGeneratedEmails,
   onToggleStudentPayment,
   onSaveStudent,
+  onSaveClassAndStudents,
+  onUnlockExternalTeacher,
 }) => {
   const [activeTab, setActiveTab] = useState<'classes' | 'teachers' | 'finance' | 'emails' | 'sessions' | 'telegram'>('classes');
   const [selectedClassId, setSelectedClassId] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [isGmailGeneratorOpen, setIsGmailGeneratorOpen] = useState(false);
+  const [isMetrikaScannerOpen, setIsMetrikaScannerOpen] = useState(false);
   const [isClassBatchModalOpen, setIsClassBatchModalOpen] = useState(false);
   const [batchTargetClass, setBatchTargetClass] = useState<ClassGroup | null>(null);
 
@@ -641,6 +648,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             </div>
 
             <button
+              onClick={() => setIsMetrikaScannerOpen(true)}
+              className="px-3.5 py-2.5 bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-700 hover:to-indigo-800 text-white text-xs font-bold rounded-xl shadow-xs flex items-center gap-2 transition-all cursor-pointer ring-1 ring-purple-400/30"
+              title="Metrika va tug'ilganlik guvohnomalari suratlaridan avtomatik sinf tuzish (Gemini Flash Vision)"
+            >
+              <Camera className="w-4 h-4 flex-shrink-0" />
+              <span>📸 Metrikalarni skanerlash (AI)</span>
+            </button>
+
+            <button
               onClick={() => onOpenBulkUploadModal()}
               className="px-3.5 py-2.5 bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold rounded-xl shadow-xs flex items-center gap-2 transition-colors cursor-pointer"
             >
@@ -808,7 +824,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   <option value="only_teachers">👨‍🏫 Faqat Ustozlar ({totalTeachers})</option>
                   {classes.map(c => (
                     <option key={c.id} value={c.id}>
-                      {c.name} sinfi ({c.teacherName})
+                      {c.isExternalSchool ? `[bm] ` : ''}{c.name} sinfi ({c.teacherName}){c.isExternalSchool && c.schoolName ? ` — ${c.schoolName}` : ''}
                     </option>
                   ))}
                 </select>
@@ -1361,9 +1377,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         onClick={() => onOpenPaymentModal(c)}
                       >
                         <td className="py-3.5 pl-5 pr-3 font-bold text-slate-900">
-                          <span className="px-2.5 py-1 rounded bg-slate-100 border border-slate-200 text-xs">
-                            {c.name}
-                          </span>
+                          <div className="flex flex-col items-start gap-1">
+                            {c.isExternalSchool && (
+                              <span 
+                                className="px-1.5 py-0.5 rounded text-[10px] font-extrabold uppercase bg-rose-100 text-rose-800 border border-rose-300 tracking-wider shadow-2xs"
+                                title={`Boshqa maktab: ${c.schoolName || 'Boshqa maktab'}`}
+                              >
+                                bm {c.schoolName ? `• ${c.schoolName}` : ''}
+                              </span>
+                            )}
+                            <span className="px-2.5 py-1 rounded bg-slate-100 border border-slate-200 text-xs">
+                              {c.name}
+                            </span>
+                          </div>
                         </td>
                         <td className="py-3.5 px-3 font-sans font-medium text-slate-900">{c.teacherName}</td>
                         <td className="py-3.5 px-3">{cStudents.length} nafar</td>
@@ -1628,6 +1654,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           currentDeviceId={currentDeviceId}
           onToggleBlockDevice={onToggleBlockDevice}
           onDeleteSession={onDeleteSession}
+          onUnlockExternalTeacher={onUnlockExternalTeacher}
         />
       )}
 
@@ -1907,6 +1934,47 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 />
               </div>
 
+              {/* Boshqa maktab tahrirlash */}
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-slate-800 block">Boshqa maktab sinfimi?</span>
+                    <span className="text-[11px] text-slate-500">Admin panelda 'bm' belgisi bilan ko'rsatiladi</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !editingClass.isExternalSchool;
+                      setEditingClass({
+                        ...editingClass,
+                        isExternalSchool: next,
+                        schoolName: next ? (editingClass.schoolName || '27-maktab') : undefined,
+                      });
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      editingClass.isExternalSchool
+                        ? 'bg-rose-600 text-white shadow-xs'
+                        : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    {editingClass.isExternalSchool ? '✓ Boshqa maktab' : 'Bizning maktab'}
+                  </button>
+                </div>
+
+                {editingClass.isExternalSchool && (
+                  <div className="pt-2 border-t border-slate-200 animate-fade-in">
+                    <label className="text-[11px] font-bold text-rose-800 block mb-1">Qaysi maktab nomi (ustoz panelida qizil chiqadi):</label>
+                    <input
+                      type="text"
+                      value={editingClass.schoolName || ''}
+                      placeholder="Masalan: 27-maktab"
+                      onChange={e => setEditingClass({ ...editingClass, schoolName: e.target.value })}
+                      className="w-full px-3 py-1.5 bg-white border border-rose-300 rounded-lg text-xs font-bold text-rose-900 focus:outline-none focus:ring-2 focus:ring-rose-500"
+                    />
+                  </div>
+                )}
+              </div>
+
               <div className="flex items-center justify-between pt-3 border-t border-slate-200">
                 <button
                   type="button"
@@ -2036,14 +2104,39 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         </div>
       )}
 
-      {/* 100% Natural Free Uzbek Voice Assistant with Edge TTS & Wake Word */}
+      {/* Metrika & Birth Certificate AI Vision Scanner Modal */}
+      <MetrikaAiScannerModal
+        isOpen={isMetrikaScannerOpen}
+        onClose={() => setIsMetrikaScannerOpen(false)}
+        classes={classes}
+        students={students}
+        emailPool={emailPool}
+        initialClassId={selectedClassId !== 'all' ? selectedClassId : undefined}
+        onSaveClassAndStudents={(targetClass, newStudents, updatedPool) => {
+          onSaveClassAndStudents?.(targetClass, newStudents, updatedPool);
+          showQuickToast(`✅ ${targetClass.name} sinfiga ${newStudents.length} ta o'quvchi metrikadan qo'shildi!`);
+        }}
+      />
+
+      {/* 100% Natural Free Uzbek Voice Assistant with Edge TTS & Wake Word & Gemini Flash AI */}
       <VoiceAssistantWidget
         classes={classes}
         students={students}
+        emailPool={emailPool}
         activeClassId={selectedClassId}
         selectedStatusFilters={selectedStatusFilters}
         onSelectClass={(cid) => setSelectedClassId(cid)}
         onSaveStudent={onSaveStudent}
+        onSaveClass={onSaveClass}
+        onOpenBulkUploadModal={onOpenBulkUploadModal}
+        onOpenStudentModal={onOpenStudentModal}
+        onOpenMetrikaScanner={() => setIsMetrikaScannerOpen(true)}
+        onAddBatchStudents={async (batchStudents) => {
+          for (const s of batchStudents) {
+            onAddSingleStudent(s);
+          }
+        }}
+        onSaveClassAndStudents={onSaveClassAndStudents}
       />
       </div>
     </UnifiedGlassProvider>

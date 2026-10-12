@@ -22,6 +22,7 @@ interface SessionsManagementTabProps {
   currentDeviceId?: string;
   onToggleBlockDevice: (deviceId: string, block: boolean, reason?: string) => void;
   onDeleteSession: (sessionId: string) => void;
+  onUnlockExternalTeacher?: (deviceId: string) => void;
 }
 
 export const SessionsManagementTab: React.FC<SessionsManagementTabProps> = ({
@@ -29,6 +30,7 @@ export const SessionsManagementTab: React.FC<SessionsManagementTabProps> = ({
   currentDeviceId,
   onToggleBlockDevice,
   onDeleteSession,
+  onUnlockExternalTeacher,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'blocked'>('all');
@@ -316,6 +318,23 @@ export const SessionsManagementTab: React.FC<SessionsManagementTabProps> = ({
                               </>
                             )}
                           </button>
+
+                          {/* Boshqa maktab ustoziga qayta sinf tanlashga 1 marta imkon berish */}
+                          {onUnlockExternalTeacher && (sess.isExternalTeacher || sess.boundClassId) && (
+                            <button
+                              type="button"
+                              onClick={() => onUnlockExternalTeacher(sess.deviceId)}
+                              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                                sess.allowClassChangeOnce
+                                  ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                                  : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200'
+                              }`}
+                              title="Boshqa maktab ustoziga boshqa sinfni tanlashiga yana bir marta imkon berish"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
+                              <span>{sess.allowClassChangeOnce ? '✓ Qayta tanlashga ruxsat berildi' : 'Sinf tanlashga ruxsat'}</span>
+                            </button>
+                          )}
 
                           <button
                             type="button"

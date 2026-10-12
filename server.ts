@@ -68,15 +68,25 @@ async function startServer() {
   }
   const port = determinePort();
 
-  app.use(express.json({ limit: '20mb' }));
+  app.use(express.json({ limit: '50mb' }));
 
   // Cloud Run / container health check endpoints
   app.get(['/health', '/healthz', '/_health'], (_req, res) => {
     res.status(200).json({ status: 'ok', uptime: process.uptime() });
   });
 
-  // 100% Natural, Free, Tokenless Uzbek Male Voice TTS (Microsoft Edge TTS: uz-UZ-SardorNeural)
+  // 100% Natural, Free, Tokenless Uzbek Voice TTS (Microsoft Edge TTS: uz-UZ-SardorNeural / uz-UZ-MadinaNeural)
+  const sanitizeForSSML = (str: string): string => {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  };
+
   app.get('/api/tts/speak', async (req, res) => {
+    let ttsInstance: any = null;
     try {
       const text = (req.query.text as string) || '';
       const voice = (req.query.voice as string) || 'uz-UZ-SardorNeural';
@@ -84,13 +94,19 @@ async function startServer() {
         return res.status(400).json({ error: "Matn kiritilmagan" });
       }
 
-      const cleanText = text.trim().slice(0, 600);
+      const cleanText = sanitizeForSSML(text.trim().slice(0, 600));
       const tts = new MsEdgeTTS();
+      ttsInstance = tts;
       await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
       const { audioStream } = tts.toStream(cleanText);
 
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Cache-Control', 'public, max-age=86400');
+
+      req.on('close', () => {
+        try { tts.close(); } catch {}
+      });
+
       audioStream.pipe(res);
 
       audioStream.on('end', () => {
@@ -99,13 +115,16 @@ async function startServer() {
 
       audioStream.on('error', (err) => {
         try { tts.close(); } catch {}
-        console.error('TTS GET audioStream error:', err);
+        console.warn('TTS GET audioStream notice:', err?.message || err);
         if (!res.headersSent) {
           res.status(500).json({ error: 'TTS ovoz hosil qilishda xatolik' });
         }
       });
     } catch (err: any) {
-      console.error('TTS GET error:', err);
+      if (ttsInstance) {
+        try { ttsInstance.close(); } catch {}
+      }
+      console.warn('TTS GET notice:', err?.message || err);
       if (!res.headersSent) {
         res.status(500).json({ error: err?.message || 'TTS xatolik' });
       }
@@ -113,19 +132,26 @@ async function startServer() {
   });
 
   app.post('/api/tts/speak', async (req, res) => {
+    let ttsInstance: any = null;
     try {
       const { text, voice = 'uz-UZ-SardorNeural' } = req.body;
       if (!text || typeof text !== 'string') {
         return res.status(400).json({ error: "Matn kiritilmagan" });
       }
 
-      const cleanText = text.trim().slice(0, 600);
+      const cleanText = sanitizeForSSML(text.trim().slice(0, 600));
       const tts = new MsEdgeTTS();
+      ttsInstance = tts;
       await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
       const { audioStream } = tts.toStream(cleanText);
 
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Cache-Control', 'public, max-age=86400');
+
+      req.on('close', () => {
+        try { tts.close(); } catch {}
+      });
+
       audioStream.pipe(res);
 
       audioStream.on('end', () => {
@@ -134,13 +160,16 @@ async function startServer() {
 
       audioStream.on('error', (err) => {
         try { tts.close(); } catch {}
-        console.error('TTS POST audioStream error:', err);
+        console.warn('TTS POST audioStream notice:', err?.message || err);
         if (!res.headersSent) {
           res.status(500).json({ error: 'TTS ovoz hosil qilishda xatolik' });
         }
       });
     } catch (err: any) {
-      console.error('TTS POST error:', err);
+      if (ttsInstance) {
+        try { ttsInstance.close(); } catch {}
+      }
+      console.warn('TTS POST notice:', err?.message || err);
       if (!res.headersSent) {
         res.status(500).json({ error: err?.message || 'TTS xatolik' });
       }
@@ -247,6 +276,484 @@ Qaytaring faqat toza JSON formatida (hech qanday markdown belgisiz, faqat JSON):
       return res.status(200).json({ 
         fallback: true, 
         message: "AI orqali tahlil qilishda nosozlik bo'ldi, lokal algoritm ishlatiladi" 
+      });
+    }
+  });
+
+  // AI Metrika & Birth Certificate Vision OCR endpoint with Gemini Flash
+  // Token-optimized, batch-supported, rate-limit protected
+  app.post('/api/parse-metrikas-ai', async (req, res) => {
+    try {
+      const rawItems = req.body.items || req.body.images || (req.body.image ? [req.body.image] : []);
+      if (!Array.isArray(rawItems) || rawItems.length === 0) {
+        return res.status(400).json({ error: "Hech qanday metrika surati taqdim etilmadi" });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+      if (!apiKey) {
+        return res.status(200).json({
+          fallback: true,
+          message: "Gemini API kaliti topilmadi, iltimos server sozlamalarini tekshiring",
+          results: []
+        });
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
+
+      // Clean base64 strings and build parts
+      const inlineParts: any[] = [];
+      const itemMetas: Array<{ id: string; fileName: string }> = [];
+
+      for (let i = 0; i < rawItems.length; i++) {
+        const it = rawItems[i];
+        const rawBase64 = String(it.base64 || it.data || '');
+        const cleanBase64 = rawBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '').trim();
+        if (!cleanBase64) continue;
+
+        const id = String(it.id || `img-${i}`);
+        const fileName = String(it.fileName || it.originalFileName || `metrika_${i + 1}.jpg`);
+
+        itemMetas.push({ id, fileName });
+        inlineParts.push({
+          inlineData: {
+            mimeType: it.mimeType || 'image/jpeg',
+            data: cleanBase64
+          }
+        });
+      }
+
+      if (inlineParts.length === 0) {
+        return res.status(400).json({ error: "Rasmlar ma'lumoti yaroqsiz" });
+      }
+
+      const promptText = `Siz O'zbekiston Respublikasi maktab o'quvchilarining "Tug'ilganlik haqida guvohnoma"larini (Metrika / Свидетельство о рождении / Guvohnoma) o'ta yuqori aniqlikda tahlil qiluvchi maxsus OCR va arxiv mutaxassisasisiz.
+
+Sizga jami ${inlineParts.length} ta metrika suratlari berilmoqda:
+${itemMetas.map((m, idx) => `[Rasm ${idx + 1}]: ID="${m.id}", Fayl="${m.fileName}"`).join('\n')}
+
+DIQQAT QILINADIGAN ASOSIY XUSUSIYATLAR:
+1. Hujjatlar eski ruscha "Свидетельство о рождении" (Sovet yoki 1990-2015 yillardagi yashil/qizil qattiq guvohnomalar) yoki O'zbekiston Respublikasining yangi davlat namunasidagi guvohnomalari bo'lishi mumkin.
+2. Matnlar ko'pincha qo'lda siyoh/ruchka bilan yozilgan (qo'lyozma kirill yoki lotin alifbosida).
+3. Hujjatda ota-onasining ism-familiyasi ham yozilgan bo'ladi. QAT'IY QOIDA: Ota yoki onaning ismini ASLO o'quvchining ismi sifatida olmang! Hujjatda "Tug'ildi / Родился (родилась)" deb yozilgan joydagi BOLA ISMINI O'ZINI oling!
+4. Agar ruscha kirill alifbosida yozilgan bo'lsa (masalan: "Махмудов Сардор Олим угли" yoki "Каримова Дилноза Баходировна"), uni O'ZBEK LOTIN IMLOSIGA TO'G'RI O'GIRING:
+   - "Махмудов" -> "Maxmudov"
+   - "Сардор" -> "Sardor"
+   - "Олим угли" -> "Olim o'g'li" (yoki "Олимович" -> "Olimovich")
+   - "кизи" -> "qizi"
+   - "ў" -> "o'", "ғ" -> "g'", "ш" -> "sh", "ч" -> "ch", "ю" -> "yu", "я" -> "ya", "ё" -> "yo", "ц" -> "ts" yoki "s", "х/ҳ" -> "x/h".
+5. TUG'ILGAN SANA (birthDate):
+   - Hujjatda sana so'z bilan ("yigirma to'rtinchi may ikki ming o'n birinchi yil") yoki raqam bilan ("24 мая 2011" yoki "24.05.2011") yozilgan bo'ladi.
+   - Buni standart "YYYY.MM.DD" formatida (masalan: "2011.05.24") chiqaring.
+6. METRIKA / GUVOHNOMA SERIYASI VA RAQAMI (passportOrId):
+   - O'zbekiston metrikalari: Rim raqami (I, II, III yoki 1, 2) + Tire ("-") + 2 ta lotin harfi (TN, FR, AN, NA, SN, TO, BU, QA, XI, XO, DZ, SI, TA, VA) + Bo'sh joy + 7 xonali son (masalan: "I-TN 0539510", "II-FR 1234567", "1-TN 9876543").
+   - Yangi ID/Pasport bo'lsa: "AA 1234567" yoki 14 xonali PINFL.
+   - Ruscha yozilgan bo'lsa (masalan: "I-ТН 0539510"), lotinchaga o'giring: "I-TN 0539510".
+7. ISHONCHLILIK DARAJASI (confidence):
+   - "high" — barcha ma'lumotlar aniq o'qildi
+   - "medium" — ba'zi qo'lyozma harflar biroz xira
+   - "low" — juda qorong'i yoki o'qib bo'lmadi
+
+FAQAT SOF JSON FORMATIDA QAYTARING (hech qanday markdown kod blokisiz, faqat JSON):
+{
+  "results": [
+    {
+      "id": "${itemMetas[0]?.id || 'img-0'}",
+      "fullName": "Familiya Ism Otasining ismi",
+      "birthDate": "YYYY.MM.DD",
+      "passportOrId": "I-TN 0539510",
+      "confidence": "high",
+      "notes": ""
+    }
+  ]
+}`;
+
+      const contents = {
+        parts: [
+          ...inlineParts,
+          { text: promptText }
+        ]
+      };
+
+      const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+      let rawOutput = '';
+      let usedModel = '';
+
+      for (const modelName of candidateModels) {
+        try {
+          const response = await Promise.race([
+            ai.models.generateContent({
+              model: modelName,
+              contents: contents,
+            }),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('Gemini Vision timeout (40s)')), 40000)
+            ),
+          ]);
+
+          if (response && response.text) {
+            rawOutput = response.text;
+            usedModel = modelName;
+            break;
+          }
+        } catch (modelErr: any) {
+          console.warn(`Vision model ${modelName} error:`, modelErr.message || modelErr);
+          // If rate limit (429), pause briefly before trying next model
+          if (String(modelErr?.message || '').includes('429') || String(modelErr?.status || '').includes('429')) {
+            await new Promise(r => setTimeout(r, 2000));
+          }
+        }
+      }
+
+      if (!rawOutput) {
+        throw new Error("Barcha AI Vision modellari band yoki javob bermadi");
+      }
+
+      const cleanJson = rawOutput.replace(/```json/gi, '').replace(/```/g, '').trim();
+      let parsedData: any = null;
+      try {
+        parsedData = JSON.parse(cleanJson);
+      } catch (jsonErr) {
+        // Fallback regex extraction if JSON had trailing characters
+        const jsonMatch = cleanJson.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          parsedData = JSON.parse(jsonMatch[0]);
+        } else {
+          throw jsonErr;
+        }
+      }
+
+      const results = Array.isArray(parsedData.results) ? parsedData.results : [];
+
+      // Validate & clean results
+      const sanitizedResults = itemMetas.map(meta => {
+        const found = results.find((r: any) => String(r.id) === String(meta.id)) || results[0];
+        let name = String(found?.fullName || '').trim();
+        name = name.replace(/\b(?:viloyat|tuman|shahar|qishloq|mahalla|ko'cha|uy|\+?998\d{9})\b.*$/i, '').trim();
+
+        let bDate = String(found?.birthDate || '').trim();
+        // Normalize DD.MM.YYYY to YYYY.MM.DD if needed
+        const dmyMatch = bDate.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+        if (dmyMatch) {
+          const day = dmyMatch[1].padStart(2, '0');
+          const month = dmyMatch[2].padStart(2, '0');
+          const year = dmyMatch[3];
+          bDate = `${year}.${month}.${day}`;
+        }
+
+        let pId = String(found?.passportOrId || '').trim();
+        // Convert Cyrillic letters in passport/metrika to Latin
+        pId = pId
+          .replace(/ТН/gi, 'TN')
+          .replace(/ФР/gi, 'FR')
+          .replace(/АН/gi, 'AN')
+          .replace(/НА/gi, 'NA')
+          .replace(/СН/gi, 'SN')
+          .replace(/ТО/gi, 'TO')
+          .replace(/БУ/gi, 'BU')
+          .replace(/КА/gi, 'QA')
+          .replace(/ХИ/gi, 'XI')
+          .replace(/ХО/gi, 'XO')
+          .replace(/ДЗ/gi, 'DZ')
+          .replace(/СИ/gi, 'SI')
+          .replace(/ТА/gi, 'TA')
+          .replace(/ВА/gi, 'VA')
+          .replace(/№/g, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        return {
+          id: meta.id,
+          fileName: meta.fileName,
+          fullName: name,
+          birthDate: bDate,
+          passportOrId: pId,
+          confidence: found?.confidence || (name && bDate && pId ? 'high' : 'medium'),
+          notes: found?.notes || '',
+        };
+      });
+
+      return res.json({
+        success: true,
+        model: usedModel,
+        results: sanitizedResults,
+      });
+    } catch (error: any) {
+      console.error("AI Metrika parse error:", error);
+      const isRateLimit = String(error?.message || '').includes('429');
+      return res.status(isRateLimit ? 429 : 500).json({
+        success: false,
+        error: isRateLimit
+          ? "Gemini API tezlik chegarasiga yetildi (429), iltimos biroz kuting"
+          : (error?.message || "Metrikalarni AI orqali tahlil qilishda xatolik yuz berdi"),
+        rateLimit: isRateLimit,
+      });
+    }
+  });
+
+  // Intelligent Gemini Flash AI Voice Assistant Endpoint
+  app.post('/api/voice-assistant/gemini', async (req, res) => {
+    // Local algorithmic fallback solver
+    const computeLocalFallback = (query: string, c: any) => {
+      const lower = (query || '').toLowerCase().trim();
+      const todayCount = c.todayCertifiedCount || 0;
+      const todayEarn = c.todayEarnings || (todayCount * 5000);
+      const totalCert = c.totalCertifiedCount || 0;
+      const totalErr = c.totalErrorCount || 0;
+      const totalPending = c.totalPendingCount || 0;
+      const totalDebt = c.totalDebt || 0;
+      const classes = Array.isArray(c.classes) ? c.classes : [];
+
+      // 1. Today's report & earnings
+      if (/bugun/i.test(lower) && (/hisob/i.test(lower) || /nechta/i.test(lower) || /pul/i.test(lower) || /daromad/i.test(lower) || /ishla/i.test(lower))) {
+        return {
+          spokenResponse: `Oliy hazrat, bugun jami ${todayCount} ta o'quvchiga sertifikat oldingiz va ${todayEarn.toLocaleString()} so'm pul ishladingiz!`,
+          action: 'REPORT',
+          nextConversationState: 'idle'
+        };
+      }
+
+      // 2. Earnings specifically
+      if (/necha\s*pul/i.test(lower) || /qancha\s*pul/i.test(lower) || /daromad/i.test(lower)) {
+        return {
+          spokenResponse: `Oliy hazrat, hisob-kitob bo'yicha bugun ${todayCount} ta sertifikat uchun jami ${todayEarn.toLocaleString()} so'm ishlab topildi!`,
+          action: 'REPORT',
+          nextConversationState: 'idle'
+        };
+      }
+
+      // 3. Debt queries
+      if (/qarz/i.test(lower)) {
+        if (/umumiy/i.test(lower) || /barcha/i.test(lower) || /hamma/i.test(lower)) {
+          return {
+            spokenResponse: `Oliy hazrat, barcha sinflar bo'yicha umumiy qarzdorlik ${totalDebt.toLocaleString()} so'mni tashkil etadi!`,
+            action: 'REPORT',
+            nextConversationState: 'idle'
+          };
+        }
+        const foundCls = classes.find((cl: any) => lower.includes(cl.name.toLowerCase()));
+        if (foundCls) {
+          return {
+            spokenResponse: `Oliy hazrat, ${foundCls.name} sinfining qarzi ${Number(foundCls.debt || 0).toLocaleString()} so'mni tashkil etadi!`,
+            action: 'REPORT',
+            nextConversationState: 'idle'
+          };
+        }
+        return {
+          spokenResponse: `Oliy hazrat, maktab bo'yicha umumiy qarzdorlik ${totalDebt.toLocaleString()} so'm.`,
+          action: 'REPORT',
+          nextConversationState: 'idle'
+        };
+      }
+
+      // 4. Uncertified / pending students
+      if (/olmagan/i.test(lower) || /qoldi/i.test(lower) || /kutil/i.test(lower)) {
+        const foundCls = classes.find((cl: any) => lower.includes(cl.name.toLowerCase()));
+        if (foundCls) {
+          return {
+            spokenResponse: `Oliy hazrat, ${foundCls.name} sinfida hali sertifikat olmagan ${foundCls.pendingStudents || 0} ta o'quvchi qoldi!`,
+            action: 'REPORT',
+            nextConversationState: 'idle'
+          };
+        }
+        return {
+          spokenResponse: `Oliy hazrat, umumiy hisobda hali sertifikat olmagan ${totalPending} ta o'quvchi qolmoqda!`,
+          action: 'REPORT',
+          nextConversationState: 'idle'
+        };
+      }
+
+      // 5. Teachers of classes
+      if (/rahbar/i.test(lower) || /ustoz/i.test(lower) || /o'qituvchi/i.test(lower)) {
+        const foundCls = classes.find((cl: any) => lower.includes(cl.name.toLowerCase()));
+        if (foundCls) {
+          return {
+            spokenResponse: `Oliy hazrat, ${foundCls.name} sinfining rahbari — ${foundCls.teacherName || "belgilanmagan"}!`,
+            action: 'REPORT',
+            nextConversationState: 'idle'
+          };
+        }
+        const foundByTeacher = classes.find((cl: any) => lower.includes(cl.teacherName.toLowerCase()));
+        if (foundByTeacher) {
+          return {
+            spokenResponse: `Oliy hazrat, ${foundByTeacher.teacherName} — ${foundByTeacher.name} sinfining rahbaridirlar!`,
+            action: 'REPORT',
+            nextConversationState: 'idle'
+          };
+        }
+      }
+
+      // 6. Total historical certified & errors
+      if (/shu\s*kungacha/i.test(lower) || /jami/i.test(lower) || /xatolik/i.test(lower)) {
+        if (/xato/i.test(lower)) {
+          return {
+            spokenResponse: `Oliy hazrat, shu kungacha jami ${totalErr} ta o'quvchida ma'lumot xatoligi kuzatilgan.`,
+            action: 'REPORT',
+            nextConversationState: 'idle'
+          };
+        }
+        return {
+          spokenResponse: `Oliy hazrat, shu kungacha jami ${totalCert} ta o'quvchi sertifikat oldi va ${totalErr} tasida xatolik qayd etilgan.`,
+          action: 'REPORT',
+          nextConversationState: 'idle'
+        };
+      }
+
+      // 7. Student search
+      if (/qidir/i.test(lower) || /top/i.test(lower)) {
+        const nameMatch = query.replace(/o'quvchini|o'quvchi|sinfidan|sinfida|sinf|bo'yicha|qidir|top/gi, '').trim();
+        return {
+          spokenResponse: `Oliy hazrat, ${nameMatch} bo'yicha qidiruv amalga oshirilmoqda!`,
+          action: 'SEARCH_STUDENT',
+          actionData: { studentName: nameMatch },
+          nextConversationState: 'idle'
+        };
+      }
+
+      // 8. Create class
+      if (/yangi\s*sinf/i.test(lower) || /sinf\s*yarat/i.test(lower) || /sinf\s*qo'sh/i.test(lower)) {
+        const classMatch = query.match(/(\d{1,2}\s*[-–—]?\s*[A-Za-zА-Яа-яЎўҚқҒғҲҳ])/i);
+        const className = classMatch ? classMatch[1].replace(/\s+/g, '-').toUpperCase() : '';
+        return {
+          spokenResponse: `Oliy hazrat, ${className || 'yangi'} sinfni yaratish jarayoni boshlandi. Sinf faylini tekshirmoqdaman.`,
+          action: 'CREATE_CLASS_INIT',
+          actionData: { className },
+          nextConversationState: 'waiting_file_upload'
+        };
+      }
+
+      return {
+        spokenResponse: `Oliy hazrat, buyrug'ingizni eshitdim. Xizmatingizdaman!`,
+        action: 'REPORT',
+        nextConversationState: 'idle'
+      };
+    };
+
+    try {
+      const { userQuery, context } = req.body;
+      if (!userQuery || typeof userQuery !== 'string') {
+        return res.status(400).json({ error: "Ovozli buyruq matni kiritilmagan" });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+      const ctx = context || {};
+
+      if (!apiKey) {
+        return res.json({
+          success: true,
+          ...computeLocalFallback(userQuery, ctx),
+        });
+      }
+
+      // Call Gemini 3.8 Flash model
+      const ai = new GoogleGenAI({ apiKey });
+      const prompt = `Siz "Bir Million O'zbek Dasturchilari" maktab sertifikat platformasining rasmiy, nihoyatda aqlli, odobli va sodiq ovozli sun'iy intellekt yordamchisisiz.
+Foydalanuvchi sizning buyurtmangiz/rahbaringiz bo'lib, unga doimo samimiy, oliyjanob ("Oliy hazrat, ...") uslubda o'zbek tilida tabiiy ovoz bilan javob berasiz.
+
+Hozirgi real platforma ma'lumotlari (KONTEKST):
+- Bugun sertifikat olgan o'quvchilar soni: ${ctx.todayCertifiedCount || 0} ta
+- Bugungi daromad (1 sertifikat = 5 000 so'm): ${(ctx.todayEarnings || ((ctx.todayCertifiedCount || 0) * 5000)).toLocaleString()} so'm
+- Jami shu kungacha sertifikat olganlar: ${ctx.totalCertifiedCount || 0} ta
+- Jami xatolik bo'lganlar (hasError / error): ${ctx.totalErrorCount || 0} ta
+- Jami hali sertifikat olmagan (kutilayotgan) o'quvchilar: ${ctx.totalPendingCount || 0} ta
+- Jami o'quvchilar soni: ${ctx.totalStudentsCount || 0} ta
+- Barcha sinflar bo'yicha umumiy qarzdorlik: ${(ctx.totalDebt || 0).toLocaleString()} so'm
+- Joriy tanlangan sinf: ${ctx.activeClassName || "Tanlanmagan"}
+- Hozirgi suhbat holati: ${ctx.conversationState || "idle"}
+- Sinflar ro'yxati:
+${JSON.stringify(ctx.classes || [], null, 2)}
+- Mavjud fayllar ro'yxati:
+${JSON.stringify(ctx.knownFileNames || [], null, 2)}
+
+Foydalanuvchining ovozli gapi / buyrug'i:
+"${userQuery}"
+
+QAT'IY QOIDALAR:
+1. "Bugungi hisobot", "bugun nechta sertifikat oldim", "necha pul ishladim":
+   - Bugun olingan sertifikatlar sonini va 5000 so'mga ko'paytirilgan aniq summani ayting: "Oliy hazrat, bugun jami X ta o'quvchiga sertifikat oldingiz va Y so'm ishladingiz." Action: "REPORT".
+2. "Hali sertifikat olmagan qaysi sinfda nechta o'quvchi qoldi", "umumiy sertifikat olmaganlar qancha":
+   - Har bir sinfdagi kutilayotganlar sonini yoki umumiy sonni aniq ayting. Action: "REPORT".
+3. "Qaysi sinfni qancha qarzi bor", "umumiy qarz qancha":
+   - Barcha sinflar qarzini yoki so'ralgan sinf qarzini va umumiy qarzni ayting. Action: "REPORT".
+4. "Falon sinfni sinf rahbari kim", "falon ustoz qaysi sinfni rahbari":
+   - Sinflar ro'yxatidan aniq tekshirib javob bering. Action: "REPORT".
+5. "Shu kungacha nechta o'quvchi sertifikat oldi", "shu kungacha nechtasida xatolik bo'ldi":
+   - Aniq faktik raqamlarni ayting. Action: "REPORT".
+6. "Falon o'quvchini falon sinf bo'yicha qidir":
+   - Action: "SEARCH_STUDENT", actionData: { studentName: "...", className: "..." }.
+7. Yangi sinf yaratish buyrug'i (masalan: "Yangi sinf yarat, nomi 8-B, rahbari Dilnoza opa"):
+   - Action: "CREATE_CLASS_INIT", actionData: { className: "...", teacherName: "..." }.
+   - Agar mavjud fayllar ichida o'sha sinf nomiga mos fayl bo'lsa:
+     spokenResponse: "Oliy hazrat, siz aytgan [sinf] sinfi uchun '[fayl_nomi]' fayli topildi. Bu o'sha siz aytgan sinfmi?", nextConversationState: "waiting_file_confirmation"
+   - Agar mos fayl topilmasa:
+     spokenResponse: "Oliy hazrat, [sinf] sinfi uchun fayl topilmadi. Iltimos o'sha sinf faylini kompyuterdan tanlang yoki yuklang.", nextConversationState: "waiting_file_upload"
+8. Agar oldingi holat "waiting_file_confirmation" bo'lsa va foydalanuvchi "Ha", "to'g'ri", "shu" desa:
+   - Action: "CONFIRM_FILE", actionData: { confirmed: true }, spokenResponse: "Xo'p bo'ladi, Oliy hazrat, faylni tekshirib o'quvchilarni yuklayapman..."
+9. Agar "Yo'q", "boshqa", "noto'g'ri" desa:
+   - Action: "CONFIRM_FILE", actionData: { confirmed: false }, spokenResponse: "Tushundim, Oliy hazrat. Unda iltimos o'zingiz o'sha sinf fayllarini yuklang.", nextConversationState: "waiting_file_upload"
+10. Agar "davom ettir" yoki "davom et" deb aytsa:
+    - Action: "RESUME_AFTER_UPLOAD" yoki "RESUME_AFTER_FILL"
+11. Boshqa standart buyruqlar:
+    - "keyingisi" -> action: "NEXT_STUDENT"
+    - "avvalgisi" -> action: "PREV_STUDENT"
+    - "qo'yish" -> action: "PASTE_CERTIFICATE"
+    - "pochta" -> action: "COPY_EMAIL"
+
+Javobni FAQAT toza JSON formatida qaytaring:
+{
+  "spokenResponse": "...",
+  "action": "REPORT" | "SEARCH_STUDENT" | "CREATE_CLASS_INIT" | "CONFIRM_FILE" | "RESUME_AFTER_UPLOAD" | "RESUME_AFTER_FILL" | "NEXT_STUDENT" | "PREV_STUDENT" | "PASTE_CERTIFICATE" | "COPY_EMAIL" | "SELECT_CLASS",
+  "actionData": {
+    "studentName": "...",
+    "className": "...",
+    "teacherName": "...",
+    "confirmed": true
+  },
+  "nextConversationState": "idle" | "waiting_file_confirmation" | "waiting_file_upload" | "waiting_fill_incomplete"
+}`;
+
+      const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest'];
+      let rawOutput = '';
+      for (const modelName of candidateModels) {
+        try {
+          const response = await Promise.race([
+            ai.models.generateContent({
+              model: modelName,
+              contents: prompt,
+            }),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('AI request timeout (3.5s)')), 3500)
+            ),
+          ]);
+          if (response && response.text) {
+            rawOutput = response.text;
+            break;
+          }
+        } catch (mErr: any) {
+          console.warn(`Model ${modelName} notice:`, mErr?.message || mErr);
+        }
+      }
+
+      if (!rawOutput) {
+        return res.json({
+          success: true,
+          ...computeLocalFallback(userQuery, ctx),
+        });
+      }
+
+      const cleanJson = rawOutput.replace(/```json/gi, '').replace(/```/g, '').trim();
+      const parsed = JSON.parse(cleanJson);
+      return res.json({
+        success: true,
+        spokenResponse: parsed.spokenResponse || "Oliy hazrat, xizmatingizdaman!",
+        action: parsed.action || "REPORT",
+        actionData: parsed.actionData || {},
+        nextConversationState: parsed.nextConversationState || "idle",
+      });
+    } catch (err: any) {
+      console.warn("Gemini voice assistant error:", err?.message || err);
+      return res.json({
+        success: true,
+        ...computeLocalFallback(req.body?.userQuery || '', req.body?.context || {}),
       });
     }
   });

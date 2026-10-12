@@ -31,6 +31,8 @@ export interface ClassGroup {
   paidAmount: number; // in UZS
   pricePerStudent: number; // 5000 UZS
   notes?: string;
+  isExternalSchool?: boolean; // Boshqa maktab belgisi
+  schoolName?: string; // Masalan: "27-maktab"
 }
 
 export interface EmailAccount {
@@ -56,6 +58,9 @@ export interface TeacherSession {
   isBlocked: boolean;
   blockedReason?: string;
   blockedAt?: string;
+  boundClassId?: string; // Boshqa maktab ustozi biriktirilgan sinf
+  isExternalTeacher?: boolean; // Boshqa maktab ustozi ekanligi
+  allowClassChangeOnce?: boolean; // Admin tomonidan qayta sinf tanlashga ruxsat berilganmi
 }
 
 export interface TeacherMessage {

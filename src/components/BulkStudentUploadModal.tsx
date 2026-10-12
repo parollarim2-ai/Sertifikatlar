@@ -18,8 +18,10 @@ import {
   AlertTriangle,
   AlertCircle,
   Layers,
-  UserPlus
+  UserPlus,
+  Camera
 } from 'lucide-react';
+import { MetrikaAiScannerModal } from './MetrikaAiScannerModal';
 
 interface BulkStudentUploadModalProps {
   classes: ClassGroup[];
@@ -58,6 +60,8 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
   const [newClassName, setNewClassName] = useState('');
   const [teacherName, setTeacherName] = useState('');
   const [teacherPhone, setTeacherPhone] = useState('');
+  const [isExternalSchool, setIsExternalSchool] = useState(false);
+  const [schoolName, setSchoolName] = useState('');
   
   const [parsedStudents, setParsedStudents] = useState<ParsedStudentPreview[]>([]);
   const [uploadedFileName, setUploadedFileName] = useState('');
@@ -73,6 +77,7 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
   const [manualText, setManualText] = useState('');
   const [showManualInput, setShowManualInput] = useState(false);
   const [validationError, setValidationError] = useState('');
+  const [isMetrikaModalOpen, setIsMetrikaModalOpen] = useState(false);
 
   useEffect(() => {
     if (initialClassId && classes.some(c => c.id === initialClassId)) {
@@ -355,6 +360,8 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
         teacherPhone: teacherPhone.trim() || '+998 90 000 00 00',
         paidAmount: 0,
         pricePerStudent: 5000,
+        isExternalSchool: isExternalSchool || false,
+        schoolName: isExternalSchool ? (schoolName.trim() || 'Boshqa maktab') : undefined,
       };
     } else {
       const existing = classes.find(c => c.id === selectedClassId);
@@ -476,6 +483,17 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
             <Layers className="w-4 h-4" />
             <span>0 dan Yangi sinf ochish va yuklash</span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => setIsMetrikaModalOpen(true)}
+            className="px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white shadow-xs transition-all cursor-pointer sm:ml-auto"
+            title="Qo'lda yozilgan va ruscha metrikalardan AI orqali sinf tuzish (Gemini Flash Vision)"
+          >
+            <Camera className="w-4 h-4" />
+            <span>📸 Metrika rasmlari (AI Vision)</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-white/20 text-white font-semibold">Yangi</span>
+          </button>
         </div>
 
         <div className="p-6 space-y-6 max-h-[75vh] overflow-y-auto">
@@ -564,7 +582,7 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
                     placeholder="Masalan: 10-A yoki 9-B"
                     value={newClassName}
                     onChange={e => setNewClassName(e.target.value)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 uppercase"
                   />
                 </div>
 
@@ -593,6 +611,45 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
                     className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
+              </div>
+
+              {/* Boshqa maktab belgilash bloki */}
+              <div className="pt-2 border-t border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !isExternalSchool;
+                      setIsExternalSchool(next);
+                      if (next && !schoolName) {
+                        setSchoolName('27-maktab');
+                      }
+                    }}
+                    className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                      isExternalSchool
+                        ? 'bg-rose-600 text-white shadow-xs ring-2 ring-rose-400'
+                        : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-300'
+                    }`}
+                  >
+                    <span>{isExternalSchool ? '✓ Boshqa maktab tanlandi' : '🏷️ Boshqa maktab'}</span>
+                  </button>
+                  <span className="text-[11px] text-slate-500">
+                    {isExternalSchool ? "Boshqa maktab sifatida belgilanmoqda (Admin panelda 'bm' chiqadi)" : "Bizning maktab bo'lmasa ushbu tugmani yoqing"}
+                  </span>
+                </div>
+
+                {isExternalSchool && (
+                  <div className="flex items-center gap-2 flex-1 sm:max-w-xs animate-fade-in">
+                    <label className="text-xs font-bold text-rose-700 whitespace-nowrap">Qaysi maktab:</label>
+                    <input
+                      type="text"
+                      placeholder="Masalan: 27-maktab"
+                      value={schoolName}
+                      onChange={e => setSchoolName(e.target.value)}
+                      className="w-full px-3 py-1.5 bg-white border border-rose-300 rounded-xl text-xs font-bold text-rose-900 focus:outline-none focus:ring-2 focus:ring-rose-500"
+                    />
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1167,6 +1224,21 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
         </div>
 
       </div>
+
+      {/* Metrika & Birth Certificate AI Vision Modal */}
+      <MetrikaAiScannerModal
+        isOpen={isMetrikaModalOpen}
+        onClose={() => setIsMetrikaModalOpen(false)}
+        classes={classes}
+        students={students}
+        emailPool={emailPool}
+        initialClassId={selectedClassId}
+        onSaveClassAndStudents={(targetClass, newStudents, updatedPool) => {
+          onSaveClassAndStudents(targetClass, newStudents, updatedPool);
+          setIsMetrikaModalOpen(false);
+          onClose();
+        }}
+      />
     </div>
   );
 };

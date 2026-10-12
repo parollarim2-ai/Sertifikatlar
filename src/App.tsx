@@ -518,6 +518,27 @@ export default function App() {
     await syncDeleteSession(sessionId);
   };
 
+  const handleUnlockExternalTeacher = async (deviceId: string) => {
+    setSessions(prev => prev.map(s => {
+      if (s.deviceId === deviceId) {
+        return {
+          ...s,
+          allowClassChangeOnce: true,
+        };
+      }
+      return s;
+    }));
+    const targetSession = sessions.find(s => s.deviceId === deviceId);
+    if (targetSession) {
+      const updated = { ...targetSession, allowClassChangeOnce: true };
+      await syncSaveSession(updated);
+    }
+    // Also save device-specific unlock flag in localStorage
+    try {
+      localStorage.setItem(`unlock_external_device_${deviceId}`, 'true');
+    } catch {}
+  };
+
   // Teacher Messages Handlers
   const handleSendMessage = async (msg: TeacherMessage) => {
     setMessages(prev => [...prev, msg]);
@@ -700,6 +721,8 @@ export default function App() {
               onAssignTeacherEmail={handleAssignTeacherEmail}
               onAddGeneratedEmails={handleAddGeneratedEmails}
               onSaveStudent={handleSaveStudent}
+              onSaveClassAndStudents={handleSaveClassAndStudents}
+              onUnlockExternalTeacher={handleUnlockExternalTeacher}
             />
           </div>
         )}
