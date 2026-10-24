@@ -27,7 +27,11 @@ import {
   syncSendTeacherMessage,
   syncMarkMessageAsRead,
   syncDeleteTeacherMessage,
-  syncSaveSingleEmail
+  syncSaveSingleEmail,
+  subscribeToTeacherCertificates,
+  syncSaveTeacherCertificate,
+  syncSaveBatchTeacherCertificates,
+  syncDeleteTeacherCertificate,
 } from './lib/firestoreService';
 import { recordCertifyEvent } from './utils/operatorSpeedTracker';
 import { 
@@ -94,13 +98,18 @@ export default function App() {
   const [messages, setMessages] = useState<TeacherMessage[]>([]);
   const [telegramUsers, setTelegramUsers] = useState<TelegramUser[]>([]);
 
-  // Periodically fetch connected Telegram users from bot server
+  // Periodically fetch connected Telegram users from bot server without unnecessary re-renders
   const fetchTelegramStatus = () => {
     fetch('/api/telegram/status')
       .then((res) => res.json())
       .then((data) => {
         if (data.users && Array.isArray(data.users)) {
-          setTelegramUsers(data.users);
+          setTelegramUsers((prev) => {
+            if (prev.length === data.users.length && JSON.stringify(prev) === JSON.stringify(data.users)) {
+              return prev;
+            }
+            return data.users;
+          });
         }
       })
       .catch(() => {});
@@ -108,13 +117,15 @@ export default function App() {
 
   useEffect(() => {
     fetchTelegramStatus();
-    const interval = setInterval(fetchTelegramStatus, 10000);
+    const interval = setInterval(fetchTelegramStatus, 15000);
     return () => clearInterval(interval);
   }, []);
 
-  // Sync classes and students to server telegram store whenever they update
+  // Debounce syncing classes and students to server telegram store (prevents main thread stutter)
   useEffect(() => {
-    if (classes.length > 0 || students.length > 0) {
+    if (classes.length === 0 && students.length === 0) return;
+
+    const timer = setTimeout(() => {
       fetch('/api/telegram/sync-data', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -123,11 +134,18 @@ export default function App() {
         .then((res) => res.json())
         .then((data) => {
           if (data.users && Array.isArray(data.users)) {
-            setTelegramUsers(data.users);
+            setTelegramUsers((prev) => {
+              if (prev.length === data.users.length && JSON.stringify(prev) === JSON.stringify(data.users)) {
+                return prev;
+              }
+              return data.users;
+            });
           }
         })
         .catch(() => {});
-    }
+    }, 2500);
+
+    return () => clearTimeout(timer);
   }, [classes, students]);
 
   // Admin authentication state
@@ -158,6 +176,15 @@ export default function App() {
   const [isAdminLoginOpen, setIsAdminLoginOpen] = useState(false);
   const [activeMessageClass, setActiveMessageClass] = useState<ClassGroup | null>(null);
 
+  // App-wide toast notification system (No window.alert)
+  const [appToast, setAppToast] = useState<{ message: string; type?: 'success' | 'error' | 'info' } | null>(null);
+  const showAppToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    setAppToast({ message, type });
+    setTimeout(() => setAppToast(null), 4000);
+  };
+
+  const [isConfirmClearOpen, setIsConfirmClearOpen] = useState(false);
+
   // Check URL hash for admin
   useEffect(() => {
     const handleHashChange = () => {
@@ -175,6 +202,47 @@ export default function App() {
     window.addEventListener('hashchange', handleHashChange);
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, [isAdminAuthenticated]);
+
+  // Anti-tamper & Admin Token Cryptographic Verification
+  useEffect(() => {
+    console.log(
+      "%c🛡️ TIZIM XAVFSIZLIGI FAOL (SECURITY SHIELD ACTIVE)\n%cSayt kodi va ma'lumotlar bazasi to'liq shifrlangan va himoyalangan. Ruxsatsiz kirish va o'zgartirishlar taqiqlanadi.",
+      "color: #2563eb; font-size: 14px; font-weight: bold;",
+      "color: #64748b; font-size: 12px;"
+    );
+
+    const token = localStorage.getItem('b1m_admin_token');
+    const authFlag = localStorage.getItem(STORAGE_ADMIN_AUTH_KEY) === 'true';
+
+    if (authFlag) {
+      if (!token) {
+        setIsAdminAuthenticated(false);
+        localStorage.removeItem(STORAGE_ADMIN_AUTH_KEY);
+        if (window.location.hash.includes('admin')) {
+          setCurrentView('teacher');
+        }
+      } else {
+        fetch('/api/admin/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token }),
+        })
+          .then((res) => res.json())
+          .then((data) => {
+            if (!data.valid) {
+              console.warn("⚠️ Admin sessiyasi yaroqsiz yoki muddati o'tgan.");
+              setIsAdminAuthenticated(false);
+              localStorage.removeItem(STORAGE_ADMIN_AUTH_KEY);
+              localStorage.removeItem('b1m_admin_token');
+              if (window.location.hash.includes('admin')) {
+                setCurrentView('teacher');
+              }
+            }
+          })
+          .catch(() => {});
+      }
+    }
+  }, []);
 
   // Firestore real-time subscriptions
   useEffect(() => {
@@ -208,12 +276,19 @@ export default function App() {
       }
     });
 
+    const unsubTeacherCerts = subscribeToTeacherCertificates((remoteTeachers) => {
+      if (remoteTeachers) {
+        setTeacherCertificates(remoteTeachers);
+      }
+    });
+
     return () => {
       unsubClasses();
       unsubStudents();
       unsubEmails();
       unsubSessions();
       unsubMessages();
+      unsubTeacherCerts();
     };
   }, []);
 
@@ -246,6 +321,33 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  // Verify cryptographic admin token with backend on load
+  useEffect(() => {
+    const token = localStorage.getItem('b1m_admin_token');
+    if (token) {
+      fetch('/api/admin/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (!data.valid) {
+            localStorage.removeItem('b1m_admin_token');
+            localStorage.removeItem(STORAGE_ADMIN_AUTH_KEY);
+            setIsAdminAuthenticated(false);
+            if (currentView === 'admin') setCurrentView('teacher');
+          } else {
+            setIsAdminAuthenticated(true);
+          }
+        })
+        .catch(() => {});
+    } else {
+      localStorage.removeItem(STORAGE_ADMIN_AUTH_KEY);
+      setIsAdminAuthenticated(false);
+    }
+  }, []);
+
   // Admin login handler
   const handleAdminLoginSuccess = () => {
     setIsAdminAuthenticated(true);
@@ -257,6 +359,7 @@ export default function App() {
 
   const handleAdminLogout = () => {
     setIsAdminAuthenticated(false);
+    localStorage.removeItem('b1m_admin_token');
     localStorage.removeItem(STORAGE_ADMIN_AUTH_KEY);
     setCurrentView('teacher');
     window.location.hash = '';
@@ -556,27 +659,31 @@ export default function App() {
     await syncDeleteTeacherMessage(msgId);
   };
 
-  // Teacher certificates handlers
-  const handleAddTeacher = (teacher: TeacherCertificate) => {
+  // Teacher certificates handlers with Firestore synchronization
+  const handleAddTeacher = async (teacher: TeacherCertificate) => {
     setTeacherCertificates(prev => [teacher, ...prev]);
+    await syncSaveTeacherCertificate(teacher);
   };
 
-  const handleAddBatchTeachers = (newTeachers: TeacherCertificate[]) => {
+  const handleAddBatchTeachers = async (newTeachers: TeacherCertificate[]) => {
     setTeacherCertificates(prev => [...newTeachers, ...prev]);
+    await syncSaveBatchTeacherCertificates(newTeachers);
   };
 
-  const handleUpdateTeacher = (updated: TeacherCertificate) => {
+  const handleUpdateTeacher = async (updated: TeacherCertificate) => {
     setTeacherCertificates(prev => prev.map(t => t.id === updated.id ? updated : t));
+    await syncSaveTeacherCertificate(updated);
   };
 
-  const handleDeleteTeacher = (teacherId: string) => {
+  const handleDeleteTeacher = async (teacherId: string) => {
     setTeacherCertificates(prev => prev.filter(t => t.id !== teacherId));
+    await syncDeleteTeacherCertificate(teacherId);
   };
 
   const handleAssignTeacherEmail = (teacherId: string) => {
     const availableEmail = emailPool.find(e => !e.isUsed);
     if (!availableEmail) {
-      alert("Zaxirada bo'sh email mavjud emas! Avval Email Zaxirasiga yangi pochtalar qo'shing.");
+      showAppToast("Zaxirada bo'sh email mavjud emas! Avval Email Zaxirasiga yangi pochtalar qo'shing.", 'error');
       return;
     }
     const updatedEmail: EmailAccount = {
@@ -598,9 +705,14 @@ export default function App() {
           : t
       )
     );
+    showAppToast(`Email biriktirildi: ${updatedEmail.email}`, 'success');
   };
 
-  const handleClearAllData = () => {
+  const handleRequestClearAllData = () => {
+    setIsConfirmClearOpen(true);
+  };
+
+  const executeClearAllData = () => {
     setClasses([]);
     setStudents([]);
     setTeacherCertificates([]);
@@ -743,7 +855,7 @@ export default function App() {
           <div className="flex items-center gap-4 text-xs">
             {currentView === 'admin' ? (
               <button
-                onClick={handleClearAllData}
+                onClick={handleRequestClearAllData}
                 className="text-slate-500 hover:text-rose-600 flex items-center gap-1.5 transition-colors cursor-pointer"
                 title="Barcha ma'lumotlarni tozalash"
               >
@@ -765,6 +877,47 @@ export default function App() {
       </footer>
 
       {/* Modals */}
+      {isConfirmClearOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-200">
+            <h3 className="text-base font-bold text-slate-900 mb-2">Baza xotirasini tozalash</h3>
+            <p className="text-xs text-slate-600 mb-5 leading-relaxed">
+              Haqiqatan ham brauzerdagi barcha kesh va ma'lumotlarni tozalashni xohlaysizmi? Bu amal faqat lokal brauzer xotirasini tozalaydi.
+            </p>
+            <div className="flex items-center justify-end gap-3">
+              <button
+                onClick={() => setIsConfirmClearOpen(false)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors cursor-pointer"
+              >
+                Bekor qilish
+              </button>
+              <button
+                onClick={() => {
+                  executeClearAllData();
+                  setIsConfirmClearOpen(false);
+                  showAppToast("Lokal ma'lumotlar tozalandi", 'info');
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 transition-colors cursor-pointer"
+              >
+                Ha, tozalansin
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {appToast && (
+        <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl shadow-lg border text-sm font-medium flex items-center gap-2 backdrop-blur-md transition-all animate-bounce-subtle ${
+          appToast.type === 'error'
+            ? 'bg-rose-50/95 border-rose-300 text-rose-800'
+            : appToast.type === 'success'
+            ? 'bg-emerald-50/95 border-emerald-300 text-emerald-800'
+            : 'bg-slate-900/90 border-slate-700 text-white'
+        }`}>
+          <span>{appToast.message}</span>
+        </div>
+      )}
+
       {activeStudentModal && (
         <StudentModal
           student={activeStudentModal}

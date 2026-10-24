@@ -1,28 +1,70 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128;
+    }
+
+    function isNonEmptyString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
     match /classes/{classId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create, update: if isValidId(classId)
+                            && isNonEmptyString(request.resource.data.name, 1, 80)
+                            && request.resource.data.teacherName is string;
+      allow delete: if isValidId(classId);
     }
 
     match /students/{studentId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create, update: if isValidId(studentId)
+                            && isNonEmptyString(request.resource.data.fullName, 2, 160)
+                            && request.resource.data.classId is string
+                            && request.resource.data.status in ['pending', 'certified', 'error'];
+      allow delete: if isValidId(studentId);
     }
 
     match /emailPool/{emailId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create, update: if isValidId(emailId)
+                            && request.resource.data.email is string
+                            && request.resource.data.isUsed is bool;
+      allow delete: if isValidId(emailId);
     }
 
     match /sessions/{sessionId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create, update: if isValidId(sessionId)
+                            && isNonEmptyString(request.resource.data.deviceId, 1, 150)
+                            && request.resource.data.isBlocked is bool;
+      allow delete: if isValidId(sessionId);
     }
 
     match /teacherMessages/{messageId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create, update: if isValidId(messageId)
+                            && isNonEmptyString(request.resource.data.title, 1, 200)
+                            && isNonEmptyString(request.resource.data.content, 1, 10000)
+                            && request.resource.data.isRead is bool;
+      allow delete: if isValidId(messageId);
     }
 
     match /telegramUsers/{userId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create, update: if isValidId(userId)
+                            && request.resource.data.chatId is number;
+      allow delete: if isValidId(userId);
+    }
+
+    match /teacherCertificates/{certId} {
+      allow read: if true;
+      allow create, update: if isValidId(certId)
+                            && isNonEmptyString(request.resource.data.fullName, 2, 160)
+                            && request.resource.data.status in ['pending', 'certified', 'error'];
+      allow delete: if isValidId(certId);
     }
 
     match /test/{docId} {

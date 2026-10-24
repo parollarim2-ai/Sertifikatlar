@@ -115,7 +115,7 @@ export const StudentModal: React.FC<StudentModalProps> = ({
 
   const handleRegisterCourseraDirect = async () => {
     if (!formData.fullName || !formData.assignedEmail) {
-      alert("O'quvchi F.I.SH va biriktirilgan Gmail pochtasi kiritilmagan!");
+      setCourseraNotice("⚠️ O'quvchi F.I.SH va biriktirilgan Gmail pochtasi kiritilmagan!");
       return;
     }
 
@@ -206,12 +206,10 @@ export const StudentModal: React.FC<StudentModalProps> = ({
           }
         }, 5000);
       } else {
-        alert(`Xatolik: ${data.error || "Coursera ro'yxatdan o'tishda xatolik yuz berdi"}`);
-        setCourseraNotice('');
+        setCourseraNotice(`⚠️ Xatolik: ${data.error || "Coursera ro'yxatdan o'tishda xatolik yuz berdi"}`);
       }
     } catch (e: any) {
-      alert(`Server xatosi: ${e.message}`);
-      setCourseraNotice('');
+      setCourseraNotice(`❌ Server xatosi: ${e.message}`);
     } finally {
       setIsRegisteringCoursera(false);
     }
@@ -219,7 +217,7 @@ export const StudentModal: React.FC<StudentModalProps> = ({
 
   const handleSolveCourseraQuizzesDirect = async () => {
     if (!formData.assignedEmail || !formData.assignedEmail.includes('@')) {
-      alert("Avval o'quvchiga email biriktirilishi va Coursera hisobi ochilgan bo'lishi lozim!");
+      setQuizNotice("⚠️ Avval o'quvchiga email biriktirilishi va Coursera hisobi ochilgan bo'lishi lozim!");
       return;
     }
 
@@ -240,21 +238,34 @@ export const StudentModal: React.FC<StudentModalProps> = ({
 
       const data = await res.json();
       if (data.success) {
-        setFormData(prev => ({
-          ...prev,
+        const hasCert = !!data.certificateUrl;
+        const updated: Student = {
+          ...formData,
           courseraQuizStatus: 'completed',
           courseraQuizCompletedAt: new Date().toISOString(),
-        }));
+          hasError: false,
+          errorReason: '',
+          ...(hasCert ? {
+            status: 'certified',
+            certificateLink: data.certificateUrl,
+            certificateNumber: data.certificateId || formData.certificateNumber,
+            certifiedAt: data.certifiedAt || new Date().toISOString(),
+          } : {}),
+        };
+        setFormData(updated);
+        onSave(updated);
         playChime();
-        setQuizNotice("🏆 Barcha 4 ta Coursera testlari muvaffaqiyatli topshirildi!");
-        setTimeout(() => setQuizNotice(''), 8000);
+        setQuizNotice(
+          hasCert
+            ? `🎓 Rasmiy Coursera sertifikati olindi va saqlandi: ${data.certificateUrl}`
+            : "🏆 Barcha 4 ta Coursera testlari muvaffaqiyatli topshirildi!"
+        );
+        setTimeout(() => setQuizNotice(''), 9000);
       } else {
-        alert(`Xatolik: ${data.error || "Testlarni topshirishda xatolik yuz berdi"}`);
-        setQuizNotice('');
+        setQuizNotice(`⚠️ Xatolik: ${data.error || "Testlarni topshirishda xatolik yuz berdi"}`);
       }
     } catch (err: any) {
-      alert(`Server xatosi: ${err.message}`);
-      setQuizNotice('');
+      setQuizNotice(`❌ Server xatosi: ${err.message}`);
     } finally {
       setIsSolvingQuizzes(false);
     }
@@ -316,43 +327,48 @@ export const StudentModal: React.FC<StudentModalProps> = ({
     conflicts.hasEmailConflict || 
     (conflicts.hasNameConflict && !allowDuplicateName);
 
-  // Fast paste from clipboard
+  // Fast paste from clipboard with validation
   const handlePasteClipboardLink = async () => {
     try {
       if (navigator.clipboard && navigator.clipboard.readText) {
         const text = await navigator.clipboard.readText();
-        if (text && text.trim().startsWith('http')) {
-          setFormData(prev => ({
-            ...prev,
-            certificateLink: text.trim(),
-            status: 'certified',
-            hasError: false,
-            errorReason: '',
-            certifiedAt: prev.certifiedAt || new Date().toISOString(),
-            certificateDate: prev.certificateDate || new Date().toISOString().split('T')[0],
-            certificateNumber: prev.certificateNumber || `B1MD-${(classGroup?.name || 'MKT').replace(/[^a-zA-Z0-9]/g, '')}-${student.id.slice(-4)}`,
-          }));
-          setPasteNotice("Havola buferdan qo'yildi!");
+        const trimmed = (text || '').trim();
+        if (!trimmed) {
+          setPasteNotice("⚠️ Bufer bo'sh!");
           setTimeout(() => setPasteNotice(''), 2500);
           return;
         }
+
+        if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
+          setPasteNotice("❌ Buferdagi matn havola (URL) emas!");
+          setTimeout(() => setPasteNotice(''), 3000);
+          return;
+        }
+
+        const isCoursera = /coursera\.org/i.test(trimmed) || /coursera_assets/i.test(trimmed);
+        if (!isCoursera) {
+          setPasteNotice("❌ Bu havola Courseraga tegishli emas!");
+          setTimeout(() => setPasteNotice(''), 3000);
+          return;
+        }
+
+        setFormData(prev => ({
+          ...prev,
+          certificateLink: trimmed,
+          status: 'certified',
+          hasError: false,
+          errorReason: '',
+          certifiedAt: prev.certifiedAt || new Date().toISOString(),
+          certificateDate: prev.certificateDate || new Date().toISOString().split('T')[0],
+          certificateNumber: prev.certificateNumber || `B1MD-${(classGroup?.name || 'MKT').replace(/[^a-zA-Z0-9]/g, '')}-${student.id.slice(-4)}`,
+        }));
+        playChime();
+        setPasteNotice("✅ Coursera sertifikat havolasi buferdan muvaffaqiyatli qo'yildi!");
+        setTimeout(() => setPasteNotice(''), 3000);
+        return;
       }
     } catch {
-      // ignore
-    }
-
-    const fallbackLink = window.prompt("Sertifikat havolasini kiriting (https://...):", formData.certificateLink || 'https://coursera.org/verify/');
-    if (fallbackLink) {
-      setFormData(prev => ({
-        ...prev,
-        certificateLink: fallbackLink.trim(),
-        status: 'certified',
-        hasError: false,
-        errorReason: '',
-        certifiedAt: prev.certifiedAt || new Date().toISOString(),
-        certificateDate: prev.certificateDate || new Date().toISOString().split('T')[0],
-      }));
-      setPasteNotice("Havola kiritildi!");
+      setPasteNotice("⚠️ Brauzer buferdan o'qishga ruxsat bermadi");
       setTimeout(() => setPasteNotice(''), 2500);
     }
   };
@@ -876,7 +892,6 @@ export const StudentModal: React.FC<StudentModalProps> = ({
             <div className="flex items-center gap-2">
               <input
                 type="url"
-                disabled={!isAdmin}
                 value={formData.certificateLink || ''}
                 placeholder="https://coursera.org/verify/..."
                 onChange={e => setFormData({ 
@@ -884,14 +899,23 @@ export const StudentModal: React.FC<StudentModalProps> = ({
                   certificateLink: e.target.value,
                   status: e.target.value.trim() ? 'certified' : 'pending'
                 })}
-                className="flex-1 px-3 py-2 text-xs sm:text-sm bg-white border border-slate-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:border-blue-700 disabled:opacity-80"
+                className="flex-1 px-3 py-2 text-xs sm:text-sm bg-white border border-slate-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:border-blue-700"
               />
+              <button
+                type="button"
+                onClick={handlePasteClipboardLink}
+                className="px-3.5 py-2 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer flex-shrink-0 active:scale-95"
+                title="Buferdagi Coursera sertifikat havolasini qo'yish"
+              >
+                <Clipboard className="w-3.5 h-3.5" />
+                <span>Qo'yish</span>
+              </button>
               {formData.certificateLink && (
                 <a
                   href={formData.certificateLink}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="p-2 text-blue-700 hover:text-blue-800 bg-white border border-slate-300 rounded-lg transition-colors cursor-pointer"
+                  className="p-2 text-blue-700 hover:text-blue-800 bg-white border border-slate-300 rounded-lg transition-colors cursor-pointer flex-shrink-0"
                   title="Havolani ochish"
                 >
                   <ExternalLink className="w-4 h-4" />

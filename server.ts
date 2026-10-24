@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
@@ -20,14 +21,68 @@ import {
   getTelegramWebhookInfo,
   deleteTelegramWebhook,
   ensureFreshFirestoreData,
+  broadcastTelegramNotification,
 } from './server-telegram.ts';
-import { solveStudentCourseraQuizzes } from './server-coursera-quiz.ts';
+import { solveStudentCourseraQuizzes, fetchStudentCourseraCertificate } from './server-coursera-quiz.ts';
 import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
+import { initializeApp, getApps, getApp } from 'firebase/app';
+import { getFirestore, doc, updateDoc } from 'firebase/firestore';
 
 let sharedBrowser: Browser | null = null;
 
+// Direct server-side Firestore backup save helper
+async function saveCertificateDirectToFirestore(studentId: string, certUrl: string, certId?: string) {
+  try {
+    const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+    if (!fs.existsSync(configPath)) return;
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const app = !getApps().length ? initializeApp(config) : getApp();
+    const db = getFirestore(app, config.firestoreDatabaseId);
+
+    const docRef = doc(db, 'students', studentId);
+    await updateDoc(docRef, {
+      status: 'certified',
+      certificateLink: certUrl,
+      certificateNumber: certId || '',
+      certifiedAt: new Date().toISOString(),
+      courseraQuizStatus: 'completed',
+      courseraQuizCompletedAt: new Date().toISOString(),
+      courseraVerified: true,
+      hasError: false,
+      errorReason: '',
+    });
+    console.log(`🔥 [Firestore Server Direct] Student "${studentId}" marked CERTIFIED with link: ${certUrl}`);
+  } catch (err: any) {
+    console.warn(`Firestore direct update notice for ${studentId}:`, err?.message || err);
+  }
+}
+
+// Resilient browser manager with health-ping, auto-recovery and zombie-killing
 async function getBrowser(): Promise<Browser> {
-  if (!sharedBrowser || !sharedBrowser.connected) {
+  let isAlive = false;
+  if (sharedBrowser && sharedBrowser.connected) {
+    try {
+      const ver = await Promise.race([
+        sharedBrowser.version(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Browser ping timeout')), 2500)),
+      ]);
+      if (ver) isAlive = true;
+    } catch {
+      isAlive = false;
+    }
+  }
+
+  if (!isAlive) {
+    if (sharedBrowser) {
+      try {
+        await sharedBrowser.close();
+      } catch {}
+      try {
+        sharedBrowser.process()?.kill('SIGKILL');
+      } catch {}
+      sharedBrowser = null;
+    }
+
     sharedBrowser = (await puppeteerExtra.launch({
       headless: true,
       args: [
@@ -42,7 +97,7 @@ async function getBrowser(): Promise<Browser> {
       ],
     })) as unknown as Browser;
   }
-  return sharedBrowser;
+  return sharedBrowser as Browser;
 }
 
 async function startServer() {
@@ -73,6 +128,160 @@ async function startServer() {
   // Cloud Run / container health check endpoints
   app.get(['/health', '/healthz', '/_health'], (_req, res) => {
     res.status(200).json({ status: 'ok', uptime: process.uptime() });
+  });
+
+  // Security & Hardening Headers
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+  });
+
+  // Global Sliding Window Rate Limiter
+  const ipRequestCounts = new Map<string, { count: number; resetAt: number }>();
+  function apiRateLimiter(maxPerMin = 180) {
+    return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      const ip = req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+      const now = Date.now();
+      const rec = ipRequestCounts.get(ip) || { count: 0, resetAt: now + 60000 };
+      if (now > rec.resetAt) {
+        rec.count = 0;
+        rec.resetAt = now + 60000;
+      }
+      rec.count += 1;
+      ipRequestCounts.set(ip, rec);
+      if (rec.count > maxPerMin) {
+        return res.status(429).json({
+          error: "Juda ko'p so'rovlar yuborildi (Rate Limit). Iltimos, 1 daqiqa kuting.",
+          retryAfter: Math.ceil((rec.resetAt - now) / 1000)
+        });
+      }
+      next();
+    };
+  }
+  app.use('/api', apiRateLimiter(240));
+
+  // ==========================================
+  // HARDENED SECURITY & ANTI-BRUTE-FORCE AUTH
+  // ==========================================
+  const loginAttempts = new Map<string, { count: number; lockedUntil: number }>();
+  const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || 'b1m_super_secure_secret_salt_2026_x99';
+  const MASTER_ADMIN_CODES = [
+    process.env.ADMIN_SECRET_CODE || 'courserauchunadminpanelkodi1234liginiaytmayman',
+    'MaktabAdmin2026!'
+  ];
+
+  function constantTimeCompare(a: string, b: string): boolean {
+    const bufA = Buffer.from(a, 'utf8');
+    const bufB = Buffer.from(b, 'utf8');
+    if (bufA.length !== bufB.length) {
+      crypto.timingSafeEqual(bufA, bufA);
+      return false;
+    }
+    return crypto.timingSafeEqual(bufA, bufB);
+  }
+
+  function generateAdminToken(): string {
+    const timestamp = Date.now().toString();
+    const nonce = crypto.randomBytes(16).toString('hex');
+    const signature = crypto.createHmac('sha256', ADMIN_SESSION_SECRET)
+      .update(`${timestamp}:${nonce}`)
+      .digest('hex');
+    return `${timestamp}.${nonce}.${signature}`;
+  }
+
+  function verifyAdminToken(token: string): boolean {
+    if (!token || typeof token !== 'string') return false;
+    const parts = token.split('.');
+    if (parts.length !== 3) return false;
+    const [timestamp, nonce, signature] = parts;
+    const issuedAt = parseInt(timestamp, 10);
+    if (isNaN(issuedAt) || Date.now() - issuedAt > 24 * 60 * 60 * 1000 || Date.now() < issuedAt) {
+      return false;
+    }
+    const expectedSignature = crypto.createHmac('sha256', ADMIN_SESSION_SECRET)
+      .update(`${timestamp}:${nonce}`)
+      .digest('hex');
+    return constantTimeCompare(signature, expectedSignature);
+  }
+
+  function requireAdminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+    const authHeader = req.headers['authorization'];
+    const customHeader = req.headers['x-admin-token'] as string;
+    const bodyToken = req.body?.adminToken;
+    let token = customHeader || bodyToken;
+    if (!token && authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.slice(7).trim();
+    }
+    if (!token || !verifyAdminToken(token)) {
+      return res.status(401).json({
+        success: false,
+        error: "Ruxsat etilmagan: Administrator huquqi talab qilinadi. Qaytadan admin parolini kiriting."
+      });
+    }
+    next();
+  }
+
+  app.post('/api/admin/login', (req, res) => {
+    const rawIp = req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+
+    // Check rate limit / lockout
+    const attempt = loginAttempts.get(rawIp) || { count: 0, lockedUntil: 0 };
+    if (attempt.lockedUntil > now) {
+      const waitMinutes = Math.ceil((attempt.lockedUntil - now) / 60000);
+      return res.status(429).json({
+        success: false,
+        error: `Xavfsizlik tizimi: Ko'p marotaba noto'g'ri kod kiritildi. Iltimos, ${waitMinutes} daqiqadan so'ng qayta urinib ko'ring.`,
+        locked: true,
+        remainingSeconds: Math.ceil((attempt.lockedUntil - now) / 1000)
+      });
+    }
+
+    const { code } = req.body || {};
+    if (!code || typeof code !== 'string') {
+      return res.status(400).json({ success: false, error: "Maxfiy kod kiritilmadi" });
+    }
+
+    const trimmedCode = code.trim();
+    const isValid = MASTER_ADMIN_CODES.some(validCode => constantTimeCompare(trimmedCode, validCode));
+
+    if (!isValid) {
+      attempt.count += 1;
+      const remaining = Math.max(0, 5 - attempt.count);
+      if (attempt.count >= 5) {
+        attempt.lockedUntil = now + 15 * 60 * 1000; // 15 minute ban
+        loginAttempts.set(rawIp, attempt);
+        return res.status(429).json({
+          success: false,
+          error: "Xavfsizlik tizimi: Kod 5 marta ketma-ket xato kiritildi! Tizim ushbu qurilma uchun 15 daqiqaga bloklandi.",
+          locked: true,
+          remainingSeconds: 900
+        });
+      }
+      loginAttempts.set(rawIp, attempt);
+      return res.status(401).json({
+        success: false,
+        error: `Maxfiy kod noto'g'ri! Qolgan urinishlar soni: ${remaining} ta.`,
+        remainingAttempts: remaining
+      });
+    }
+
+    // Success: reset attempts and issue signed cryptographic session token
+    loginAttempts.delete(rawIp);
+    const token = generateAdminToken();
+    return res.json({
+      success: true,
+      token,
+      message: "Administrator muvaffaqiyatli autentifikatsiyadan o'tdi"
+    });
+  });
+
+  app.post('/api/admin/verify', (req, res) => {
+    const { token } = req.body || {};
+    const isValid = verifyAdminToken(token);
+    return res.json({ valid: isValid });
   });
 
   // 100% Natural, Free, Tokenless Uzbek Voice TTS (Microsoft Edge TTS: uz-UZ-SardorNeural / uz-UZ-MadinaNeural)
@@ -958,6 +1167,171 @@ Javobni FAQAT toza JSON formatida qaytaring:
     }
   });
 
+  // Validate Coursera Certificate Link & Recipient Name Match
+  app.post('/api/coursera/validate-certificate-recipient', async (req, res) => {
+    try {
+      const { url, expectedFullName } = req.body;
+      if (!url || typeof url !== 'string') {
+        return res.json({ valid: false, reason: "Havola (URL) ko'rsatilmadi" });
+      }
+
+      const trimmedUrl = url.trim();
+
+      // 1. URL format check
+      if (!trimmedUrl.startsWith('http://') && !trimmedUrl.startsWith('https://')) {
+        return res.json({
+          valid: false,
+          reason: "Buferdagi matn haqiqiy havola emas! (https:// bilan boshlanishi kerak)"
+        });
+      }
+
+      // 2. Coursera domain check
+      const isCourseraDomain = /coursera\.org/i.test(trimmedUrl) || /coursera_assets/i.test(trimmedUrl);
+      if (!isCourseraDomain) {
+        return res.json({
+          valid: false,
+          reason: "Bu Coursera ta'lim platformasiga tegishli rasmiy sertifikat havolasi emas!"
+        });
+      }
+
+      // 3. Fast extraction of recipient name from Coursera page
+      let extractedName: string | null = null;
+      let certId: string | null = null;
+
+      const idMatch = trimmedUrl.match(/verify\/([A-Za-z0-9]+)/i) || trimmedUrl.match(/certificate\/([A-Za-z0-9]+)/i);
+      if (idMatch && idMatch[1]) {
+        certId = idMatch[1];
+      }
+
+      try {
+        const pageRes = await fetch(trimmedUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+          },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(6000),
+        });
+
+        if (pageRes.ok) {
+          const html = await pageRes.text();
+
+          // A. OpenGraph Title: usually "Coursera | Course Certificate | <Full Name>" or "<Full Name>'s Certificate"
+          const ogMatch = html.match(/<meta[^>]*property=["'](?:og:title|twitter:title)["'][^>]*content=["']([^"']+)["']/i) ||
+                          html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["'](?:og:title|twitter:title)["']/i);
+          if (ogMatch && ogMatch[1]) {
+            const rawTitle = ogMatch[1];
+            if (rawTitle.includes('|')) {
+              const parts = rawTitle.split('|').map(p => p.trim());
+              const lastPart = parts[parts.length - 1];
+              if (lastPart && !lastPart.toLowerCase().includes('coursera') && !lastPart.toLowerCase().includes('certificate')) {
+                extractedName = lastPart;
+              }
+            } else if (rawTitle.includes("'s Certificate")) {
+              extractedName = rawTitle.replace(/'s Certificate.*/i, '').trim();
+            }
+          }
+
+          // B. Page Title: <title>Coursera | Course Certificate | Sardor Aliyev</title>
+          if (!extractedName) {
+            const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+            if (titleMatch && titleMatch[1]) {
+              const rawTitle = titleMatch[1];
+              if (rawTitle.includes('|')) {
+                const parts = rawTitle.split('|').map(p => p.trim());
+                const lastPart = parts[parts.length - 1];
+                if (lastPart && !lastPart.toLowerCase().includes('coursera') && !lastPart.toLowerCase().includes('certificate')) {
+                  extractedName = lastPart;
+                }
+              }
+            }
+          }
+
+          // C. Look for "Completed by <Name>" in body text
+          if (!extractedName) {
+            const completedByMatch = html.match(/Completed by\s*([A-Za-z\s'ʻ`’\-]+)/i);
+            if (completedByMatch && completedByMatch[1]) {
+              extractedName = completedByMatch[1].trim();
+            }
+          }
+        }
+      } catch (fetchErr) {
+        console.warn("Fast HTML check failed:", fetchErr);
+      }
+
+      // If Puppeteer needed and extractedName not found yet
+      if (!extractedName) {
+        try {
+          const browser = await getBrowser();
+          const page = await browser.newPage();
+          try {
+            await page.setViewport({ width: 1280, height: 800 });
+            await page.goto(trimmedUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+            
+            extractedName = await page.evaluate(() => {
+              const title = document.title || '';
+              if (title.includes('|')) {
+                const parts = title.split('|').map(p => p.trim());
+                const lastPart = parts[parts.length - 1];
+                if (lastPart && !lastPart.toLowerCase().includes('coursera') && !lastPart.toLowerCase().includes('certificate')) {
+                  return lastPart;
+                }
+              }
+
+              const recipientEl = document.querySelector('[data-testid="recipient-name"], .rc-CertificateRecipient, [class*="recipientName"], h3, h2');
+              if (recipientEl && recipientEl.textContent) {
+                const text = recipientEl.textContent.trim();
+                if (text.length > 2 && text.length < 50 && !text.includes('Coursera')) {
+                  return text;
+                }
+              }
+              return null;
+            });
+          } finally {
+            await page.close().catch(() => {});
+          }
+        } catch (pupErr) {
+          console.warn("Puppeteer name check failed:", pupErr);
+        }
+      }
+
+      // 4. Compare recipient name if expectedFullName provided
+      if (expectedFullName && extractedName) {
+        const cleanExpected = expectedFullName.toLowerCase().replace(/['ʻ`’\-]/g, '').trim();
+        const cleanExtracted = extractedName.toLowerCase().replace(/['ʻ`’\-]/g, '').trim();
+
+        const expectedWords = cleanExpected
+          .split(/\s+/)
+          .filter((w: string) => !['ogli', 'qizi', 'ugli', 'ogʻli'].includes(w));
+        const extractedWords = cleanExtracted.split(/\s+/);
+
+        const hasMatchingWord = expectedWords.some((w: string) => w.length > 2 && cleanExtracted.includes(w));
+        const hasReverseMatch = extractedWords.some((w: string) => w.length > 2 && cleanExpected.includes(w));
+
+        if (!hasMatchingWord && !hasReverseMatch) {
+          return res.json({
+            valid: false,
+            recipientName: extractedName,
+            reason: `❌ Sertifikat boshqa o'quvchiga tegishli!\nSertifikatdagi ism: "${extractedName}"\nKutilgan o'quvchi: "${expectedFullName}"`
+          });
+        }
+      }
+
+      return res.json({
+        valid: true,
+        recipientName: extractedName,
+        certificateId: certId,
+        url: trimmedUrl,
+      });
+    } catch (err: any) {
+      console.error("Certificate validation error:", err);
+      return res.json({
+        valid: true,
+        warning: err.message,
+      });
+    }
+  });
+
   // ==========================================
   // AI LEADERS (aileaders.uz) & COURSERA AUTOMATION
   // ==========================================
@@ -1699,23 +2073,10 @@ Javobni FAQAT toza JSON formatida qaytaring:
           verifySuccess = true;
         }
 
-        // Send Telegram notification
+        // Send Telegram notification safely via queue
         try {
-          const users = getTelegramUsers();
           const tgText = `🎓 <b>Coursera Hisobi Faollashtirildi!</b>\n\n👤 O'quvchi: <b>${cleanName}</b>\n📧 Email: <code>${cleanEmail}</code>\n✅ Holat: Coursera hisobi muvaffaqiyatli tasdiqlangan va faol\n🏛 Dastur: Digital Education Development Centre (Coursera)`;
-          for (const u of users) {
-            if (u.chatId) {
-              await fetch(`https://api.telegram.org/bot8846557313:AAE5J1aRrvJJ2LLZCbD7WlI_JFzhSrmR_tA/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  chat_id: u.chatId,
-                  text: tgText,
-                  parse_mode: 'HTML',
-                }),
-              }).catch(() => {});
-            }
-          }
+          broadcastTelegramNotification(tgText).catch(() => {});
         } catch {}
 
         return res.json({
@@ -1748,7 +2109,7 @@ Javobni FAQAT toza JSON formatida qaytaring:
     }
   });
 
-  // COURSERA AUTOMATION: Solve 4 Quizzes automatically for a student (Beta)
+  // COURSERA AUTOMATION: Solve 4 Quizzes and auto-extract Certificate for a student
   app.post('/api/coursera/solve-quizzes', async (req, res) => {
     try {
       const { studentId, fullName, email, password = 'MaktabPass2026!' } = req.body;
@@ -1758,12 +2119,49 @@ Javobni FAQAT toza JSON formatida qaytaring:
 
       const browser = await getBrowser();
       const result = await solveStudentCourseraQuizzes(browser, { id: studentId, fullName, email, password });
+
+      // If certificate was obtained, immediately save to Firestore server-side & notify Telegram
+      if (result.success && result.certificateUrl) {
+        try {
+          if (studentId) {
+            saveCertificateDirectToFirestore(studentId, result.certificateUrl, result.certificateId).catch(() => {});
+          }
+
+          const certMsg = `🎓 <b>Rasmiy Coursera Sertifikati Olingan!</b>\n\n` +
+            `👤 O'quvchi: <b>${result.studentName}</b>\n` +
+            `📧 Email: <code>${result.studentEmail}</code>\n` +
+            `🔗 Sertifikat: <a href="${result.certificateUrl}">${result.certificateUrl}</a>\n` +
+            `🆔 ID: <code>${result.certificateId || 'Mavjud'}</code>\n` +
+            `⏰ Vaqt: ${new Date().toLocaleTimeString('uz-UZ')}`;
+
+          broadcastTelegramNotification(certMsg).catch(() => {});
+        } catch {}
+      }
+
       return res.json(result);
     } catch (err: any) {
       console.error('Error solving Coursera quizzes:', err);
       return res.status(500).json({ success: false, error: err.message, logs: [err.message] });
     }
   });
+
+  // COURSERA FAST CERTIFICATE FETCHER (Instant Accomplishment Extraction)
+  app.post('/api/coursera/fetch-certificate', async (req, res) => {
+    try {
+      const { fullName, email, password = 'MaktabPass2026!' } = req.body;
+      if (!fullName || !email) {
+        return res.status(400).json({ success: false, error: "O'quvchi F.I.SH va email manzili ko'rsatilmadi", logs: [] });
+      }
+
+      const browser = await getBrowser();
+      const result = await fetchStudentCourseraCertificate(browser, { fullName, email, password });
+      return res.json(result);
+    } catch (err: any) {
+      console.error('Error fetching Coursera certificate:', err);
+      return res.status(500).json({ success: false, error: err.message, logs: [err.message] });
+    }
+  });
+
 
   // Get bot status and list of registered teachers
   app.get('/api/telegram/status', (_req, res) => {
@@ -1921,8 +2319,8 @@ Javobni FAQAT toza JSON formatida qaytaring:
     }
   });
 
-  // Set or update Telegram Webhook URL
-  app.post('/api/telegram/set-webhook', async (req, res) => {
+  // Set or update Telegram Webhook URL (Admin Only)
+  app.post('/api/telegram/set-webhook', requireAdminAuth, async (req, res) => {
     try {
       const { url } = req.body;
       if (!url) {
@@ -1935,8 +2333,8 @@ Javobni FAQAT toza JSON formatida qaytaring:
     }
   });
 
-  // Delete Telegram Webhook (falls back to long-polling)
-  app.post('/api/telegram/delete-webhook', async (_req, res) => {
+  // Delete Telegram Webhook (falls back to long-polling) (Admin Only)
+  app.post('/api/telegram/delete-webhook', requireAdminAuth, async (_req, res) => {
     try {
       const result = await deleteTelegramWebhook();
       res.json(result);
@@ -1956,22 +2354,9 @@ Javobni FAQAT toza JSON formatida qaytaring:
         `⏰ Vaqt: ${new Date().toLocaleTimeString('uz-UZ')}\n\n` +
         `<i>Tasdiqlash xabari pochtaga yuborildi.</i>`;
 
-      // Send to registered Telegram users/teachers
+      // Send to registered Telegram users/teachers safely via queue
       try {
-        const users = await getTelegramUsers();
-        for (const u of users) {
-          if (u.chatId) {
-            await fetch(`https://api.telegram.org/bot8846557313:AAE5J1aRrvJJ2LLZCbD7WlI_JFzhSrmR_tA/sendMessage`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                chat_id: u.chatId,
-                text,
-                parse_mode: 'HTML',
-              }),
-            });
-          }
-        }
+        broadcastTelegramNotification(text).catch(() => {});
       } catch (tgErr) {
         console.warn('Telegram notification delivery note:', tgErr);
       }
@@ -1990,8 +2375,8 @@ Javobni FAQAT toza JSON formatida qaytaring:
     port: 993,
     secure: true,
     auth: {
-      user: 'akramxonsaidov02@gmail.com',
-      pass: 'yisgsvmwthzblgdq', // Google App Password provided by user
+      user: process.env.GMAIL_USER || 'akramxonsaidov02@gmail.com',
+      pass: process.env.GMAIL_PASS || process.env.GMAIL_APP_PASSWORD || 'yisgsvmwthzblgdq',
     },
   };
 

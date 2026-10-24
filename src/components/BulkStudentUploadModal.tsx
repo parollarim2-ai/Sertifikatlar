@@ -270,7 +270,7 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
       }
     } catch (err) {
       console.error("Hujjatni o'qishda xatolik:", err);
-      alert("Faylni o'qishda xatolik yuz berdi. Iltimos, Excel (.xlsx), Word (.docx) yoki matn formatida yuklang.");
+      setValidationError("Faylni o'qishda xatolik yuz berdi. Iltimos, Excel (.xlsx), Word (.docx) yoki matn formatida yuklang.");
     } finally {
       setIsProcessing(false);
     }
@@ -310,9 +310,10 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
     if (!manualText.trim()) return;
     const parsed = parseStudentsFromText(manualText);
     if (parsed.length === 0) {
-      alert("Matnda o'quvchilar aniqlanmadi. Har bir o'quvchini yangi qatordan yozing.");
+      setValidationError("Matnda o'quvchilar aniqlanmadi. Har bir o'quvchini yangi qatordan yozing.");
       return;
     }
+    setValidationError('');
     setParsedStudents(parsed);
     setShowManualInput(false);
   };
@@ -387,8 +388,9 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
     }
 
     const now = new Date().toISOString();
+    const entropy = Math.random().toString(36).slice(2, 8);
     const createdStudents: Student[] = studentsToInsert.map((item, idx) => ({
-      id: `st-${Date.now()}-${idx}`,
+      id: `st-${Date.now()}-${entropy}-${idx}`,
       fullName: item.fullName.trim(),
       birthDate: item.birthDate?.trim() || '',
       passportOrId: item.passportOrId?.trim() || '',

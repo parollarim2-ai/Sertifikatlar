@@ -18,6 +18,7 @@ import {
   Globe,
   Zap
 } from 'lucide-react';
+import { getAdminAuthHeaders } from '../utils/authHeaders';
 
 interface TelegramBotTabProps {
   classes: ClassGroup[];
@@ -141,7 +142,7 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
     try {
       const res = await fetch('/api/telegram/set-webhook', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAdminAuthHeaders(),
         body: JSON.stringify({ url: webhookInputUrl.trim() }),
       });
       const data = await res.json();
@@ -149,7 +150,7 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
         showToast("✅ Webhook muvaffaqiyatli o'rnatildi! Bot endi 24/7 rejimda xabarlarni qabul qiladi.");
         await fetchWebhookInfo();
       } else {
-        showToast("⚠️ Xatolik: " + (data.description || "O'rnatib bo'lmadi"));
+        showToast("⚠️ Xatolik: " + (data.description || data.error || "O'rnatib bo'lmadi"));
       }
     } catch {
       showToast("❌ Serverga ulanishda xatolik");
@@ -161,13 +162,16 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
   const handleDeleteWebhook = async () => {
     setIsUpdatingWebhook(true);
     try {
-      const res = await fetch('/api/telegram/delete-webhook', { method: 'POST' });
+      const res = await fetch('/api/telegram/delete-webhook', { 
+        method: 'POST',
+        headers: getAdminAuthHeaders(),
+      });
       const data = await res.json();
       if (data.ok) {
         showToast("✅ Webhook o'chirildi, Long Polling rejimiga o'tildi.");
         await fetchWebhookInfo();
       } else {
-        showToast("⚠️ Xatolik: " + (data.description || "O'chirib bo'lmadi"));
+        showToast("⚠️ Xatolik: " + (data.description || data.error || "O'chirib bo'lmadi"));
       }
     } catch {
       showToast("❌ Serverga ulanishda xatolik");

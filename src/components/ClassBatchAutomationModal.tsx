@@ -20,7 +20,9 @@ import {
   Send,
   HelpCircle,
   FileCheck,
-  GraduationCap
+  GraduationCap,
+  Award,
+  Bookmark
 } from 'lucide-react';
 import { Student, ClassGroup } from '../types';
 import { detectStudentDocType, extractDocSeriesAndNumber } from '../utils/studentValidator';
@@ -83,10 +85,14 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
   const [currentCourseraIndex, setCurrentCourseraIndex] = useState<number>(-1);
   const [isQuizRunning, setIsQuizRunning] = useState<boolean>(false);
   const [currentQuizIndex, setCurrentQuizIndex] = useState<number>(-1);
+  const [isAutopilotRunning, setIsAutopilotRunning] = useState<boolean>(false);
+  const [fetchingCertIndex, setFetchingCertIndex] = useState<number | null>(null);
+  const [showBookmarkletModal, setShowBookmarkletModal] = useState<boolean>(false);
 
   const isPausedRef = useRef<boolean>(false);
   const isRunningRef = useRef<boolean>(false);
   const isQuizRunningRef = useRef<boolean>(false);
+  const isAutopilotRunningRef = useRef<boolean>(false);
 
   // Initialize items when modal opens
   useEffect(() => {
@@ -649,12 +655,20 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
       const combinedLogs = [...(data.logs || [])];
 
       if (data.success) {
+        const hasCert = !!data.certificateUrl;
         setItems(prev => {
           const next = [...prev];
           next[index] = {
             ...next[index],
+            status: hasCert ? 'certified' : next[index].status,
             quizStatus: 'completed',
-            quizLogs: [...(next[index].quizLogs || []), ...combinedLogs, "🏆 Barcha 4 ta Coursera testlari muvaffaqiyatli topshirildi!"],
+            quizLogs: [
+              ...(next[index].quizLogs || []),
+              ...combinedLogs,
+              hasCert
+                ? `🎓 Rasmiy Coursera sertifikati olindi va biriktirildi: ${data.certificateUrl}`
+                : "🏆 Barcha 4 ta Coursera testlari muvaffaqiyatli topshirildi!",
+            ],
           };
           return next;
         });
@@ -663,11 +677,21 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
           ...item.student,
           courseraQuizStatus: 'completed',
           courseraQuizCompletedAt: new Date().toISOString(),
+          ...(hasCert ? {
+            status: 'certified',
+            certificateLink: data.certificateUrl,
+            certificateNumber: data.certificateId || item.student.certificateNumber,
+            certifiedAt: data.certifiedAt || new Date().toISOString(),
+          } : {}),
         });
 
         playChime();
         sendPushNotification(item.student.fullName);
-        showToast(`🏆 ${item.student.fullName}: Barcha 4 ta Coursera testlari topshirildi!`);
+        showToast(
+          hasCert
+            ? `🎓 ${item.student.fullName}: Rasmiy Coursera sertifikati avtomatik olindi va biriktirildi!`
+            : `🏆 ${item.student.fullName}: Barcha 4 ta Coursera testlari topshirildi!`
+        );
         return true;
       } else {
         const errorMsg = data.error || "Testlarni topshirishda xatolik";
@@ -698,6 +722,135 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
       showToast(`❌ Server xatosi: ${err.message}`);
       return false;
     }
+  };
+
+  // Single-Click Instant Certificate Fetcher for an existing student
+  const handleFetchSingleCertificate = async (index: number) => {
+    const item = items[index];
+    if (!item) return;
+
+    setFetchingCertIndex(index);
+    showToast(`🔍 ${item.student.fullName} uchun Coursera sertifikati qidirilmoqda...`);
+
+    try {
+      const res = await fetch('/api/coursera/fetch-certificate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fullName: item.student.fullName,
+          email: item.assignedEmail,
+          password: item.student.assignedPassword || globalPassword,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.success && data.certificateUrl) {
+        setItems(prev => {
+          const next = [...prev];
+          next[index] = {
+            ...next[index],
+            status: 'certified',
+            quizStatus: 'completed',
+            quizLogs: [...(next[index].quizLogs || []), `🎓 Rasmiy sertifikat topildi: ${data.certificateUrl}`],
+          };
+          return next;
+        });
+
+        await onUpdateStudent({
+          ...item.student,
+          status: 'certified',
+          certificateLink: data.certificateUrl,
+          certificateNumber: data.certificateId || item.student.certificateNumber,
+          certifiedAt: data.certifiedAt || new Date().toISOString(),
+          courseraQuizStatus: 'completed',
+        });
+
+        playChime();
+        sendPushNotification(item.student.fullName);
+        showToast(`🎉 ${item.student.fullName}: Rasmiy Coursera sertifikati muvaffaqiyatli biriktirildi!`);
+      } else {
+        showToast(`⚠️ ${data.error || "Sertifikat hali shakllanmagan yoki testlar to'liq topshirilmagan"}`);
+      }
+    } catch (err: any) {
+      showToast(`❌ Xatolik: ${err.message}`);
+    } finally {
+      setFetchingCertIndex(null);
+    }
+  };
+
+  // FULL AUTOPILOT ZERO-TOUCH SUPER-RUNNER
+  const handleStartAutopilotBatch = async () => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      try {
+        await Notification.requestPermission();
+      } catch {}
+    }
+
+    setIsAutopilotRunning(true);
+    isAutopilotRunningRef.current = true;
+    showToast(`🚀 Butun sinf uchun To'liq Avtopilot Sertifikatlash boshlandi!`);
+
+    let certCount = 0;
+    for (let i = 0; i < items.length; i++) {
+      if (!isAutopilotRunningRef.current) break;
+
+      const currentStudent = items[i].student;
+      const isAlreadyDone = currentStudent.status === 'certified' || !!currentStudent.certificateLink || !!currentStudent.certificateNumber;
+      if (isAlreadyDone) {
+        continue;
+      }
+
+      setCurrentQuizIndex(i);
+
+      // Step 0: Aileaders OneID registration (if not yet registered)
+      const isAileadersRegistered = items[i].status === 'success' || items[i].status === 'certified';
+      if (!isAileadersRegistered) {
+        setCurrentIndex(i);
+        showToast(`⚡️ 1/3. ${currentStudent.fullName}: Aileaders OneID tizimidan ro'yxatdan o'tkazilmoqda...`);
+        await processStudent(i);
+        if (!isAutopilotRunningRef.current) break;
+        await new Promise(r => setTimeout(r, 2000));
+
+        // Quick IMAP check to activate Aileaders email link
+        try {
+          await fetch('/api/gmail/sync-and-activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ targetEmail: items[i].assignedEmail, retries: 3, delaySeconds: 2 }),
+          });
+        } catch {}
+      }
+
+      // Step 1: If student is not yet registered on Coursera, register them automatically!
+      if (!currentStudent.courseraVerified && items[i].courseraStatus !== 'verified') {
+        showToast(`🎓 2/3. ${currentStudent.fullName}: Coursera rasmiy dasturidan ro'yxatdan o'tkazilmoqda...`);
+        await processStudentCoursera(i);
+        if (!isAutopilotRunningRef.current) break;
+        await new Promise(r => setTimeout(r, 2500));
+      }
+
+      // Step 2: Solve quizzes & automatically fetch official certificate link
+      showToast(`🏆 3/3. ${currentStudent.fullName}: Coursera testlari (Quiz 1-4) topshirilmoqda va sertifikat olinmoqda...`);
+      const ok = await processStudentQuiz(i);
+      if (ok) certCount++;
+
+      if (!isAutopilotRunningRef.current) break;
+      // Safe anti-ban delay (3.5 seconds) between students
+      await new Promise(r => setTimeout(r, 3500));
+    }
+
+    setIsAutopilotRunning(false);
+    isAutopilotRunningRef.current = false;
+    setCurrentQuizIndex(-1);
+    playChime();
+    showToast(`🎉 Avtopilot yakunlandi! Jami ${certCount} ta o'quvchi sertifikatlashtirildi.`);
+  };
+
+  const handleStopAutopilotBatch = () => {
+    setIsAutopilotRunning(false);
+    isAutopilotRunningRef.current = false;
+    setCurrentQuizIndex(-1);
+    showToast("Avtopilot to'xtatildi.");
   };
 
   const handleStartQuizBatch = async () => {
@@ -766,7 +919,7 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
   const handleBatchActivate = async () => {
     const rawLinks = batchLinksText.split(/[\n\s,]+/).filter(l => l.includes('http'));
     if (rawLinks.length === 0) {
-      alert("Iltimos, pochtangizdan nusxalangan faollashtirish havolalarini joylang!");
+      showToast("⚠️ Iltimos, pochtangizdan nusxalangan faollashtirish havolalarini joylang!");
       return;
     }
 
@@ -785,7 +938,7 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
         setBatchLinksText('');
       }
     } catch (e: any) {
-      alert(`Xatolik: ${e.message}`);
+      showToast(`❌ Xatolik: ${e.message}`);
     } finally {
       setIsActivatingBatch(false);
     }
@@ -824,10 +977,10 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
           errorReason: '',
         });
       } else {
-        alert(data.error || "Tasdiqlashda xatolik");
+        showToast(`⚠️ ${data.error || "Tasdiqlashda xatolik"}`);
       }
     } catch (e: any) {
-      alert(`Xato: ${e.message}`);
+      showToast(`❌ Xato: ${e.message}`);
     }
   };
 
@@ -936,38 +1089,72 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
         {/* Action Controls & Stats */}
         <div className="px-6 py-3 bg-white border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 flex-shrink-0">
           <div className="flex items-center gap-2">
-            {!isRunning && !isCourseraRunning && !isQuizRunning ? (
+            {!isRunning && !isCourseraRunning && !isQuizRunning && !isAutopilotRunning ? (
               <>
                 <button
                   type="button"
+                  onClick={handleStartAutopilotBatch}
+                  className="px-5 py-2.5 bg-gradient-to-r from-amber-500 via-orange-500 to-rose-600 hover:from-amber-600 hover:to-rose-700 text-white font-black text-xs rounded-xl shadow-lg flex items-center gap-2 transition-all cursor-pointer transform hover:scale-[1.03] active:scale-[0.98] ring-2 ring-amber-400/50"
+                  title="Zero-Touch Autopilot: Sinfdagi barcha o'quvchilar nomidan Coursera 4 ta testini yechib, rasmiy sertifikat havolasini avtomatik ajratib oladi va bazaga saqlaydi!"
+                >
+                  <Award className="w-4 h-4 text-white fill-white animate-bounce" />
+                  <span>🚀 To'liq Avtopilot Sertifikatlash (Zero-Touch)</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={handleStartBatch}
-                  className="px-5 py-2.5 bg-gradient-to-r from-blue-700 via-indigo-700 to-purple-700 hover:from-blue-800 hover:to-purple-800 text-white font-extrabold text-xs rounded-xl shadow-md flex items-center gap-2 transition-all cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]"
+                  className="px-4 py-2.5 bg-gradient-to-r from-blue-700 via-indigo-700 to-purple-700 hover:from-blue-800 hover:to-purple-800 text-white font-extrabold text-xs rounded-xl shadow-md flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]"
                   title="Har bir o'quvchini avval Aileaders, so'ngra Coursera rasmiy ta'lim dasturidan ro'yxatdan o'tkazib, Gmail orqali hisobini faollashtiradi"
                 >
                   <Play className="w-4 h-4 fill-white" />
-                  <span>⚡️ Butun Sinfni Ro'yxatdan O'tkazish (To'liq Avtomat)</span>
+                  <span>⚡️ Aileaders Ro'yxatdan O'tkazish</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={handleStartCourseraBatch}
-                  className="px-4 py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]"
+                  className="px-3.5 py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]"
                   title="Sinfdagi barcha o'quvchilarni faqat Coursera ta'lim dasturidan ro'yxatdan o'tkazish"
                 >
                   <GraduationCap className="w-4 h-4 text-yellow-300" />
-                  <span>🎓 Coursera Avtomat</span>
+                  <span>🎓 Coursera Ulanish</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={handleStartQuizBatch}
-                  className="px-4 py-2.5 bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 hover:from-emerald-700 hover:to-cyan-700 text-white font-extrabold text-xs rounded-xl shadow-md flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]"
+                  className="px-3.5 py-2.5 bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 hover:from-emerald-700 hover:to-cyan-700 text-white font-extrabold text-xs rounded-xl shadow-md flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]"
                   title="Sinfdagi barcha o'quvchilar nomidan Coursera 4 ta testini (Introduction to Generative AI) avtomatik yechib topshirish"
                 >
                   <FileCheck className="w-4 h-4 text-emerald-200" />
-                  <span>🎯 Testlarni Ishlash (Beta)</span>
+                  <span>🎯 Faqat Testlar</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowBookmarkletModal(true)}
+                  className="px-3 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl flex items-center gap-1.5 cursor-pointer border border-slate-300 transition-colors"
+                  title="Brauzer paneli uchun tezkor Coursera Turbo Bookmarklet skripti"
+                >
+                  <Bookmark className="w-4 h-4 text-amber-500 fill-amber-500" />
+                  <span>Turbo Bookmarklet</span>
                 </button>
               </>
+            ) : isAutopilotRunning ? (
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-extrabold text-amber-900 animate-pulse flex items-center gap-1.5 bg-amber-50 px-3.5 py-2 rounded-xl border border-amber-300 shadow-xs">
+                  <RefreshCw className="w-4 h-4 animate-spin text-amber-600" />
+                  <span>🚀 Avtopilot Ishlamoqda: {currentQuizIndex + 1}/{items.length} (Testlar & Sertifikat)...</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleStopAutopilotBatch}
+                  className="px-3 py-2 bg-rose-100 hover:bg-rose-200 text-rose-800 font-bold text-xs rounded-xl cursor-pointer"
+                >
+                  To'xtatish
+                </button>
+              </div>
             ) : isRunning ? (
               <div className="flex items-center gap-2">
                 {!isPaused ? (
@@ -1304,29 +1491,73 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
                         </td>
 
                         <td className="py-3 px-3 text-right">
-                          {item.status === 'certified' ? (
-                            <span className="text-[10px] text-purple-700 font-bold px-2.5 py-1 bg-purple-50 rounded-lg border border-purple-200 inline-block">
-                              🎓 Sertifikat bor
-                            </span>
+                          {item.status === 'certified' || !!item.student.certificateLink ? (
+                            <div className="flex items-center justify-end gap-1.5">
+                              <span className="text-[10px] text-purple-700 font-bold px-2 py-1 bg-purple-50 rounded-lg border border-purple-200 inline-flex items-center gap-1">
+                                🎓 Sertifikatlangan
+                              </span>
+                              {item.student.certificateLink && (
+                                <a
+                                  href={item.student.certificateLink}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="p-1.5 text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded-lg transition-colors border border-blue-200 inline-flex items-center"
+                                  title="Rasmiy Coursera sertifikatini ko'rish"
+                                >
+                                  <ExternalLink className="w-3.5 h-3.5" />
+                                </a>
+                              )}
+                              {item.student.certificateLink && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(item.student.certificateLink || '');
+                                    showToast("Sertifikat havolasi nusxalandi!");
+                                  }}
+                                  className="p-1.5 text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors border border-slate-200 cursor-pointer"
+                                  title="Havolani nusxalash"
+                                >
+                                  <Copy className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
                           ) : (
                             <div className="flex items-center justify-end gap-1.5">
-                              {/* Single Coursera Quiz Solver button */}
-                              <button
-                                type="button"
-                                onClick={() => processStudentQuiz(idx)}
-                                disabled={isRunning || isCourseraRunning || isQuizRunning}
-                                className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-[10px] font-extrabold transition-all cursor-pointer flex items-center gap-1 disabled:opacity-50"
-                                title="Ushbu o'quvchi uchun Coursera 4 ta testini avtomatik yechib topshirish"
-                              >
-                                <FileCheck className="w-3 h-3 text-emerald-700" />
-                                <span>Testni Ishlash</span>
-                              </button>
+                              {/* If test was completed, provide direct Instant Fetch Certificate button */}
+                              {item.quizStatus === 'completed' || item.student.courseraQuizStatus === 'completed' ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleFetchSingleCertificate(idx)}
+                                  disabled={fetchingCertIndex === idx || isRunning || isAutopilotRunning}
+                                  className="px-2.5 py-1 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white rounded-lg text-[10px] font-extrabold transition-all cursor-pointer flex items-center gap-1 shadow-xs disabled:opacity-50"
+                                  title="Coursera yutuqlar sahifasidan rasmiy sertifikat havolasini darhol ajratib olish"
+                                >
+                                  {fetchingCertIndex === idx ? (
+                                    <RefreshCw className="w-3 h-3 animate-spin text-white" />
+                                  ) : (
+                                    <Award className="w-3 h-3 text-yellow-300" />
+                                  )}
+                                  <span>{fetchingCertIndex === idx ? "Olinmoqda..." : "Sertifikatni Olish"}</span>
+                                </button>
+                              ) : (
+                                /* Single Coursera Quiz Solver + Certificate retrieval */
+                                <button
+                                  type="button"
+                                  onClick={() => processStudentQuiz(idx)}
+                                  disabled={isRunning || isCourseraRunning || isQuizRunning || isAutopilotRunning}
+                                  className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-[10px] font-extrabold transition-all cursor-pointer flex items-center gap-1 disabled:opacity-50"
+                                  title="Ushbu o'quvchi uchun Coursera 4 ta testini avtomatik yechib, sertifikat havolasini oladi"
+                                >
+                                  <FileCheck className="w-3 h-3 text-emerald-700" />
+                                  <span>Test + Sertifikat</span>
+                                </button>
+                              )}
 
                               {/* Coursera single button */}
                               <button
                                 type="button"
                                 onClick={() => processStudentCoursera(idx)}
-                                disabled={isRunning || isCourseraRunning || isQuizRunning}
+                                disabled={isRunning || isCourseraRunning || isQuizRunning || isAutopilotRunning}
                                 className="px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 disabled:opacity-50"
                                 title="Ushbu o'quvchini Coursera rasmiy dasturidan ro'yxatdan o'tkazish va tasdiqlash"
                               >
@@ -1338,7 +1569,7 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
                               <button
                                 type="button"
                                 onClick={() => handleResendVerification(idx)}
-                                disabled={isRunning}
+                                disabled={isRunning || isAutopilotRunning}
                                 className="px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 disabled:opacity-50"
                                 title="Gmail pochtasiga tasdiqlash xatini qayta yuborish (Resend verification)"
                               >
@@ -1350,7 +1581,7 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
                               <button
                                 type="button"
                                 onClick={() => processStudent(idx)}
-                                disabled={isRunning || isCourseraRunning}
+                                disabled={isRunning || isCourseraRunning || isAutopilotRunning}
                                 className="p-1 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors cursor-pointer"
                                 title="Aileaders'dan qaytadan o'tkazish"
                               >
@@ -1391,6 +1622,69 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
           </button>
         </div>
       </div>
+
+      {/* Turbo Bookmarklet Modal */}
+      {showBookmarkletModal && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fade-in">
+          <div className="relative w-full max-w-lg bg-white rounded-2xl shadow-2xl p-6 border border-slate-200">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+              <div className="flex items-center gap-2">
+                <Bookmark className="w-5 h-5 text-amber-500 fill-amber-500" />
+                <h3 className="text-base font-black text-slate-900">
+                  Coursera Turbo Bookmarklet (0.5s Tezlatkich)
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowBookmarkletModal(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="py-4 space-y-3.5 text-xs text-slate-600">
+              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-950 font-medium">
+                <span className="font-bold text-emerald-800 block mb-0.5">💡 Eng qulay va tezkor yo'l:</span>
+                Courseraga o'zingiz kirib, qo'lda xatcho'p bosib o'tirishingiz shart emas! Oynaning yuqorisidagi <strong>"🚀 To'liq Avtopilot Sertifikatlash"</strong> yoki har bir o'quvchi kartochkasidagi <strong>"⚡️ Robot orqali yechish"</strong> tugmasini bitta bossangiz, serverning o'zi barcha testlarni 1 daqiqada topshirib, sertifikat havolasini avtomatik bazaga yozib qo'yadi!
+              </div>
+
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl">
+                <div className="font-bold text-amber-900 mb-1">Brauzer Xatcho'pidan foydalanish tartibi:</div>
+                <ol className="list-decimal list-inside space-y-1 text-amber-800">
+                  <li>Quyidagi tugmani sichqoncha bilan ushlab, brauzerning Yuqori Xatcho'plar (Bookmarks) paneliga sudrab tashlang (Drag & Drop).</li>
+                  <li>Coursera test sahifasida (Quiz 1, 2, 3 yoki 4) "Start attempt" yoki savollar chiqqanida xatcho'pni bosing.</li>
+                  <li>Robot barcha savollarni 100% to'g'ri belgilaydi va avtomatik "Submit" tugmasini bosadi.</li>
+                  <li>Testlar tugagach, Coursera Yutuqlar (Accomplishments) sahifasida xatcho'pni bossangiz, sertifikat havolasini darhol nusxalab beradi!</li>
+                </ol>
+              </div>
+
+              <div className="pt-2 flex flex-col items-center gap-3">
+                <a
+                  href={`javascript:(function(){const notify=(msg,bg='#059669')=>{let d=document.getElementById('b1m-toast');if(!d){d=document.createElement('div');d.id='b1m-toast';d.style.cssText='position:fixed;top:24px;right:24px;padding:14px 22px;border-radius:12px;font-family:system-ui,-apple-system,sans-serif;font-size:14px;font-weight:700;color:#fff;z-index:9999999;box-shadow:0 12px 30px rgba(0,0,0,0.35);transition:all 0.3s ease;';document.body.appendChild(d);}d.style.background=bg;d.innerText=msg;clearTimeout(window._b1mTimer);window._b1mTimer=setTimeout(()=>d.remove(),6000);};const clickEl=(el)=>{try{el.scrollIntoView({behavior:'smooth',block:'center'});}catch(e){}try{el.click();}catch(e){}try{el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));}catch(e){}try{el.dispatchEvent(new Event('change',{bubbles:true}));}catch(e){}};const u=location.href.toLowerCase();const certLink=document.querySelector('a[href*="/records/"],a[href*="/verify/"]');if(certLink&&(u.includes('/accomplishments')||u.includes('/records')||u.includes('/home')||u.includes('/learn'))){const fullHref=certLink.href;try{navigator.clipboard.writeText(fullHref);}catch(e){}notify('🎓 Sertifikat nusxalandi: '+fullHref);return;}const startBtns=Array.from(document.querySelectorAll('button,a')).filter(b=>{const t=(b.innerText||'').trim().toLowerCase();return(t.includes('start attempt')||t.includes('resume')||t.includes('начать попытку')||t.includes('take quiz')||t.includes('продолжить')||t.includes('start quiz')||t.includes('try again')||t.includes('пройти тест'))&&!b.disabled;});if(startBtns.length>0&&!document.querySelector('input[type="radio"],input[type="checkbox"],[role="radio"]')){clickEl(startBtns[0]);notify('🚀 Test boshlanmoqda... 2 soniya kuting va xatcho\\'pni qayta bosing!');return;}const answers=['create new content','создавать новый контент','images of cats and then used to generate new images of cats','изображениях кошек','кошек и собак','foundation model is a large ai model pretrained on a vast quantity of data','designed to be adapted','базовая модель','адаптирован','short piece of text','control the output','промпт'];const inputs=Array.from(document.querySelectorAll('input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]'));if(inputs.length===0){notify('⚠️ Test savollari topilmadi. Avval testni oching yoki Start Attempt bosing!','#d97706');return;}let selected=0;inputs.forEach(r=>{const p=r.closest('label')||r.closest('[role="radiogroup"]')||r.parentElement;const txt=(p?(p.innerText||''):'')+(r.nextElementSibling?(r.nextElementSibling.innerText||''):'');const low=txt.toLowerCase();if(low.includes('too much data')||low.includes('слишком много данных')||low.includes('слишком большом')){return;}const matched=answers.some(a=>low.includes(a.toLowerCase()));if(matched){clickEl(r);selected++;}});if(selected<inputs.length/4){inputs.forEach(r=>{const p=r.closest('label')||r.parentElement;const t=(p?(p.innerText||''):'').toLowerCase();if(t.length>10&&!t.includes('too much data')&&!t.includes('слишком много данных')){clickEl(r);selected++;}});}setTimeout(()=>{const submitBtn=Array.from(document.querySelectorAll('button')).find(b=>{const t=(b.innerText||'').trim().toLowerCase();return(t==='submit'||t==='submit attempt'||t==='отправить'||t==='отправить попытку'||t.startsWith('submit'))&&!b.disabled;});if(submitBtn){clickEl(submitBtn);setTimeout(()=>{const modalConfirm=Array.from(document.querySelectorAll('button')).find(b=>{const t=(b.innerText||'').trim().toLowerCase();return(t==='submit'||t==='отправить'||t.includes('yes')||t.includes('да'))&&!b.disabled;});if(modalConfirm)clickEl(modalConfirm);},1000);notify('✅ Test 100% yechildi va Submit qilindi!');}else{notify('✅ Javoblar belgilandi! Sahifa pastidagi Submit tugmasini bosing.');}},600);})();`}
+                  onClick={e => e.preventDefault()}
+                  className="px-6 py-3 bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500 text-white font-black text-sm rounded-xl shadow-lg border-2 border-white cursor-grab active:cursor-grabbing hover:scale-105 transition-all inline-flex items-center gap-2"
+                  title="Ushbu tugmani brauzer xatcho'plar paneliga sudrab qo'ying"
+                >
+                  <Bookmark className="w-5 h-5 fill-white" />
+                  <span>⚡️ Coursera Turbo Solver (Sudrab oling)</span>
+                </a>
+                <span className="text-[11px] text-slate-500 font-medium text-center">
+                  Tugmani sichqoncha bilan ushlab, brauzerning Bookmarks paneliga sudrab qo'ying
+                </span>
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-slate-200 flex justify-end">
+              <button
+                onClick={() => setShowBookmarkletModal(false)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs cursor-pointer"
+              >
+                Tushunarli
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

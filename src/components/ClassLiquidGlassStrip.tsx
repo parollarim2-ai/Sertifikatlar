@@ -1145,7 +1145,12 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
 
                 {/* Row 1: Name and Debt dot */}
                 <span className="liquid-r1">
-                  <span className="liquid-n">{nb(c.name)}</span>
+                  <span className="liquid-n">
+                    {c.raw.isExternalSchool && (
+                      <span className="text-[9px] font-black text-rose-600 mr-1 bg-rose-50 px-1 py-0.2 rounded border border-rose-300">bm</span>
+                    )}
+                    {nb(c.name)}
+                  </span>
                   <i className={`liquid-dot ${c.debt > 0 ? 'db' : ''}`}></i>
                 </span>
 

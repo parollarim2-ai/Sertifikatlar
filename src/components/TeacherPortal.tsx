@@ -10,7 +10,6 @@ import {
   downloadAllCertificatesAsZip,
   generateUnifiedCertificatesPdf,
 } from '../utils/certificateGenerator';
-import { VoiceAssistantWidget } from './VoiceAssistantWidget';
 import confetti from 'canvas-confetti';
 import { 
   Users, 
@@ -305,7 +304,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       setCopySuccessToast(`✅ ${currentClass.name} sinfi sertifikatlari nusxalandi! Telegramga joylashingiz mumkin.`);
       setTimeout(() => setCopySuccessToast(''), 4000);
     } catch {
-      alert("Nusxalashda xatolik yuz berdi. Iltimos qaytadan urining.");
+      setCopySuccessToast("⚠️ Nusxalashda xatolik yuz berdi. Iltimos qaytadan urining.");
+      setTimeout(() => setCopySuccessToast(''), 4000);
     }
   };
 
@@ -323,7 +323,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       confetti({ particleCount: 40 });
     } catch (err) {
       console.error(err);
-      alert("Fayllarni arxivlashda xatolik yuz berdi");
+      setCopySuccessToast("⚠️ Fayllarni arxivlashda xatolik yuz berdi");
+      setTimeout(() => setCopySuccessToast(''), 4000);
     } finally {
       setIsZipping(false);
       setZipProgress(0);
@@ -364,7 +365,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       }
     } catch (err: any) {
       console.error("Unified PDF generation error:", err);
-      alert("PDF yaratishda xatolik yuz berdi. Iltimos qaytadan urinib ko'ring.");
+      setCopySuccessToast("⚠️ PDF yaratishda xatolik yuz berdi. Iltimos qaytadan urinib ko'ring.");
+      setTimeout(() => setCopySuccessToast(''), 5000);
     } finally {
       setIsGeneratingUnifiedPdf(false);
       setUnifiedProgressPercent(0);
@@ -374,7 +376,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
 
   const handleSelectClass = (targetClass: ClassGroup) => {
     // 1. Agar ushbu qurilmada allaqachon boshqa maktab sinfi belgilangan bo'lsa (boundClassId)
-    // va yangi tanlanayotgan sinf o'sha biriktirilgan sinf bo'lmasa:
+    // va yangi tanlanayotgan sinf o'sha biriktirilgan sinf bo'lmasa va admin ruxsat bermagan bo'lsa:
     if (boundClassId && boundClassId !== targetClass.id && !isUnlockedByAdmin) {
       const boundCls = classes.find(c => c.id === boundClassId) || null;
       const newAttempts = unauthorizedAttempts + 1;
@@ -392,12 +394,26 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       return;
     }
 
-    // 2. Agar tanlanayotgan sinf boshqa maktab bo'lsa (isExternalSchool) va qurilmada hali birikma bo'lmasa:
-    if (targetClass.isExternalSchool) {
+    // 2. Agar admin ruxsat bergan bo'lsa (isUnlockedByAdmin) yoki tanlanayotgan sinf boshqa maktab bo'lsa:
+    if (isUnlockedByAdmin || targetClass.isExternalSchool) {
       setBoundClassId(targetClass.id);
       try {
         localStorage.setItem(`teacher_bound_class_${currentDevice.deviceId}`, targetClass.id);
+        localStorage.removeItem(`unlock_external_device_${currentDevice.deviceId}`);
+        localStorage.removeItem(`teacher_wrong_attempts_${currentDevice.deviceId}`);
       } catch {}
+      setUnauthorizedAttempts(0);
+
+      // Admin bergan 1 martalik ruxsatni sarflandik deb yangilash
+      onRegisterSessionRef.current({
+        deviceId: currentDevice.deviceId,
+        boundClassId: targetClass.id,
+        isExternalTeacher: true,
+        allowClassChangeOnce: false,
+        className: targetClass.name,
+        classId: targetClass.id,
+        teacherName: targetClass.teacherName,
+      });
     }
 
     setSelectedClassId(targetClass.id);
@@ -480,10 +496,10 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                       <div className="min-w-0">
                         {/* Boshqa maktab qizil yozuvli yorliq */}
                         {c.isExternalSchool && (
-                          <div className="mb-0.5">
-                            <span className="text-[11px] font-black text-rose-600 tracking-wide uppercase flex items-center gap-1">
-                              <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse"></span>
-                              {c.schoolName || '27-maktab'}
+                          <div className="mb-1">
+                            <span className="text-[11px] font-black text-rose-600 tracking-wider uppercase inline-flex items-center gap-1.5 bg-rose-50 border border-rose-300 px-2 py-0.5 rounded-md shadow-2xs">
+                              <span className="w-1.5 h-1.5 rounded-full bg-rose-600 animate-pulse"></span>
+                              <span>{c.schoolName || '27-maktab'}</span>
                             </span>
                           </div>
                         )}
@@ -1400,14 +1416,6 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       {/* External School Access Restriction Alert Modal */}
       {renderExternalAccessAlertModal()}
 
-      {/* Voice Assistant Widget */}
-      <VoiceAssistantWidget
-        classes={classes}
-        students={students}
-        activeClassId={selectedClassId}
-        onSelectClass={(cid) => setSelectedClassId(cid)}
-        onSaveStudent={onSaveStudent}
-      />
 
     </div>
   );

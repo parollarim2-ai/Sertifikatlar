@@ -107,6 +107,27 @@
       },
       "required": ["id", "chatId"]
     },
+    "teacherCertificates": {
+      "title": "TeacherCertificate",
+      "description": "Certificates and credentials of school teachers",
+      "type": "object",
+      "properties": {
+        "fullName": { "type": "string" },
+        "subject": { "type": "string" },
+        "birthDate": { "type": "string" },
+        "passportOrId": { "type": "string" },
+        "assignedEmail": { "type": "string" },
+        "assignedPassword": { "type": "string" },
+        "status": { "type": "string" },
+        "certificateLink": { "type": "string" },
+        "certificateDate": { "type": "string" },
+        "certificateNumber": { "type": "string" },
+        "paidAmount": { "type": "number" },
+        "isPaid": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["fullName", "status"]
+    },
     "testDoc": {
       "title": "TestDoc",
       "description": "System test connection document",
@@ -141,6 +162,10 @@
     "/telegramUsers/{userId}": {
       "schema": "telegramUsers",
       "description": "Collection of registered Telegram users"
+    },
+    "/teacherCertificates/{certId}": {
+      "schema": "teacherCertificates",
+      "description": "Collection of teacher certificates"
     },
     "/test/{docId}": {
       "schema": "testDoc",

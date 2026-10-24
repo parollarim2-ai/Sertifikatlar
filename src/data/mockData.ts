@@ -1,8 +1,6 @@
 import { ClassGroup, Student, EmailAccount } from '../types';
 
-export const ADMIN_SECRET_CODE = 'courserauchunadminpanelkodi1234liginiaytmayman';
-
-// Tozalangan: Foydalanuvchi o'z sinflari va o'quvchilarini noldan kiritishi uchun bo'sh ro'yxat
+// Bo'sh ro'yxatlar: Foydalanuvchi ma'lumotlari Firestore bazasidan yuklanadi
 export const INITIAL_CLASSES: ClassGroup[] = [];
 export const INITIAL_STUDENTS: Student[] = [];
 

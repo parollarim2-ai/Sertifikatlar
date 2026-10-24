@@ -7,13 +7,14 @@ import {
   writeBatch
 } from 'firebase/firestore';
 import { db, auth } from './firebase';
-import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage } from '../types';
+import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage, TeacherCertificate } from '../types';
 
 export const CLASSES_COLLECTION = 'classes';
 export const STUDENTS_COLLECTION = 'students';
 export const EMAIL_POOL_COLLECTION = 'emailPool';
 export const SESSIONS_COLLECTION = 'sessions';
 export const TEACHER_MESSAGES_COLLECTION = 'teacherMessages';
+export const TEACHER_CERTS_COLLECTION = 'teacherCertificates';
 
 export enum OperationType {
   CREATE = 'create',
@@ -60,8 +61,10 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
     path
   };
   console.error('Firestore Error: ', JSON.stringify(errInfo));
-  if (errMessage.includes('Missing or insufficient permissions') || errMessage.includes('permission-denied')) {
-    throw new Error(JSON.stringify(errInfo));
+  if (operationType === OperationType.WRITE || operationType === OperationType.DELETE || operationType === OperationType.CREATE || operationType === OperationType.UPDATE) {
+    if (errMessage.includes('Missing or insufficient permissions') || errMessage.includes('permission-denied')) {
+      throw new Error(JSON.stringify(errInfo));
+    }
   }
 }
 
@@ -386,5 +389,57 @@ export async function syncDeleteTeacherMessage(messageId: string) {
     await deleteDoc(doc(db, TEACHER_MESSAGES_COLLECTION, messageId));
   } catch (e) {
     handleFirestoreError(e, OperationType.DELETE, `${TEACHER_MESSAGES_COLLECTION}/${messageId}`);
+  }
+}
+
+// ==========================================
+// TEACHER CERTIFICATES REAL-TIME SYNC
+// ==========================================
+
+export function subscribeToTeacherCertificates(callback: (teachers: TeacherCertificate[]) => void) {
+  const colRef = collection(db, TEACHER_CERTS_COLLECTION);
+  return onSnapshot(
+    colRef,
+    (snapshot) => {
+      const items: TeacherCertificate[] = [];
+      snapshot.forEach((docSnap) => {
+        items.push({ id: docSnap.id, ...(docSnap.data() as Omit<TeacherCertificate, 'id'>) });
+      });
+      callback(items);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, TEACHER_CERTS_COLLECTION);
+    }
+  );
+}
+
+export async function syncSaveTeacherCertificate(teacher: TeacherCertificate) {
+  try {
+    const docRef = doc(db, TEACHER_CERTS_COLLECTION, teacher.id);
+    await setDoc(docRef, removeUndefinedFields(teacher), { merge: true });
+  } catch (e) {
+    handleFirestoreError(e, OperationType.WRITE, `${TEACHER_CERTS_COLLECTION}/${teacher.id}`);
+  }
+}
+
+export async function syncSaveBatchTeacherCertificates(teachers: TeacherCertificate[]) {
+  if (!teachers.length) return;
+  try {
+    const batch = writeBatch(db);
+    for (const t of teachers) {
+      const docRef = doc(db, TEACHER_CERTS_COLLECTION, t.id);
+      batch.set(docRef, removeUndefinedFields(t), { merge: true });
+    }
+    await batch.commit();
+  } catch (e) {
+    handleFirestoreError(e, OperationType.WRITE, TEACHER_CERTS_COLLECTION);
+  }
+}
+
+export async function syncDeleteTeacherCertificate(teacherId: string) {
+  try {
+    await deleteDoc(doc(db, TEACHER_CERTS_COLLECTION, teacherId));
+  } catch (e) {
+    handleFirestoreError(e, OperationType.DELETE, `${TEACHER_CERTS_COLLECTION}/${teacherId}`);
   }
 }

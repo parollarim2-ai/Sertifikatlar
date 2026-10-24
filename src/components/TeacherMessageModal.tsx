@@ -12,8 +12,10 @@ import {
   Sparkles,
   Smartphone,
   Eye,
-  Info
+  Info,
+  AlertCircle
 } from 'lucide-react';
+import { getAdminAuthHeaders } from '../utils/authHeaders';
 
 interface TeacherMessageModalProps {
   isOpen: boolean;
@@ -41,6 +43,7 @@ export const TeacherMessageModal: React.FC<TeacherMessageModalProps> = ({
   const [activeTab, setActiveTab] = useState<'write' | 'history'>('write');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [sendViaTelegram, setSendViaTelegram] = useState(true);
+  const [formError, setFormError] = useState('');
 
   const connectedTgUser = telegramUsers.find(u => u.classId === classGroup.id);
 
@@ -65,9 +68,10 @@ export const TeacherMessageModal: React.FC<TeacherMessageModalProps> = ({
     if (!file) return;
 
     if (file.size > 2 * 1024 * 1024) {
-      alert("Rasm hajmi 2MB dan oshmasligi kerak!");
+      setFormError("Rasm hajmi 2MB dan oshmasligi kerak!");
       return;
     }
+    setFormError('');
 
     const reader = new FileReader();
     reader.onload = (event) => {
@@ -79,9 +83,10 @@ export const TeacherMessageModal: React.FC<TeacherMessageModalProps> = ({
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !content.trim()) {
-      alert("Iltimos, xabar mavzusi va matnini kiriting!");
+      setFormError("Iltimos, xabar mavzusi va matnini kiriting!");
       return;
     }
+    setFormError('');
 
     setIsSubmitting(true);
 
@@ -104,7 +109,7 @@ export const TeacherMessageModal: React.FC<TeacherMessageModalProps> = ({
     if (sendViaTelegram && connectedTgUser) {
       fetch('/api/telegram/send-message', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAdminAuthHeaders(),
         body: JSON.stringify({
           chatId: connectedTgUser.chatId,
           title: title.trim(),
@@ -203,6 +208,13 @@ export const TeacherMessageModal: React.FC<TeacherMessageModalProps> = ({
                 Qabul qiluvchi: <strong>{classGroup.teacherName}</strong> ({classGroup.name} sinf rahbari). Xabar yuborilgach, ustoz saytga kirishi bilanoq unga xabarnoma ko'rsatiladi.
               </span>
             </div>
+
+            {formError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center gap-2.5 animate-shake">
+                <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0" />
+                <span>{formError}</span>
+              </div>
+            )}
 
             {/* Telegram Bot Delivery Status */}
             {connectedTgUser ? (

@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
-import { ADMIN_SECRET_CODE } from '../data/mockData';
-import { Lock, Key, AlertCircle, X, ShieldCheck } from 'lucide-react';
+import { Lock, Key, AlertCircle, X, ShieldCheck, Loader2 } from 'lucide-react';
 
 interface AdminLoginModalProps {
   isOpen: boolean;
@@ -15,6 +14,7 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
 }) => {
   const [enteredCode, setEnteredCode] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   React.useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -28,14 +28,34 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (enteredCode.trim() === ADMIN_SECRET_CODE) {
-      setErrorMsg('');
-      onSuccess();
-      onClose();
-    } else {
-      setErrorMsg("Kiritilgan maxfiy kod noto'g'ri. Iltimos, qayta urinib ko'ring.");
+    if (!enteredCode.trim() || isSubmitting) return;
+
+    setIsSubmitting(true);
+    setErrorMsg('');
+
+    try {
+      const res = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: enteredCode.trim() }),
+      });
+      const data = await res.json();
+
+      if (res.ok && data.success && data.token) {
+        localStorage.setItem('b1m_admin_token', data.token);
+        localStorage.setItem('b1m_school_admin_auth_v5', 'true');
+        setErrorMsg('');
+        onSuccess();
+        onClose();
+      } else {
+        setErrorMsg(data.error || "Maxfiy kod noto'g'ri!");
+      }
+    } catch (err: any) {
+      setErrorMsg(`Serverga ulanishda xatolik: ${err.message}`);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -99,10 +119,11 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
             </button>
             <button
               type="submit"
-              className="px-4 py-2 text-xs font-semibold rounded-lg bg-blue-700 hover:bg-blue-800 text-white flex items-center gap-1.5 transition-colors cursor-pointer"
+              disabled={isSubmitting}
+              className="px-4 py-2 text-xs font-semibold rounded-lg bg-blue-700 hover:bg-blue-800 disabled:bg-blue-400 text-white flex items-center gap-1.5 transition-colors cursor-pointer"
             >
-              <ShieldCheck className="w-4 h-4" />
-              <span>Kirish</span>
+              {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+              <span>{isSubmitting ? "Tekshirilmoqda..." : "Kirish"}</span>
             </button>
           </div>
         </form>

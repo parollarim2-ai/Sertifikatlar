@@ -12,7 +12,7 @@ import { UnifiedGlassProvider } from '../context/UnifiedGlassContext';
 import { VoiceAssistantWidget } from './VoiceAssistantWidget';
 import { MetrikaAiScannerModal } from './MetrikaAiScannerModal';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
-import { getStoredCertifyLogs } from '../utils/operatorSpeedTracker';
+import { getStoredCertifyLogs, recordCertifyEvent } from '../utils/operatorSpeedTracker';
 import { 
   Users, 
   Award, 
@@ -20,6 +20,8 @@ import {
   AlertTriangle, 
   Plus, 
   Mail, 
+  Mic,
+  RotateCcw,
   Upload, 
   DollarSign, 
   Search, 
@@ -150,6 +152,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [isMetrikaScannerOpen, setIsMetrikaScannerOpen] = useState(false);
   const [isClassBatchModalOpen, setIsClassBatchModalOpen] = useState(false);
   const [batchTargetClass, setBatchTargetClass] = useState<ClassGroup | null>(null);
+  const [isVoiceAssistantOpen, setIsVoiceAssistantOpen] = useState(false);
 
   // Multi-select status filter: 'certified' (Tayyor), 'error' (Xatolik), 'pending' (Kutilmoqda)
   type StatusFilterType = 'certified' | 'error' | 'pending';
@@ -197,9 +200,34 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   
   // Non-blocking quick toast without OK button
   const [quickToast, setQuickToast] = useState('');
-  const showQuickToast = (msg: string) => {
+  const quickToastTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const showQuickToast = (msg: string, duration: number = 2800) => {
     setQuickToast(msg);
-    setTimeout(() => setQuickToast(''), 1600);
+    if (quickToastTimerRef.current) {
+      clearTimeout(quickToastTimerRef.current);
+    }
+    quickToastTimerRef.current = setTimeout(() => {
+      setQuickToast('');
+      quickToastTimerRef.current = null;
+    }, duration);
+  };
+
+  // Play pleasant acoustic chime sound on success
+  const playChime = () => {
+    try {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.35);
+    } catch {}
   };
 
   // Timer for single click vs double click on passport
@@ -209,6 +237,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     return () => {
       if (passportClickTimeoutRef.current) {
         clearTimeout(passportClickTimeoutRef.current);
+      }
+      if (quickToastTimerRef.current) {
+        clearTimeout(quickToastTimerRef.current);
       }
     };
   }, []);
@@ -239,6 +270,96 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     } else if ('classId' in st) {
       onOpenStudentModal(st as Student, 'passport');
     }
+  };
+
+  // Direct, ultra-fast certificate paste with strict verification
+  const [isValidatingCert, setIsValidatingCert] = useState(false);
+
+  const handleFastPasteCertificateForStudent = async (targetStudent: Student, explicitUrl?: string) => {
+    let clipText = (explicitUrl || '').trim();
+
+    if (!clipText) {
+      try {
+        if (navigator.clipboard && navigator.clipboard.readText) {
+          clipText = (await navigator.clipboard.readText() || '').trim();
+        }
+      } catch {
+        showQuickToast("⚠️ Brauzer buferdan o'qishga ruxsat bermadi", 3000);
+        return;
+      }
+    }
+
+    if (!clipText) {
+      showQuickToast("⚠️ Bufer bo'sh! Avval Coursera sertifikat havolasini nusxalang.", 3000);
+      return;
+    }
+
+    // 1. Strict URL check
+    if (!clipText.startsWith('http://') && !clipText.startsWith('https://')) {
+      showQuickToast("❌ Buferdagi matn havola (URL) emas! (https://...)", 3500);
+      return;
+    }
+
+    // 2. Strict Coursera domain check
+    const isCoursera = /coursera\.org/i.test(clipText) || /coursera_assets/i.test(clipText);
+    if (!isCoursera) {
+      showQuickToast("❌ Bu Coursera ta'lim platformasiga tegishli rasmiy sertifikat havolasi emas!", 4000);
+      return;
+    }
+
+    // 3. Duplicate check across all other students
+    const existingDuplicate = students.find(s => 
+      s.id !== targetStudent.id && 
+      s.certificateLink && 
+      s.certificateLink.trim().toLowerCase() === clipText.toLowerCase()
+    );
+    if (existingDuplicate) {
+      showQuickToast(`❌ Bu sertifikat havolasi allaqachon boshqa o'quvchiga (${existingDuplicate.fullName}) biriktirilgan!`, 4500);
+      return;
+    }
+
+    // 4. Server-side deep validation of certificate recipient name
+    setIsValidatingCert(true);
+    showQuickToast(`🔍 ${targetStudent.fullName} uchun Coursera sertifikati tekshirilmoqda...`, 3000);
+
+    try {
+      const res = await fetch('/api/coursera/validate-certificate-recipient', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: clipText,
+          expectedFullName: targetStudent.fullName,
+        }),
+      });
+      const data = await res.json();
+      if (!data.valid) {
+        showQuickToast(data.reason || "❌ Sertifikat tekshiruvdan o'tmadi!", 5000);
+        setIsValidatingCert(false);
+        return;
+      }
+    } catch (e) {
+      console.warn("Validation endpoint network error, falling back:", e);
+    } finally {
+      setIsValidatingCert(false);
+    }
+
+    // 5. Save verified student
+    const updatedStudent: Student = {
+      ...targetStudent,
+      certificateLink: clipText,
+      status: 'certified',
+      hasError: false,
+      errorReason: '',
+      certifiedAt: new Date().toISOString(),
+      certificateDate: new Date().toISOString().split('T')[0],
+    };
+
+    if (onSaveStudent) {
+      await onSaveStudent(updatedStudent);
+    }
+    recordCertifyEvent(targetStudent.id, targetStudent.fullName, updatedStudent.certifiedAt);
+    playChime();
+    showQuickToast(`✅ ${targetStudent.fullName}ga Coursera sertifikati biriktirildi va saqlandi!`, 3500);
   };
 
   // ESC key listener to close internal modals
@@ -458,6 +579,38 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     return list.filter(item => selectedStatusFilters.includes(getItemStatusCategory(item)));
   }, [unifiedList, selectedStatusFilters]);
 
+  // Alt + V: Fast Paste Certificate to the next pending student in active list
+  const handleAltVPasteCertificate = useCallback(async () => {
+    // Find first student who doesn't have a certificate yet in current filtered view, or overall
+    const pendingStudent = filteredStudents.find(s => !s.isTeacher && s.status !== 'certified' && (!s.certificateLink || s.certificateLink.trim() === '')) ||
+                           filteredStudents.find(s => !s.isTeacher && s.status !== 'certified') ||
+                           students.find(s => s.status !== 'certified' && (!s.certificateLink || s.certificateLink.trim() === ''));
+
+    if (!pendingStudent) {
+      showQuickToast("🎉 Ro'yxatdagi barcha o'quvchilarga sertifikat olib bo'lingan!", 3000);
+      return;
+    }
+
+    const target = 'rawStudent' in pendingStudent && pendingStudent.rawStudent
+      ? pendingStudent.rawStudent
+      : (pendingStudent as unknown as Student);
+
+    await handleFastPasteCertificateForStudent(target);
+  }, [filteredStudents, students]);
+
+  // Alt + V global hotkey listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Alt + V (or Alt + v) hotkey for instant clipboard certificate paste to next student
+      if (e.altKey && (e.key === 'v' || e.key === 'V' || e.code === 'KeyV')) {
+        e.preventDefault();
+        handleAltVPasteCertificate();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleAltVPasteCertificate]);
+
   // Assign unique emails to missing students in Email tab
   const handleAssignEmailsToMissingStudents = () => {
     const unassignedStudents = students.filter(s => !s.assignedEmail || s.assignedEmail.trim() === '');
@@ -558,7 +711,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       !e.isUsed && !assignedEmailsSet.has(e.email.trim().toLowerCase())
     );
 
-    const newStudentId = `st-${Date.now()}`;
+    const newStudentId = `st-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const newStudent: Student = {
       id: newStudentId,
       fullName: newStudentName.trim(),
@@ -681,6 +834,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             >
               <Mail className="w-4 h-4 text-blue-700 flex-shrink-0" />
               <span>Pochta zaxirasi</span>
+            </button>
+
+            <button
+              onClick={() => setIsVoiceAssistantOpen(prev => !prev)}
+              className={`px-3.5 py-2.5 text-xs font-semibold rounded-xl border shadow-xs flex items-center gap-2 transition-colors cursor-pointer ${
+                isVoiceAssistantOpen
+                  ? 'bg-amber-500/15 border-amber-400 text-amber-900 ring-1 ring-amber-300'
+                  : 'bg-white hover:bg-slate-50 text-slate-800 border-slate-300'
+              }`}
+              title="Ovozli boshqaruv yordamchisini ochish / yopish"
+            >
+              <Mic className="w-4 h-4 text-amber-600 flex-shrink-0" />
+              <span>Ovozli yordamchi</span>
             </button>
 
             <button
@@ -1000,8 +1166,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           <div className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-xs">
             <div className="px-5 py-3.5 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2">
               <div>
-                <h3 className="font-bold text-slate-900 text-sm">O'quvchilar Ro'yxati</h3>
-                <p className="text-xs text-slate-500">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="font-bold text-slate-900 text-sm">O'quvchilar Ro'yxati</h3>
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-900 border border-emerald-300 text-[11px] font-bold shadow-2xs" title="Alt+V bosing: Buferdagi Coursera sertifikatini ro'yxatdagi navbatdagi o'quvchiga avtomatik biriktiradi">
+                    <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Tezkor sertifikat qo'yish:</span>
+                    <kbd className="px-1.5 py-0.2 bg-white rounded border border-emerald-400 font-mono text-xs font-black text-emerald-900 shadow-2xs">Alt + V</kbd>
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">
                   <span className="text-blue-700 font-semibold">1 marta bosing</span> — nusxalash, <span className="text-blue-700 font-semibold">2 marta tez bosing</span> — tahrirlash
                 </p>
               </div>
@@ -1196,16 +1369,32 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
                           <td className="py-3 px-3">
                             {st.certificateLink ? (
-                              <a
-                                href={st.certificateLink}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={e => e.stopPropagation()}
-                                className="text-blue-700 hover:text-blue-800 font-medium flex items-center gap-1 max-w-[140px] truncate"
-                              >
-                                <ExternalLink className="w-3 h-3 flex-shrink-0" />
-                                <span className="truncate">Sertifikat</span>
-                              </a>
+                              <div className="flex items-center gap-1.5">
+                                <a
+                                  href={st.certificateLink}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={e => e.stopPropagation()}
+                                  className="text-blue-700 hover:text-blue-800 font-semibold flex items-center gap-1 max-w-[120px] truncate"
+                                  title={st.certificateLink}
+                                >
+                                  <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                                  <span className="truncate">Sertifikat</span>
+                                </a>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (st.rawStudent) {
+                                      handleFastPasteCertificateForStudent(st.rawStudent);
+                                    }
+                                  }}
+                                  className="p-1 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded transition-colors cursor-pointer"
+                                  title="Sertifikat havolasini yangilash / qayta qo'yish"
+                                >
+                                  <RotateCcw className="w-3 h-3" />
+                                </button>
+                              </div>
                             ) : (
                               <button
                                 type="button"
@@ -1214,13 +1403,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                   if (st.isTeacher) {
                                     setActiveTab('teachers');
                                   } else if (st.rawStudent) {
-                                    onOpenStudentModal(st.rawStudent);
+                                    handleFastPasteCertificateForStudent(st.rawStudent);
                                   }
                                 }}
-                                className="px-2 py-0.5 text-[11px] font-sans font-semibold rounded bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 flex items-center gap-1 cursor-pointer"
+                                className="px-2.5 py-1 text-[11px] font-sans font-bold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white shadow-2xs flex items-center gap-1.5 transition-all cursor-pointer active:scale-95"
+                                title="Buferdagi Coursera sertifikatini ushbu o'quvchiga darhol biriktirish (Alt+V)"
                               >
-                                <Clipboard className="w-3 h-3" />
-                                <span>+ Havola</span>
+                                <Clipboard className="w-3.5 h-3.5" />
+                                <span>Qo'yish</span>
                               </button>
                             )}
                           </td>
@@ -2125,6 +2315,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         emailPool={emailPool}
         activeClassId={selectedClassId}
         selectedStatusFilters={selectedStatusFilters}
+        isOpen={isVoiceAssistantOpen}
+        onToggleOpen={setIsVoiceAssistantOpen}
         onSelectClass={(cid) => setSelectedClassId(cid)}
         onSaveStudent={onSaveStudent}
         onSaveClass={onSaveClass}

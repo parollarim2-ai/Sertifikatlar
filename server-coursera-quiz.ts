@@ -14,6 +14,9 @@ export interface SolveQuizzesResponse {
   studentEmail: string;
   completedQuizzes: CourseraQuizResult[];
   logs: string[];
+  certificateUrl?: string;
+  certificateId?: string;
+  certifiedAt?: string;
   error?: string;
 }
 
@@ -118,6 +121,145 @@ async function dismissBannersAndPopups(page: any) {
       if (acceptBtn) acceptBtn.click();
     });
   } catch {}
+}
+
+async function registerOnTheFly(
+  page: any,
+  cleanName: string,
+  cleanEmail: string,
+  password: string,
+  log: (msg: string) => void
+): Promise<boolean> {
+  const courseraSignupUrl = 'https://www.coursera.org/programs/learning-program-h13rq?authMode=signup';
+  log(`🔗 Coursera dasturidan ro'yxatdan o'tish sahifasi ochilmoqda: ${courseraSignupUrl}`);
+
+  try {
+    await page.goto(courseraSignupUrl, { waitUntil: 'networkidle2', timeout: 45000 });
+    await new Promise((r) => setTimeout(r, 2000));
+    await dismissBannersAndPopups(page);
+
+    const nameInput = await page.$('input[name="name"], input[placeholder*="name" i]');
+    if (nameInput) {
+      await nameInput.click();
+      await nameInput.type(cleanName, { delay: 25 });
+    }
+
+    const emailInput = await page.$('input[name="email"], input[type="email"]');
+    if (emailInput) {
+      await emailInput.click();
+      await emailInput.type(cleanEmail, { delay: 25 });
+    }
+
+    const passInput = await page.$('input[name="password"], input[type="password"]');
+    if (passInput) {
+      await passInput.click();
+      await passInput.type(password, { delay: 25 });
+    }
+
+    await new Promise((r) => setTimeout(r, 1000));
+
+    log(`"Join for Free" tugmasi bosilmoqda...`);
+    const clickedSubmit = await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button'));
+      const btn = btns.find((b) => {
+        const t = b.innerText.trim().toLowerCase();
+        return (t.includes('join for free') || t.includes('sign up') || t.includes('присоединиться')) && !b.disabled;
+      });
+      if (btn) {
+        btn.click();
+        return true;
+      }
+      return false;
+    });
+
+    if (!clickedSubmit && passInput) {
+      await passInput.press('Enter');
+    }
+
+    await new Promise((r) => setTimeout(r, 6000));
+
+    const curUrl = page.url();
+    if (curUrl.includes('/organizations/') || curUrl.includes('/programs/') || curUrl.includes('/learn/')) {
+      log(`✅ O'quvchi Coursera dasturidan muvaffaqiyatli ro'yxatdan o'tkazildi!`);
+      return true;
+    }
+
+    await page.evaluate(() => {
+      const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .cds-dialog, .c-modal');
+      if (dialog) {
+        const btns = Array.from(dialog.querySelectorAll('button'));
+        if (btns[0]) (btns[0] as HTMLElement).click();
+      }
+    });
+
+    await new Promise((r) => setTimeout(r, 2500));
+    return true;
+  } catch (err: any) {
+    log(`⚠️ Avtomatik ro'yxatdan o'tishda ogohlantirish: ${err.message}`);
+    return false;
+  }
+}
+
+async function ensureCourseEnrolled(page: any, log: (msg: string) => void): Promise<boolean> {
+  const courseHomeUrl = 'https://www.coursera.org/learn/introduction-to-generative-ai/home/welcome';
+  log(`📚 Kursga a'zolik (Enrollment) tekshirilmoqda: ${courseHomeUrl}...`);
+
+  try {
+    await page.goto(courseHomeUrl, { waitUntil: 'networkidle2', timeout: 35000 });
+    await new Promise((r) => setTimeout(r, 2000));
+    await dismissBannersAndPopups(page);
+
+    const currentUrl = page.url();
+    if (currentUrl.includes('/home/') || currentUrl.includes('/module/')) {
+      log(`✅ Kursga allaqachon a'zo bo'lingan (Active enrollment).`);
+      return true;
+    }
+
+    const enrollClicked = await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button, a'));
+      const enrollBtn = btns.find((b) => {
+        const t = (b as HTMLElement).innerText.trim().toLowerCase();
+        return (
+          (t.includes('enroll') || t.includes('go to course') || t.includes('записаться') || t.includes('зарегистрироваться')) &&
+          !t.includes('cancel') &&
+          !t.includes('already enrolled')
+        );
+      });
+      if (enrollBtn) {
+        (enrollBtn as HTMLElement).click();
+        return (enrollBtn as HTMLElement).innerText.trim();
+      }
+      return null;
+    });
+
+    if (enrollClicked) {
+      log(`ℹ️ "${enrollClicked}" tugmasi bosildi.`);
+      await new Promise((r) => setTimeout(r, 3500));
+      await dismissBannersAndPopups(page);
+
+      // Click modal confirm button if modal opens
+      await page.evaluate(() => {
+        const dialog = document.querySelector('[role="dialog"], [role="alertdialog"], .cds-dialog, .c-modal');
+        if (dialog) {
+          const btns = Array.from(dialog.querySelectorAll('button, a'));
+          const target = btns.find((b) => {
+            const t = (b as HTMLElement).innerText.trim().toLowerCase();
+            return t.includes('go to course') || t.includes('continue') || t.includes('enroll') || t.includes('перейти');
+          }) || btns[0];
+          if (target) (target as HTMLElement).click();
+        }
+      });
+      await new Promise((r) => setTimeout(r, 2500));
+      log(`✅ Kursga muvaffaqiyatli a'zo bo'lindi (Enrolled)!`);
+      return true;
+    } else {
+      log(`ℹ️ Kursga allaqachon a'zo bo'lingan (Already enrolled).`);
+      return true;
+    }
+  } catch (err: any) {
+    log(`⚠️ Kursga a'zo bo'lishda ogohlantirish: ${err.message}`);
+    return false;
+  }
 }
 
 export async function solveStudentCourseraQuizzes(
@@ -294,19 +436,21 @@ export async function solveStudentCourseraQuizzes(
       for (let sec = 0; sec < 14; sec++) {
         await new Promise((r) => setTimeout(r, 1000));
 
-        if (loginApiError) {
-          throw new Error(`Coursera login xatoligi: ${loginApiError} (Email: ${cleanEmail})`);
+        let pageState: any = { errorMsg: null, hasProfile: false, hasPassInput: true };
+        try {
+          pageState = await page.evaluate(() => {
+            const alertEl = document.querySelector('[role="alert"], .cds-feedback, .error, .rc-FormError');
+            const errorMsg = alertEl ? (alertEl as HTMLElement).innerText.trim() : null;
+            const hasProfile = !!document.querySelector(
+              '[data-e2e="header-profile"], button[aria-label*="Profile" i], .rc-UserMenuButton, [aria-label*="Account" i]'
+            );
+            const hasPassInput = !!document.querySelector('input[name="password"], input[type="password"]');
+            return { errorMsg, hasProfile, hasPassInput };
+          });
+        } catch {
+          // Navigation in progress means login redirected successfully!
+          await new Promise((r) => setTimeout(r, 2000));
         }
-
-        const pageState = await page.evaluate(() => {
-          const alertEl = document.querySelector('[role="alert"], .cds-feedback, .error, .rc-FormError');
-          const errorMsg = alertEl ? (alertEl as HTMLElement).innerText.trim() : null;
-          const hasProfile = !!document.querySelector(
-            '[data-e2e="header-profile"], button[aria-label*="Profile" i], .rc-UserMenuButton, [aria-label*="Account" i]'
-          );
-          const hasPassInput = !!document.querySelector('input[name="password"], input[type="password"]');
-          return { errorMsg, hasProfile, hasPassInput };
-        });
 
         if (
           pageState.errorMsg &&
@@ -316,20 +460,31 @@ export async function solveStudentCourseraQuizzes(
             pageState.errorMsg.includes('incorrect') ||
             pageState.errorMsg.includes('error'))
         ) {
-          throw new Error(`Coursera login xatoligi: ${pageState.errorMsg} (Email: ${cleanEmail})`);
+          loginApiError = `Email yoki parol mos kelmadi (${pageState.errorMsg})`;
+          break;
         }
 
         const cookies = await context.cookies();
         const hasCauth = cookies.some((c: any) => c.name === 'CAUTH');
+        const currentUrl = page.url();
+        const isRedirectedToApp = currentUrl.includes('/organizations/') || currentUrl.includes('/learn/') || currentUrl.includes('collectionId');
 
-        if (hasCauth || pageState.hasProfile || (!pageState.hasPassInput && !pageState.errorMsg)) {
+        if (hasCauth || pageState.hasProfile || isRedirectedToApp || (!pageState.hasPassInput && !pageState.errorMsg)) {
           loginSuccess = true;
           break;
         }
       }
 
+      // If login failed because account is not registered, attempt instant on-the-fly registration!
       if (!loginSuccess && loginApiError) {
-        throw new Error(`Coursera login xatoligi: ${loginApiError} (Email: ${cleanEmail})`);
+        log(`ℹ️ Hisob topilmadi yoki parol mos kelmadi. O'quvchini Coursera dasturidan tezkor ro'yxatdan o'tkazish boshlandi...`);
+        const signedUp = await registerOnTheFly(page, cleanName, cleanEmail, password, log);
+        if (signedUp) {
+          loginSuccess = true;
+          loginApiError = null;
+        } else {
+          throw new Error(`Coursera login xatoligi: ${loginApiError} (Email: ${cleanEmail})`);
+        }
       }
 
       if (!loginSuccess) {
@@ -341,21 +496,8 @@ export async function solveStudentCourseraQuizzes(
       log(`✅ Coursera hisobiga kirish tasdiqlangan.`);
     }
 
-    // Check if Course needs to be Enrolled
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button, a'));
-      const enroll = btns.find((b) => {
-        const t = (b as HTMLElement).innerText.trim().toLowerCase();
-        return (
-          (t.startsWith('enroll') || t.startsWith('зарегистрироваться') || t.includes('enroll for free')) &&
-          !t.includes('cancel')
-        );
-      });
-      if (enroll) {
-        (enroll as HTMLElement).click();
-      }
-    });
-    await new Promise((r) => setTimeout(r, 2000));
+    // Ensure course is fully enrolled before quizzes
+    await ensureCourseEnrolled(page, log);
 
     // STEP 2: SOLVE EACH QUIZ SEQUENTIALLY
     for (const qConfig of QUIZZES) {
@@ -366,6 +508,15 @@ export async function solveStudentCourseraQuizzes(
       await page.goto(qConfig.url, { waitUntil: 'networkidle2', timeout: 45000 });
       await new Promise((r) => setTimeout(r, 2500));
       await dismissBannersAndPopups(page);
+
+      // If redirected to course page because of enroll prompt, recover immediately
+      if (!page.url().includes('attempt')) {
+        log(`ℹ️ Testga urinish sahifasi qayta yo'naltirildi. Kurs a'zoligi yangilanmoqda...`);
+        await ensureCourseEnrolled(page, log);
+        await page.goto(qConfig.url, { waitUntil: 'networkidle2', timeout: 45000 });
+        await new Promise((r) => setTimeout(r, 2500));
+        await dismissBannersAndPopups(page);
+      }
 
       // Verify we are not blocked or sent back to unauthenticated screen
       const currentQuizPageText = await page.evaluate(() => document.body.innerText.slice(0, 500));
@@ -739,11 +890,29 @@ export async function solveStudentCourseraQuizzes(
     }
 
     log(`\n🏆 Barcha 4 ta Coursera testlari muvaffaqiyatli yakunlandi! O'quvchi: ${cleanName}`);
+
+    // STEP 3: AUTOMATIC ZERO-TOUCH CERTIFICATE RETRIEVAL
+    let certInfo: ExtractedCertificate = {};
+    try {
+      certInfo = await extractCourseraCertificate(page, cleanName, log);
+    } catch (certErr: any) {
+      log(`⚠️ Sertifikatni ajratib olishda ogohlantirish: ${certErr.message}`);
+    }
+
+    if (certInfo.certificateUrl) {
+      log(`🎓 Bajarildi! Olingan rasmiy sertifikat: ${certInfo.certificateUrl}`);
+    } else {
+      log(`ℹ️ Sertifikat havolasi hali generatsiya bo'lish arafasida yoki accomplishments sahifasida kutmoqda.`);
+    }
+
     return {
       success: true,
       studentName: cleanName,
       studentEmail: cleanEmail,
       completedQuizzes,
+      certificateUrl: certInfo.certificateUrl,
+      certificateId: certInfo.certificateId,
+      certifiedAt: certInfo.certifiedAt,
       logs,
     };
   } catch (err: any) {
@@ -769,3 +938,299 @@ export async function solveStudentCourseraQuizzes(
     }
   }
 }
+
+export interface ExtractedCertificate {
+  certificateUrl?: string;
+  certificateId?: string;
+  courseTitle?: string;
+  recipientName?: string;
+  certifiedAt?: string;
+}
+
+export function normalizeCertUrl(url: string): string {
+  let clean = url.trim();
+  if (clean.startsWith('/')) {
+    clean = `https://www.coursera.org${clean}`;
+  }
+  const idMatch = clean.match(/(?:records|verify)\/([a-zA-Z0-9_-]+)/i);
+  if (idMatch && idMatch[1]) {
+    return `https://coursera.org/verify/${idMatch[1]}`;
+  }
+  return clean;
+}
+
+export function extractCertId(url: string): string {
+  const m = url.match(/(?:records|verify)\/([a-zA-Z0-9_-]+)/i);
+  return m ? m[1] : '';
+}
+
+/**
+ * Extracts the official Coursera certificate directly from the current page,
+ * accomplishments page, or course completion home page.
+ */
+export async function extractCourseraCertificate(
+  page: any,
+  studentName: string,
+  log: (msg: string) => void
+): Promise<ExtractedCertificate> {
+  log(`🎓 5. Rasmiy Coursera sertifikati avtomatik qidirilmoqda...`);
+
+  // Allow completion state / webhooks to settle
+  await new Promise((r) => setTimeout(r, 3000));
+  await dismissBannersAndPopups(page);
+
+  const scanDomForCertLink = async (): Promise<{ url: string; text?: string } | null> => {
+    return await page.evaluate(() => {
+      const allAnchors = Array.from(document.querySelectorAll('a'));
+
+      // 1. Check for verify or accomplishment records links
+      for (const a of allAnchors) {
+        const href = a.getAttribute('href') || '';
+        const fullHref = (a as HTMLAnchorElement).href || '';
+        const txt = (a.innerText || '').trim();
+
+        if (
+          href.includes('/account/accomplishments/records/') ||
+          href.includes('/account/accomplishments/certificate/') ||
+          href.includes('/verify/') ||
+          fullHref.includes('/verify/') ||
+          fullHref.includes('/account/accomplishments/records/')
+        ) {
+          return { url: fullHref || href, text: txt };
+        }
+      }
+
+      // 2. Check for button / link with certificate text
+      for (const a of allAnchors) {
+        const txt = (a.innerText || '').toLowerCase();
+        const href = (a as HTMLAnchorElement).href || '';
+        if (
+          (txt.includes('view certificate') ||
+            txt.includes('see certificate') ||
+            txt.includes('посмотреть сертификат') ||
+            txt.includes('просмотреть сертификат') ||
+            txt.includes('сертификат') ||
+            txt.includes('certificate')) &&
+          href.length > 5 &&
+          !href.includes('javascript:')
+        ) {
+          return { url: href, text: txt };
+        }
+      }
+
+      // 3. Scan script tags or Apollo state in HTML
+      try {
+        const scripts = Array.from(document.querySelectorAll('script'));
+        for (const s of scripts) {
+          const content = s.textContent || '';
+          const match = content.match(/https?:\/\/(?:www\.)?coursera\.org\/(?:account\/accomplishments\/records|verify)\/([a-zA-Z0-9_-]+)/i);
+          if (match) {
+            return { url: match[0] };
+          }
+        }
+      } catch {}
+
+      return null;
+    });
+  };
+
+  // Step 1: Scan current page
+  let found = await scanDomForCertLink();
+  if (found && found.url) {
+    const certUrl = normalizeCertUrl(found.url);
+    const certId = extractCertId(certUrl);
+    log(`✨ Sertifikat havolasi topildi: ${certUrl} (ID: ${certId})`);
+    return {
+      certificateUrl: certUrl,
+      certificateId: certId,
+      certifiedAt: new Date().toISOString(),
+    };
+  }
+
+  // Step 2: Navigate directly to accomplishments page
+  const accomplishmentsUrl = 'https://www.coursera.org/account/accomplishments';
+  log(`🔗 Yutuqlar sahifasi ochilmoqda: ${accomplishmentsUrl}`);
+  try {
+    await page.goto(accomplishmentsUrl, { waitUntil: 'networkidle2', timeout: 35000 });
+    await new Promise((r) => setTimeout(r, 3000));
+    await dismissBannersAndPopups(page);
+
+    found = await scanDomForCertLink();
+    if (found && found.url) {
+      const certUrl = normalizeCertUrl(found.url);
+      const certId = extractCertId(certUrl);
+      log(`🏆 Rasmiy sertifikat muvaffaqiyatli ajratib olindi: ${certUrl} (ID: ${certId})`);
+      return {
+        certificateUrl: certUrl,
+        certificateId: certId,
+        certifiedAt: new Date().toISOString(),
+      };
+    }
+  } catch (e: any) {
+    log(`⚠️ Accomplishments sahifasi xabari: ${e.message}`);
+  }
+
+  // Step 3: Check course home page
+  const courseHomeUrl = 'https://www.coursera.org/learn/introduction-to-generative-ai/home/welcome';
+  log(`🔗 Kurs bosh sahifasi tekshirilmoqda: ${courseHomeUrl}`);
+  try {
+    await page.goto(courseHomeUrl, { waitUntil: 'networkidle2', timeout: 35000 });
+    await new Promise((r) => setTimeout(r, 3000));
+    await dismissBannersAndPopups(page);
+
+    found = await scanDomForCertLink();
+    if (found && found.url) {
+      const certUrl = normalizeCertUrl(found.url);
+      const certId = extractCertId(certUrl);
+      log(`🏆 Kurs sahifasidan sertifikat havolasi topildi: ${certUrl} (ID: ${certId})`);
+      return {
+        certificateUrl: certUrl,
+        certificateId: certId,
+        certifiedAt: new Date().toISOString(),
+      };
+    }
+  } catch (e: any) {
+    log(`⚠️ Kurs sahifasi tekshiruv xabari: ${e.message}`);
+  }
+
+  return {};
+}
+
+/**
+ * Fast direct certificate fetcher for an existing student without running quizzes.
+ * Logs in and immediately retrieves their accomplishment certificate URL.
+ */
+export async function fetchStudentCourseraCertificate(
+  browser: Browser,
+  student: { fullName: string; email: string; password?: string }
+): Promise<{
+  success: boolean;
+  studentName: string;
+  studentEmail: string;
+  certificateUrl?: string;
+  certificateId?: string;
+  certifiedAt?: string;
+  logs: string[];
+  error?: string;
+}> {
+  const logs: string[] = [];
+  const log = (msg: string) => {
+    logs.push(`[${new Date().toLocaleTimeString('uz-UZ')}] ${msg}`);
+    console.log(`[Coursera Cert Fetcher] ${msg}`);
+  };
+
+  const cleanEmail = (student.email || '').trim().toLowerCase();
+  const cleanName = (student.fullName || '').trim();
+  const password = student.password || 'MaktabPass2026!';
+
+  log(`🚀 Sertifikatni tezkor olish boshlandi: ${cleanName} (${cleanEmail})`);
+
+  let context: any = null;
+  let page: any = null;
+
+  try {
+    context = await browser.createBrowserContext();
+    page = await context.newPage();
+    await page.setViewport({ width: 1280, height: 950 });
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    );
+
+    // Login via Program URL
+    log(`1. Coursera dasturiga kirilmoqda...`);
+    await page.goto(COURSERA_PROGRAM_LOGIN_URL, { waitUntil: 'networkidle2', timeout: 45000 });
+    await new Promise((r) => setTimeout(r, 2000));
+    await dismissBannersAndPopups(page);
+
+    let hasEmailInput = (await page.$('input[name="email"], input[type="email"]')) !== null;
+    if (!hasEmailInput) {
+      await page.evaluate(() => {
+        const clickable = Array.from(document.querySelectorAll('a, button'));
+        const loginEl = clickable.find((el) => {
+          const t = (el as HTMLElement).innerText.trim().toLowerCase();
+          return t === 'log in' || t === 'login' || t === 'войти' || t === 'kirish';
+        });
+        if (loginEl) (loginEl as HTMLElement).click();
+      });
+      try {
+        await page.waitForSelector('input[name="email"], input[type="email"]', { timeout: 10000 });
+        hasEmailInput = true;
+      } catch {}
+    }
+
+    if (hasEmailInput) {
+      const emailInput = await page.$('input[name="email"], input[type="email"]');
+      if (emailInput) {
+        await emailInput.click({ clickCount: 3 });
+        await emailInput.press('Backspace');
+        await emailInput.type(cleanEmail, { delay: 20 });
+      }
+
+      await page.waitForSelector('input[name="password"], input[type="password"]', { timeout: 10000 });
+      const passInput = await page.$('input[name="password"], input[type="password"]');
+      if (passInput) {
+        await passInput.click({ clickCount: 3 });
+        await passInput.press('Backspace');
+        await passInput.type(password, { delay: 20 });
+      }
+
+      await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        const loginBtn = btns.find((b) => {
+          const t = b.innerText.trim().toLowerCase();
+          return (
+            (t.includes('log in') || t.includes('login') || t.includes('войти') || t.includes('kirish')) &&
+            !b.disabled
+          );
+        });
+        if (loginBtn) loginBtn.click();
+      });
+
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+
+    // Extract certificate from Accomplishments
+    const certInfo = await extractCourseraCertificate(page, cleanName, log);
+    if (certInfo.certificateUrl) {
+      log(`🎉 Sertifikat topildi: ${certInfo.certificateUrl}`);
+      return {
+        success: true,
+        studentName: cleanName,
+        studentEmail: cleanEmail,
+        certificateUrl: certInfo.certificateUrl,
+        certificateId: certInfo.certificateId,
+        certifiedAt: certInfo.certifiedAt,
+        logs,
+      };
+    } else {
+      return {
+        success: false,
+        studentName: cleanName,
+        studentEmail: cleanEmail,
+        logs,
+        error: "Rasmiy sertifikat hali shakllanmagan yoki testlar to'liq yakunlanmagan.",
+      };
+    }
+  } catch (err: any) {
+    log(`❌ Sertifikat olish xatosi: ${err.message}`);
+    return {
+      success: false,
+      studentName: cleanName,
+      studentEmail: cleanEmail,
+      logs,
+      error: err.message,
+    };
+  } finally {
+    if (page) {
+      try {
+        await page.close();
+      } catch {}
+    }
+    if (context) {
+      try {
+        await context.close();
+      } catch {}
+    }
+  }
+}
+

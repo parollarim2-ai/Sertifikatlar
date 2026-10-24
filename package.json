@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build",
-    "gcp-build": "vite build",
+    "build": "vite build && rm -rf build && cp -r dist build",
+    "gcp-build": "vite build && rm -rf build && cp -r dist build",
     "start": "node server.ts",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "clean": "rm -rf dist build server.js",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

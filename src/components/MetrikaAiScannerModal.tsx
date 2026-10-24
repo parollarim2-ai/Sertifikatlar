@@ -15,6 +15,7 @@ import {
   ShieldCheck,
   CheckCircle2,
   AlertTriangle,
+  AlertCircle,
   Loader2,
   Trash2,
   RefreshCw,
@@ -96,6 +97,11 @@ export const MetrikaAiScannerModal: React.FC<MetrikaAiScannerModalProps> = ({
   const [scanProgress, setScanProgress] = useState({ current: 0, total: 0 });
   const [currentScanningName, setCurrentScanningName] = useState<string>('');
   const [rateLimitCountdown, setRateLimitCountdown] = useState<number | null>(null);
+  const [errorToast, setErrorToast] = useState<string>('');
+  const showError = (msg: string) => {
+    setErrorToast(msg);
+    setTimeout(() => setErrorToast(''), 4000);
+  };
 
   // Preview zoom image
   const [zoomedImage, setZoomedImage] = useState<{ url: string; name: string } | null>(null);
@@ -400,14 +406,14 @@ export const MetrikaAiScannerModal: React.FC<MetrikaAiScannerModalProps> = ({
   const handleSaveToClass = () => {
     const validRows = extractedRows.filter(r => r.fullName.trim().length > 0);
     if (validRows.length === 0) {
-      alert("Saqlash uchun kamida 1 ta o'quvchi ma'lumotlari kiritilgan bo'lishi kerak!");
+      showError("⚠️ Saqlash uchun kamida 1 ta o'quvchi ma'lumotlari kiritilgan bo'lishi kerak!");
       return;
     }
 
     let targetClass: ClassGroup;
     if (uploadMode === 'new') {
       if (!newClassName.trim()) {
-        alert("Iltimos, yangi sinf nomini kiriting (masalan: 9-F)!");
+        showError("⚠️ Iltimos, yangi sinf nomini kiriting (masalan: 9-F)!");
         return;
       }
       const newId = `class-${newClassName.toLowerCase().replace(/[^a-z0-9]/g, '')}-${Date.now().toString().slice(-4)}`;
@@ -424,7 +430,7 @@ export const MetrikaAiScannerModal: React.FC<MetrikaAiScannerModalProps> = ({
     } else {
       const existing = classes.find(c => c.id === selectedClassId);
       if (!existing) {
-        alert("Iltimos, mavjud sinfni tanlang!");
+        showError("⚠️ Iltimos, mavjud sinfni tanlang!");
         return;
       }
       targetClass = existing;
@@ -495,6 +501,12 @@ export const MetrikaAiScannerModal: React.FC<MetrikaAiScannerModalProps> = ({
 
         {/* SCROLLABLE BODY */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5">
+          {errorToast && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-medium flex items-center gap-2 animate-shake">
+              <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0" />
+              <span>{errorToast}</span>
+            </div>
+          )}
 
           {/* 1. CLASS SELECTION TABS */}
           <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">

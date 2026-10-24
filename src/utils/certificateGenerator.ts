@@ -47,7 +47,7 @@ export function generateCertificateHTML(student: Student, classGroup?: ClassGrou
         </div>
 
         <div style="font-size: 12px; color: #cbd5e1; max-width: 600px; margin: 0 auto; line-height: 1.5;">
-          ${classGroup ? `<b>${classGroup.name}</b> sinf o'quvchisi.` : ''} "Bir Million Dasturchi" loyihasi doirasida xalqaro Coursera platformasidagi <b>"Frontend Web Development & Algoritmlar"</b> ixtisoslashtirilgan ta'lim dasturini muvaffaqiyatli tamomladi.
+          ${classGroup ? `<b>${classGroup.name}</b> sinf o'quvchisi.` : ''} "Bir Million Dasturchi" loyihasi doirasida xalqaro Coursera platformasidagi <b>"Introduction to Generative AI (Google Cloud)"</b> ixtisoslashtirilgan ta'lim dasturini muvaffaqiyatli tamomladi.
         </div>
       </div>
 
@@ -361,7 +361,6 @@ export async function downloadAllCertificatesAsZip(
 ): Promise<void> {
   const certifiedStudents = students.filter(s => s.status === 'certified' && s.classId === classGroup.id);
   if (certifiedStudents.length === 0) {
-    alert("Bu sinfda hali sertifikat olgan o'quvchilar yo'q!");
     return;
   }
 
@@ -488,7 +487,6 @@ export async function generateUnifiedCertificatesPdf(
   const certifiedStudents = students.filter(s => s.status === 'certified' && s.classId === classGroup.id);
   
   if (certifiedStudents.length === 0) {
-    alert("Bu sinfda hali sertifikat olgan o'quvchilar yo'q!");
     return null;
   }
 

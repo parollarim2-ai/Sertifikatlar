@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import { jsPDF } from 'jspdf';
 import type { ClassGroup, Student, TelegramUser } from './src/types/index.ts';
 
-const BOT_TOKEN = '8846557313:AAE5J1aRrvJJ2LLZCbD7WlI_JFzhSrmR_tA';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8846557313:AAE5J1aRrvJJ2LLZCbD7WlI_JFzhSrmR_tA';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const DATA_FILE = path.resolve(process.cwd(), 'telegram-data.json');
 const CERT_CACHE_DIR = path.resolve(process.cwd(), '.cert_cache');
@@ -169,19 +169,75 @@ export function syncDataFromClient(data: { classes?: ClassGroup[]; students?: St
   checkAndNotifyCompletedClasses().catch((e) => console.error('Error in auto notify check:', e));
 }
 
-// Low-level Telegram API helper
-async function callTelegram(method: string, payload: any) {
-  try {
-    const res = await fetch(`${TELEGRAM_API}/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    return await res.json();
-  } catch (err) {
-    console.error(`Telegram API error on ${method}:`, err);
-    return null;
+// Rate-limited Telegram API request queue (max 18 req/sec to safely stay below Telegram's 30/sec limit)
+interface QueuedTelegramTask {
+  method: string;
+  payload: any;
+  resolve: (res: any) => void;
+  reject: (err: any) => void;
+}
+
+const telegramQueue: QueuedTelegramTask[] = [];
+let isProcessingQueue = false;
+
+async function processTelegramQueue() {
+  if (isProcessingQueue) return;
+  isProcessingQueue = true;
+
+  while (telegramQueue.length > 0) {
+    const task = telegramQueue.shift();
+    if (!task) break;
+
+    try {
+      const res = await fetch(`${TELEGRAM_API}/${task.method}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(task.payload),
+      });
+
+      const data = await res.json().catch(() => null);
+
+      if (data && data.error_code === 429) {
+        const retryAfter = ((data.parameters?.retry_after || 2) + 0.5) * 1000;
+        console.warn(`[Telegram Rate Limit 429] Waiting ${retryAfter}ms before retrying...`);
+        await new Promise(r => setTimeout(r, retryAfter));
+        // Put task back at front to retry
+        telegramQueue.unshift(task);
+        continue;
+      }
+
+      task.resolve(data);
+    } catch (err) {
+      console.error(`Telegram API error on ${task.method}:`, err);
+      task.resolve(null);
+    }
+
+    // 55ms spacing between calls = ~18 calls/sec, perfectly avoiding 429
+    await new Promise(r => setTimeout(r, 55));
   }
+
+  isProcessingQueue = false;
+}
+
+// Low-level queued Telegram API helper
+export function callTelegram(method: string, payload: any): Promise<any> {
+  return new Promise((resolve, reject) => {
+    telegramQueue.push({ method, payload, resolve, reject });
+    processTelegramQueue();
+  });
+}
+
+// Safe broadcast helper across all connected users with rate limiting
+export async function broadcastTelegramNotification(htmlText: string): Promise<number> {
+  const users = getTelegramUsers();
+  let count = 0;
+  for (const u of users) {
+    if (u.chatId && !u.isBlocked) {
+      await sendMessage(u.chatId, htmlText);
+      count++;
+    }
+  }
+  return count;
 }
 
 // Send text message with inline keyboard
