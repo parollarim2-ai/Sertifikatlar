@@ -415,24 +415,42 @@ export function subscribeToTeacherCertificates(callback: (teachers: TeacherCerti
 
 export async function syncSaveTeacherCertificate(teacher: TeacherCertificate) {
   try {
-    const docRef = doc(db, TEACHER_CERTS_COLLECTION, teacher.id);
-    await setDoc(docRef, removeUndefinedFields(teacher), { merge: true });
+    const cleanTeacher: TeacherCertificate = {
+      ...teacher,
+      fullName: (teacher.fullName || '').trim() || 'Ustoz',
+      status: ['pending', 'certified', 'error'].includes(teacher.status) ? teacher.status : 'pending',
+    };
+    const docRef = doc(db, TEACHER_CERTS_COLLECTION, cleanTeacher.id);
+    await setDoc(docRef, removeUndefinedFields(cleanTeacher), { merge: true });
   } catch (e) {
+    console.error('syncSaveTeacherCertificate failed for id:', teacher.id, e);
     handleFirestoreError(e, OperationType.WRITE, `${TEACHER_CERTS_COLLECTION}/${teacher.id}`);
   }
 }
 
 export async function syncSaveBatchTeacherCertificates(teachers: TeacherCertificate[]) {
   if (!teachers.length) return;
-  try {
-    const batch = writeBatch(db);
-    for (const t of teachers) {
-      const docRef = doc(db, TEACHER_CERTS_COLLECTION, t.id);
-      batch.set(docRef, removeUndefinedFields(t), { merge: true });
+  const chunkSize = 300;
+  for (let i = 0; i < teachers.length; i += chunkSize) {
+    const chunk = teachers.slice(i, i + chunkSize);
+    try {
+      const batch = writeBatch(db);
+      for (const t of chunk) {
+        const cleanT: TeacherCertificate = {
+          ...t,
+          fullName: (t.fullName || '').trim() || 'Ustoz',
+          status: ['pending', 'certified', 'error'].includes(t.status) ? t.status : 'pending',
+        };
+        const docRef = doc(db, TEACHER_CERTS_COLLECTION, cleanT.id);
+        batch.set(docRef, removeUndefinedFields(cleanT), { merge: true });
+      }
+      await batch.commit();
+    } catch (e) {
+      console.warn('syncSaveBatchTeacherCertificates chunk failed, falling back to individual saves:', e);
+      for (const t of chunk) {
+        await syncSaveTeacherCertificate(t);
+      }
     }
-    await batch.commit();
-  } catch (e) {
-    handleFirestoreError(e, OperationType.WRITE, TEACHER_CERTS_COLLECTION);
   }
 }
 
@@ -441,5 +459,25 @@ export async function syncDeleteTeacherCertificate(teacherId: string) {
     await deleteDoc(doc(db, TEACHER_CERTS_COLLECTION, teacherId));
   } catch (e) {
     handleFirestoreError(e, OperationType.DELETE, `${TEACHER_CERTS_COLLECTION}/${teacherId}`);
+  }
+}
+
+export async function syncDeleteBatchTeacherCertificates(teacherIds: string[]) {
+  if (!teacherIds.length) return;
+  const chunkSize = 300;
+  for (let i = 0; i < teacherIds.length; i += chunkSize) {
+    const chunk = teacherIds.slice(i, i + chunkSize);
+    try {
+      const batch = writeBatch(db);
+      for (const id of chunk) {
+        batch.delete(doc(db, TEACHER_CERTS_COLLECTION, id));
+      }
+      await batch.commit();
+    } catch (e) {
+      console.warn('syncDeleteBatchTeacherCertificates chunk failed, fallback to individual delete:', e);
+      for (const id of chunk) {
+        await syncDeleteTeacherCertificate(id);
+      }
+    }
   }
 }

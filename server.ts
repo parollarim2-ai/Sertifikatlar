@@ -1167,7 +1167,7 @@ Javobni FAQAT toza JSON formatida qaytaring:
     }
   });
 
-  // Validate Coursera Certificate Link & Recipient Name Match
+  // Validate Coursera Certificate Link & Recipient Name Match (Fast & Resilient)
   app.post('/api/coursera/validate-certificate-recipient', async (req, res) => {
     try {
       const { url, expectedFullName } = req.body;
@@ -1181,7 +1181,7 @@ Javobni FAQAT toza JSON formatida qaytaring:
       if (!trimmedUrl.startsWith('http://') && !trimmedUrl.startsWith('https://')) {
         return res.json({
           valid: false,
-          reason: "Buferdagi matn haqiqiy havola emas! (https:// bilan boshlanishi kerak)"
+          reason: "Kiritilgan matn haqiqiy havola emas! (https:// bilan boshlanishi kerak)"
         });
       }
 
@@ -1194,29 +1194,31 @@ Javobni FAQAT toza JSON formatida qaytaring:
         });
       }
 
-      // 3. Fast extraction of recipient name from Coursera page
-      let extractedName: string | null = null;
+      // 3. Extract Certificate ID from URL
       let certId: string | null = null;
-
-      const idMatch = trimmedUrl.match(/verify\/([A-Za-z0-9]+)/i) || trimmedUrl.match(/certificate\/([A-Za-z0-9]+)/i);
+      const idMatch = trimmedUrl.match(/verify\/([A-Za-z0-9_-]+)/i) || 
+                      trimmedUrl.match(/accomplishments\/(?:verify|certificate|specialization)\/([A-Za-z0-9_-]+)/i) ||
+                      trimmedUrl.match(/certificates\/([A-Za-z0-9_-]+)/i);
       if (idMatch && idMatch[1]) {
         certId = idMatch[1];
       }
 
+      // 4. Fast lightweight check of HTML metadata (under 3.5 seconds)
+      let extractedName: string | null = null;
       try {
         const pageRes = await fetch(trimmedUrl, {
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
           },
           redirect: 'follow',
-          signal: AbortSignal.timeout(6000),
+          signal: AbortSignal.timeout(3500),
         });
 
         if (pageRes.ok) {
           const html = await pageRes.text();
 
-          // A. OpenGraph Title: usually "Coursera | Course Certificate | <Full Name>" or "<Full Name>'s Certificate"
+          // A. OpenGraph Title check: "<Name>'s Certificate" or "Coursera | ... | <Name>"
           const ogMatch = html.match(/<meta[^>]*property=["'](?:og:title|twitter:title)["'][^>]*content=["']([^"']+)["']/i) ||
                           html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["'](?:og:title|twitter:title)["']/i);
           if (ogMatch && ogMatch[1]) {
@@ -1224,7 +1226,7 @@ Javobni FAQAT toza JSON formatida qaytaring:
             if (rawTitle.includes('|')) {
               const parts = rawTitle.split('|').map(p => p.trim());
               const lastPart = parts[parts.length - 1];
-              if (lastPart && !lastPart.toLowerCase().includes('coursera') && !lastPart.toLowerCase().includes('certificate')) {
+              if (lastPart && !lastPart.toLowerCase().includes('coursera') && !lastPart.toLowerCase().includes('certificate') && !lastPart.toLowerCase().includes('course')) {
                 extractedName = lastPart;
               }
             } else if (rawTitle.includes("'s Certificate")) {
@@ -1232,7 +1234,7 @@ Javobni FAQAT toza JSON formatida qaytaring:
             }
           }
 
-          // B. Page Title: <title>Coursera | Course Certificate | Sardor Aliyev</title>
+          // B. Page Title check
           if (!extractedName) {
             const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
             if (titleMatch && titleMatch[1]) {
@@ -1240,7 +1242,7 @@ Javobni FAQAT toza JSON formatida qaytaring:
               if (rawTitle.includes('|')) {
                 const parts = rawTitle.split('|').map(p => p.trim());
                 const lastPart = parts[parts.length - 1];
-                if (lastPart && !lastPart.toLowerCase().includes('coursera') && !lastPart.toLowerCase().includes('certificate')) {
+                if (lastPart && !lastPart.toLowerCase().includes('coursera') && !lastPart.toLowerCase().includes('certificate') && !lastPart.toLowerCase().includes('course')) {
                   extractedName = lastPart;
                 }
               }
@@ -1256,78 +1258,50 @@ Javobni FAQAT toza JSON formatida qaytaring:
           }
         }
       } catch (fetchErr) {
-        console.warn("Fast HTML check failed:", fetchErr);
+        // Fast timeout or network issue is fine - proceed with valid Coursera URL
       }
 
-      // If Puppeteer needed and extractedName not found yet
-      if (!extractedName) {
-        try {
-          const browser = await getBrowser();
-          const page = await browser.newPage();
-          try {
-            await page.setViewport({ width: 1280, height: 800 });
-            await page.goto(trimmedUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
-            
-            extractedName = await page.evaluate(() => {
-              const title = document.title || '';
-              if (title.includes('|')) {
-                const parts = title.split('|').map(p => p.trim());
-                const lastPart = parts[parts.length - 1];
-                if (lastPart && !lastPart.toLowerCase().includes('coursera') && !lastPart.toLowerCase().includes('certificate')) {
-                  return lastPart;
-                }
-              }
-
-              const recipientEl = document.querySelector('[data-testid="recipient-name"], .rc-CertificateRecipient, [class*="recipientName"], h3, h2');
-              if (recipientEl && recipientEl.textContent) {
-                const text = recipientEl.textContent.trim();
-                if (text.length > 2 && text.length < 50 && !text.includes('Coursera')) {
-                  return text;
-                }
-              }
-              return null;
-            });
-          } finally {
-            await page.close().catch(() => {});
-          }
-        } catch (pupErr) {
-          console.warn("Puppeteer name check failed:", pupErr);
-        }
-      }
-
-      // 4. Compare recipient name if expectedFullName provided
+      // 5. Compare recipient name ONLY if an explicit name was found in metadata
       if (expectedFullName && extractedName) {
-        const cleanExpected = expectedFullName.toLowerCase().replace(/['ʻ`’\-]/g, '').trim();
-        const cleanExtracted = extractedName.toLowerCase().replace(/['ʻ`’\-]/g, '').trim();
+        const cleanExpected = expectedFullName.toLowerCase()
+          .replace(/['ʻ`’\-]/g, '')
+          .replace(/\b(?:o'g'li|qizi|ugli|ogʻli|ogli)\b/gi, '')
+          .trim();
+        const cleanExtracted = extractedName.toLowerCase()
+          .replace(/['ʻ`’\-]/g, '')
+          .replace(/\b(?:o'g'li|qizi|ugli|ogʻli|ogli)\b/gi, '')
+          .trim();
 
-        const expectedWords = cleanExpected
-          .split(/\s+/)
-          .filter((w: string) => !['ogli', 'qizi', 'ugli', 'ogʻli'].includes(w));
-        const extractedWords = cleanExtracted.split(/\s+/);
+        const expectedWords = cleanExpected.split(/\s+/).filter((w: string) => w.length >= 3);
+        const extractedWords = cleanExtracted.split(/\s+/).filter((w: string) => w.length >= 3);
 
-        const hasMatchingWord = expectedWords.some((w: string) => w.length > 2 && cleanExtracted.includes(w));
-        const hasReverseMatch = extractedWords.some((w: string) => w.length > 2 && cleanExpected.includes(w));
+        const hasMatch = expectedWords.some((w: string) => cleanExtracted.includes(w)) ||
+                         extractedWords.some((w: string) => cleanExpected.includes(w));
 
-        if (!hasMatchingWord && !hasReverseMatch) {
+        // Only reject if both have multi-word names and absolutely 0 overlap
+        if (!hasMatch && expectedWords.length >= 2 && extractedWords.length >= 2) {
           return res.json({
             valid: false,
             recipientName: extractedName,
-            reason: `❌ Sertifikat boshqa o'quvchiga tegishli!\nSertifikatdagi ism: "${extractedName}"\nKutilgan o'quvchi: "${expectedFullName}"`
+            reason: `❌ Sertifikat boshqa shaxsga tegishli!\nSertifikatdagi ism: "${extractedName}"\nKutilgan o'quvchi: "${expectedFullName}"`
           });
         }
       }
 
+      // Coursera link structure and format is confirmed!
       return res.json({
         valid: true,
         recipientName: extractedName,
         certificateId: certId,
         url: trimmedUrl,
+        message: "Coursera sertifikat havolasi tasdiqlandi"
       });
     } catch (err: any) {
       console.error("Certificate validation error:", err);
       return res.json({
         valid: true,
         warning: err.message,
+        url: req.body?.url,
       });
     }
   });

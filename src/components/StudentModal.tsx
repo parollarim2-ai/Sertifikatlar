@@ -272,6 +272,7 @@ export const StudentModal: React.FC<StudentModalProps> = ({
   };
 
   const passportInputRef = useRef<HTMLInputElement>(null);
+  const certificateInputRef = useRef<HTMLInputElement>(null);
 
   // Auto-focus and select passport input if opened via double-click on passport
   useEffect(() => {
@@ -333,44 +334,43 @@ export const StudentModal: React.FC<StudentModalProps> = ({
       if (navigator.clipboard && navigator.clipboard.readText) {
         const text = await navigator.clipboard.readText();
         const trimmed = (text || '').trim();
-        if (!trimmed) {
-          setPasteNotice("⚠️ Bufer bo'sh!");
-          setTimeout(() => setPasteNotice(''), 2500);
-          return;
-        }
+        if (trimmed) {
+          if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
+            setPasteNotice("❌ Buferdagi matn havola (URL) emas!");
+            setTimeout(() => setPasteNotice(''), 3000);
+            return;
+          }
 
-        if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
-          setPasteNotice("❌ Buferdagi matn havola (URL) emas!");
+          const isCoursera = /coursera\.org/i.test(trimmed) || /coursera_assets/i.test(trimmed);
+          if (!isCoursera) {
+            setPasteNotice("❌ Bu havola Courseraga tegishli emas!");
+            setTimeout(() => setPasteNotice(''), 3000);
+            return;
+          }
+
+          setFormData(prev => ({
+            ...prev,
+            certificateLink: trimmed,
+            status: 'certified',
+            hasError: false,
+            errorReason: '',
+            certifiedAt: prev.certifiedAt || new Date().toISOString(),
+            certificateDate: prev.certificateDate || new Date().toISOString().split('T')[0],
+            certificateNumber: prev.certificateNumber || `B1MD-${(classGroup?.name || 'MKT').replace(/[^a-zA-Z0-9]/g, '')}-${student.id.slice(-4)}`,
+          }));
+          playChime();
+          setPasteNotice("✅ Coursera sertifikat havolasi buferdan muvaffaqiyatli qo'yildi!");
           setTimeout(() => setPasteNotice(''), 3000);
           return;
         }
-
-        const isCoursera = /coursera\.org/i.test(trimmed) || /coursera_assets/i.test(trimmed);
-        if (!isCoursera) {
-          setPasteNotice("❌ Bu havola Courseraga tegishli emas!");
-          setTimeout(() => setPasteNotice(''), 3000);
-          return;
-        }
-
-        setFormData(prev => ({
-          ...prev,
-          certificateLink: trimmed,
-          status: 'certified',
-          hasError: false,
-          errorReason: '',
-          certifiedAt: prev.certifiedAt || new Date().toISOString(),
-          certificateDate: prev.certificateDate || new Date().toISOString().split('T')[0],
-          certificateNumber: prev.certificateNumber || `B1MD-${(classGroup?.name || 'MKT').replace(/[^a-zA-Z0-9]/g, '')}-${student.id.slice(-4)}`,
-        }));
-        playChime();
-        setPasteNotice("✅ Coursera sertifikat havolasi buferdan muvaffaqiyatli qo'yildi!");
-        setTimeout(() => setPasteNotice(''), 3000);
-        return;
       }
     } catch {
-      setPasteNotice("⚠️ Brauzer buferdan o'qishga ruxsat bermadi");
-      setTimeout(() => setPasteNotice(''), 2500);
+      // Browser blocked readText - focus input and prompt Ctrl+V
     }
+
+    certificateInputRef.current?.focus();
+    setPasteNotice("⌨️ Iltimos ushbu maydonga klaviaturada Ctrl + V bosing");
+    setTimeout(() => setPasteNotice(''), 3500);
   };
 
   const handleCopyText = (text: string, label: string) => {
@@ -772,11 +772,10 @@ export const StudentModal: React.FC<StudentModalProps> = ({
               </label>
               <input
                 type="email"
-                disabled={!isAdmin}
                 value={formData.assignedEmail || ''}
-                placeholder="Zaxiradan biriktiriladi"
+                placeholder="pochta@gmail.com yoki zaxiradan biriktiriladi"
                 onChange={e => setFormData({ ...formData, assignedEmail: e.target.value })}
-                className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:bg-white focus:border-blue-700 disabled:opacity-75"
+                className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:bg-white focus:border-blue-700 focus:ring-2 focus:ring-blue-500/20"
               />
             </div>
           </div>
@@ -815,50 +814,48 @@ export const StudentModal: React.FC<StudentModalProps> = ({
               )}
             </div>
 
-            {isAdmin && (
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handlePasteClipboardLink}
-                  className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-blue-700 hover:bg-blue-800 text-white shadow-xs flex items-center gap-2 transition-colors cursor-pointer"
-                >
-                  <Clipboard className="w-4 h-4" />
-                  <span>Havolani avtomatik buferdan qo'yish (Paste)</span>
-                </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handlePasteClipboardLink}
+                className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-blue-700 hover:bg-blue-800 text-white shadow-xs flex items-center gap-2 transition-colors cursor-pointer"
+              >
+                <Clipboard className="w-4 h-4" />
+                <span>Havolani avtomatik buferdan qo'yish (Paste)</span>
+              </button>
 
-                <button
-                  type="button"
-                  onClick={handleRegisterCourseraDirect}
-                  disabled={isRegisteringCoursera}
-                  className="px-3.5 py-2 text-xs font-bold rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
-                  title="O'quvchini to'g'ridan-to'g'ri Coursera dasturidan ro'yxatdan o'tkazish va Gmail orqali hisobini faollashtirish"
-                >
-                  <GraduationCap className={`w-3.5 h-3.5 ${isRegisteringCoursera ? 'animate-spin' : ''}`} />
-                  <span>{isRegisteringCoursera ? "Coursera'dan o'tkazilmoqda..." : "🎓 Coursera orqali ro'yxatdan o'tish"}</span>
-                </button>
+              <button
+                type="button"
+                onClick={handleRegisterCourseraDirect}
+                disabled={isRegisteringCoursera}
+                className="px-3.5 py-2 text-xs font-bold rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                title="O'quvchini to'g'ridan-to'g'ri Coursera dasturidan ro'yxatdan o'tkazish va Gmail orqali hisobini faollashtirish"
+              >
+                <GraduationCap className={`w-3.5 h-3.5 ${isRegisteringCoursera ? 'animate-spin' : ''}`} />
+                <span>{isRegisteringCoursera ? "Coursera'dan o'tkazilmoqda..." : "🎓 Coursera orqali ro'yxatdan o'tish"}</span>
+              </button>
 
-                <button
-                  type="button"
-                  onClick={handleSolveCourseraQuizzesDirect}
-                  disabled={isSolvingQuizzes}
-                  className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
-                  title="Coursera 4 ta testini (Introduction to Generative AI) avtomatik yechish"
-                >
-                  <FileCheck className={`w-3.5 h-3.5 ${isSolvingQuizzes ? 'animate-spin' : ''}`} />
-                  <span>{isSolvingQuizzes ? "Testlar yechilmoqda (1-4)..." : "🎯 Coursera Testlarini Yechish (Beta)"}</span>
-                </button>
+              <button
+                type="button"
+                onClick={handleSolveCourseraQuizzesDirect}
+                disabled={isSolvingQuizzes}
+                className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                title="Coursera 4 ta testini (Introduction to Generative AI) avtomatik yechish"
+              >
+                <FileCheck className={`w-3.5 h-3.5 ${isSolvingQuizzes ? 'animate-spin' : ''}`} />
+                <span>{isSolvingQuizzes ? "Testlar yechilmoqda (1-4)..." : "🎯 Coursera Testlarini Yechish (Beta)"}</span>
+              </button>
 
-                <button
-                  type="button"
-                  onClick={() => setIsAiLeadersOpen(true)}
-                  className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-indigo-600 via-blue-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02]"
-                  title="aileaders.uz va Coursera saytida ro'yxatdan o'tkazish avtomati"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  <span>⚡️ Sertifikat olish (AI Leaders & Coursera Avtomat)</span>
-                </button>
-              </div>
-            )}
+              <button
+                type="button"
+                onClick={() => setIsAiLeadersOpen(true)}
+                className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-indigo-600 via-blue-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02]"
+                title="aileaders.uz va Coursera saytida ro'yxatdan o'tkazish avtomati"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>⚡️ Sertifikat olish (AI Leaders & Coursera Avtomat)</span>
+              </button>
+            </div>
 
             {/* Coursera Status / Notice */}
             {formData.courseraVerified && (
@@ -891,6 +888,7 @@ export const StudentModal: React.FC<StudentModalProps> = ({
 
             <div className="flex items-center gap-2">
               <input
+                ref={certificateInputRef}
                 type="url"
                 value={formData.certificateLink || ''}
                 placeholder="https://coursera.org/verify/..."
@@ -899,7 +897,28 @@ export const StudentModal: React.FC<StudentModalProps> = ({
                   certificateLink: e.target.value,
                   status: e.target.value.trim() ? 'certified' : 'pending'
                 })}
-                className="flex-1 px-3 py-2 text-xs sm:text-sm bg-white border border-slate-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:border-blue-700"
+                onPaste={e => {
+                  const pasted = e.clipboardData.getData('text').trim();
+                  if (pasted && (pasted.startsWith('http://') || pasted.startsWith('https://'))) {
+                    const isCoursera = /coursera\.org/i.test(pasted) || /coursera_assets/i.test(pasted);
+                    if (isCoursera) {
+                      setFormData(prev => ({
+                        ...prev,
+                        certificateLink: pasted,
+                        status: 'certified',
+                        hasError: false,
+                        errorReason: '',
+                        certifiedAt: prev.certifiedAt || new Date().toISOString(),
+                        certificateDate: prev.certificateDate || new Date().toISOString().split('T')[0],
+                        certificateNumber: prev.certificateNumber || `B1MD-${(classGroup?.name || 'MKT').replace(/[^a-zA-Z0-9]/g, '')}-${student.id.slice(-4)}`,
+                      }));
+                      playChime();
+                      setPasteNotice("✅ Coursera sertifikat havolasi qo'yildi va tasdiqlandi!");
+                      setTimeout(() => setPasteNotice(''), 3000);
+                    }
+                  }
+                }}
+                className="flex-1 px-3 py-2 text-xs sm:text-sm bg-white border border-slate-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:border-blue-700 shadow-xs"
               />
               <button
                 type="button"
@@ -1048,16 +1067,14 @@ export const StudentModal: React.FC<StudentModalProps> = ({
               >
                 Bekor qilish (ESC)
               </button>
-              {isAdmin && (
-                <button
-                  type="submit"
-                  disabled={hasStrictBlockingConflict}
-                  className="px-5 py-2.5 text-xs font-bold rounded-xl bg-blue-700 hover:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed text-white shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Check className="w-4 h-4" />
-                  <span>Saqlash</span>
-                </button>
-              )}
+              <button
+                type="submit"
+                disabled={hasStrictBlockingConflict}
+                className="px-5 py-2.5 text-xs font-bold rounded-xl bg-blue-700 hover:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed text-white shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer active:scale-95"
+              >
+                <Check className="w-4 h-4" />
+                <span>Saqlash</span>
+              </button>
             </div>
           </div>
         </form>

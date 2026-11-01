@@ -32,6 +32,7 @@ import {
   syncSaveTeacherCertificate,
   syncSaveBatchTeacherCertificates,
   syncDeleteTeacherCertificate,
+  syncDeleteBatchTeacherCertificates,
 } from './lib/firestoreService';
 import { recordCertifyEvent } from './utils/operatorSpeedTracker';
 import { 
@@ -278,7 +279,12 @@ export default function App() {
 
     const unsubTeacherCerts = subscribeToTeacherCertificates((remoteTeachers) => {
       if (remoteTeachers) {
-        setTeacherCertificates(remoteTeachers);
+        setTeacherCertificates((prevLocal) => {
+          if (remoteTeachers.length > 0) {
+            return remoteTeachers;
+          }
+          return prevLocal.length > 0 ? prevLocal : [];
+        });
       }
     });
 
@@ -680,7 +686,12 @@ export default function App() {
     await syncDeleteTeacherCertificate(teacherId);
   };
 
-  const handleAssignTeacherEmail = (teacherId: string) => {
+  const handleDeleteBatchTeachers = async (teacherIds: string[]) => {
+    setTeacherCertificates(prev => prev.filter(t => !teacherIds.includes(t.id)));
+    await syncDeleteBatchTeacherCertificates(teacherIds);
+  };
+
+  const handleAssignTeacherEmail = async (teacherId: string) => {
     const availableEmail = emailPool.find(e => !e.isUsed);
     if (!availableEmail) {
       showAppToast("Zaxirada bo'sh email mavjud emas! Avval Email Zaxirasiga yangi pochtalar qo'shing.", 'error');
@@ -692,20 +703,88 @@ export default function App() {
       assignedToStudentId: teacherId,
     };
     setEmailPool(prev => prev.map(e => e.email === updatedEmail.email ? updatedEmail : e));
-    syncSaveSingleEmail(updatedEmail);
+    await syncSaveSingleEmail(updatedEmail);
 
+    let updatedTeacherObj: TeacherCertificate | null = null;
     setTeacherCertificates(prev =>
-      prev.map(t =>
-        t.id === teacherId
-          ? {
-              ...t,
-              assignedEmail: updatedEmail.email,
-              assignedPassword: updatedEmail.password || 'Coursera2026!',
-            }
-          : t
-      )
+      prev.map(t => {
+        if (t.id === teacherId) {
+          updatedTeacherObj = {
+            ...t,
+            assignedEmail: updatedEmail.email,
+            assignedPassword: updatedEmail.password || 'Coursera2026!',
+          };
+          return updatedTeacherObj;
+        }
+        return t;
+      })
     );
-    showAppToast(`Email biriktirildi: ${updatedEmail.email}`, 'success');
+
+    if (updatedTeacherObj) {
+      await syncSaveTeacherCertificate(updatedTeacherObj);
+    }
+    showAppToast(`Email biriktirildi va saqlandi: ${updatedEmail.email}`, 'success');
+  };
+
+  const handleAssignBatchTeacherEmails = async (teacherIds: string[]) => {
+    const availableEmails = emailPool.filter(e => !e.isUsed);
+    if (availableEmails.length === 0) {
+      showAppToast("Zaxirada bo'sh email mavjud emas! Avval Email Zaxirasiga pochtalar qo'shing.", 'error');
+      return;
+    }
+
+    const assignedCount = Math.min(teacherIds.length, availableEmails.length);
+    const emailsToUpdate: EmailAccount[] = [];
+    const teachersToUpdate: TeacherCertificate[] = [];
+
+    const updatedTeacherMap = new Map<string, { email: string; pass: string }>();
+
+    for (let i = 0; i < assignedCount; i++) {
+      const tId = teacherIds[i];
+      const mail = availableEmails[i];
+      const upMail: EmailAccount = {
+        ...mail,
+        isUsed: true,
+        assignedToStudentId: tId,
+      };
+      emailsToUpdate.push(upMail);
+      updatedTeacherMap.set(tId, {
+        email: upMail.email,
+        pass: upMail.password || 'Coursera2026!'
+      });
+    }
+
+    // Update email pool in state & Firestore
+    const updatedPool = emailPool.map(e => {
+      const match = emailsToUpdate.find(u => u.email === e.email);
+      return match || e;
+    });
+    setEmailPool(updatedPool);
+    await syncSaveEmailPool(emailsToUpdate);
+
+    // Update teachers in state & Firestore
+    setTeacherCertificates(prev => {
+      const nextList = prev.map(t => {
+        const match = updatedTeacherMap.get(t.id);
+        if (match) {
+          const upTeacher: TeacherCertificate = {
+            ...t,
+            assignedEmail: match.email,
+            assignedPassword: match.pass,
+          };
+          teachersToUpdate.push(upTeacher);
+          return upTeacher;
+        }
+        return t;
+      });
+      return nextList;
+    });
+
+    if (teachersToUpdate.length > 0) {
+      await syncSaveBatchTeacherCertificates(teachersToUpdate);
+    }
+
+    showAppToast(`✅ ${teachersToUpdate.length} nafar ustozga avtomatik email biriktirildi va saqlandi!`, 'success');
   };
 
   const handleRequestClearAllData = () => {
@@ -830,7 +909,9 @@ export default function App() {
               onAddBatchTeachers={handleAddBatchTeachers}
               onUpdateTeacher={handleUpdateTeacher}
               onDeleteTeacher={handleDeleteTeacher}
+              onDeleteBatchTeachers={handleDeleteBatchTeachers}
               onAssignTeacherEmail={handleAssignTeacherEmail}
+              onAssignBatchTeacherEmails={handleAssignBatchTeacherEmails}
               onAddGeneratedEmails={handleAddGeneratedEmails}
               onSaveStudent={handleSaveStudent}
               onSaveClassAndStudents={handleSaveClassAndStudents}

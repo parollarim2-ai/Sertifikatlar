@@ -103,7 +103,9 @@ interface AdminPanelProps {
   onAddBatchTeachers?: (teachers: TeacherCertificate[]) => void;
   onUpdateTeacher?: (teacher: TeacherCertificate) => void;
   onDeleteTeacher?: (teacherId: string) => void;
+  onDeleteBatchTeachers?: (teacherIds: string[]) => void;
   onAssignTeacherEmail?: (teacherId: string) => void;
+  onAssignBatchTeacherEmails?: (teacherIds: string[]) => void;
   onAddGeneratedEmails?: (newEmails: EmailAccount[]) => Promise<void> | void;
   onToggleStudentPayment?: (studentId: string, currentPaidState: boolean) => void;
   onSaveStudent?: (student: Student) => Promise<void> | void;
@@ -138,7 +140,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   onAddBatchTeachers = () => {},
   onUpdateTeacher = () => {},
   onDeleteTeacher = () => {},
+  onDeleteBatchTeachers,
   onAssignTeacherEmail,
+  onAssignBatchTeacherEmails,
   onAddGeneratedEmails,
   onToggleStudentPayment,
   onSaveStudent,
@@ -272,39 +276,33 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
   };
 
-  // Direct, ultra-fast certificate paste with strict verification
+  // Direct, ultra-fast certificate paste with strict verification and resilient modal fallback
   const [isValidatingCert, setIsValidatingCert] = useState(false);
+  const [fastPasteTarget, setFastPasteTarget] = useState<{
+    student: Student;
+    urlInput: string;
+  } | null>(null);
+  const fastPasteInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFastPasteCertificateForStudent = async (targetStudent: Student, explicitUrl?: string) => {
-    let clipText = (explicitUrl || '').trim();
-
+  // Validate and persist verified certificate
+  const handleValidateAndSaveCertificate = async (targetStudent: Student, rawUrl: string): Promise<boolean> => {
+    const clipText = (rawUrl || '').trim();
     if (!clipText) {
-      try {
-        if (navigator.clipboard && navigator.clipboard.readText) {
-          clipText = (await navigator.clipboard.readText() || '').trim();
-        }
-      } catch {
-        showQuickToast("⚠️ Brauzer buferdan o'qishga ruxsat bermadi", 3000);
-        return;
-      }
-    }
-
-    if (!clipText) {
-      showQuickToast("⚠️ Bufer bo'sh! Avval Coursera sertifikat havolasini nusxalang.", 3000);
-      return;
+      showQuickToast("⚠️ Sertifikat havolasini kiriting", 3000);
+      return false;
     }
 
     // 1. Strict URL check
     if (!clipText.startsWith('http://') && !clipText.startsWith('https://')) {
       showQuickToast("❌ Buferdagi matn havola (URL) emas! (https://...)", 3500);
-      return;
+      return false;
     }
 
     // 2. Strict Coursera domain check
     const isCoursera = /coursera\.org/i.test(clipText) || /coursera_assets/i.test(clipText);
     if (!isCoursera) {
       showQuickToast("❌ Bu Coursera ta'lim platformasiga tegishli rasmiy sertifikat havolasi emas!", 4000);
-      return;
+      return false;
     }
 
     // 3. Duplicate check across all other students
@@ -315,12 +313,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     );
     if (existingDuplicate) {
       showQuickToast(`❌ Bu sertifikat havolasi allaqachon boshqa o'quvchiga (${existingDuplicate.fullName}) biriktirilgan!`, 4500);
-      return;
+      return false;
     }
 
     // 4. Server-side deep validation of certificate recipient name
     setIsValidatingCert(true);
-    showQuickToast(`🔍 ${targetStudent.fullName} uchun Coursera sertifikati tekshirilmoqda...`, 3000);
+    showQuickToast(`🔍 ${targetStudent.fullName} uchun Coursera sertifikati tekshirilmoqda...`, 2000);
 
     try {
       const res = await fetch('/api/coursera/validate-certificate-recipient', {
@@ -333,9 +331,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       });
       const data = await res.json();
       if (!data.valid) {
-        showQuickToast(data.reason || "❌ Sertifikat tekshiruvdan o'tmadi!", 5000);
+        showQuickToast(data.reason || "❌ Sertifikat tekshiruvdan o'tmadi!", 4500);
         setIsValidatingCert(false);
-        return;
+        return false;
       }
     } catch (e) {
       console.warn("Validation endpoint network error, falling back:", e);
@@ -360,6 +358,33 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     recordCertifyEvent(targetStudent.id, targetStudent.fullName, updatedStudent.certifiedAt);
     playChime();
     showQuickToast(`✅ ${targetStudent.fullName}ga Coursera sertifikati biriktirildi va saqlandi!`, 3500);
+    setFastPasteTarget(null);
+    return true;
+  };
+
+  const handleFastPasteCertificateForStudent = async (targetStudent: Student, explicitUrl?: string) => {
+    const directUrl = (explicitUrl || '').trim();
+    if (directUrl) {
+      return await handleValidateAndSaveCertificate(targetStudent, directUrl);
+    }
+
+    // Attempt direct clipboard reading
+    try {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        const text = (await navigator.clipboard.readText() || '').trim();
+        if (text && (text.startsWith('http://') || text.startsWith('https://')) && /coursera/i.test(text)) {
+          return await handleValidateAndSaveCertificate(targetStudent, text);
+        }
+      }
+    } catch {
+      // Normal when browser permissions policy blocks clipboard in iframe
+    }
+
+    // Always fallback smoothly to instant fast-paste modal with auto-focused input
+    setFastPasteTarget({
+      student: targetStudent,
+      urlInput: '',
+    });
   };
 
   // ESC key listener to close internal modals
@@ -368,6 +393,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       if (e.key === 'Escape') {
         setIsAddingStudent(false);
         setEditingClass(null);
+        setFastPasteTarget(null);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -601,14 +627,20 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   // Alt + V global hotkey listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Alt + V (or Alt + v) hotkey for instant clipboard certificate paste to next student
+      // Alt + V (or Alt + v) hotkey for instant certificate paste to next student
       if (e.altKey && (e.key === 'v' || e.key === 'V' || e.code === 'KeyV')) {
+        const activeTag = document.activeElement?.tagName?.toLowerCase();
+        // If typing inside an input/textarea (other than our fast paste modal), ignore
+        if (activeTag === 'textarea' || (activeTag === 'input' && document.activeElement !== fastPasteInputRef.current)) {
+          return;
+        }
         e.preventDefault();
+        e.stopPropagation();
         handleAltVPasteCertificate();
       }
     };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, [handleAltVPasteCertificate]);
 
   // Assign unique emails to missing students in Email tab
@@ -1481,7 +1513,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           onAddBatchTeachers={onAddBatchTeachers}
           onUpdateTeacher={onUpdateTeacher}
           onDeleteTeacher={onDeleteTeacher}
+          onDeleteBatchTeachers={onDeleteBatchTeachers}
           onAssignEmailFromPool={onAssignTeacherEmail}
+          onAssignBatchEmailsFromPool={onAssignBatchTeacherEmails}
         />
       )}
 
@@ -2330,6 +2364,154 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         }}
         onSaveClassAndStudents={onSaveClassAndStudents}
       />
+
+      {/* Fast Certificate Paste Modal (100% resilient across all browsers & iframes) */}
+      {fastPasteTarget && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in"
+          onClick={() => setFastPasteTarget(null)}
+        >
+          <div 
+            className="bg-white border border-slate-300 rounded-2xl max-w-lg w-full p-5 sm:p-6 shadow-2xl space-y-4 animate-scale-up"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-700 flex items-center justify-center flex-shrink-0">
+                  <Award className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    Sertifikat Havolasini Qo'yish
+                  </h3>
+                  <p className="text-xs text-slate-600 font-medium">
+                    O'quvchi: <strong className="text-emerald-900 font-bold">{fastPasteTarget.student.fullName}</strong>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFastPasteTarget(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer text-sm font-bold"
+                title="Yopish (ESC)"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-700 flex items-center justify-between">
+                  <span>Coursera sertifikat havolasi:</span>
+                  <span className="text-[11px] text-blue-700 font-semibold font-mono">
+                    https://coursera.org/verify/...
+                  </span>
+                </label>
+
+                <div className="relative flex items-center">
+                  <input
+                    ref={fastPasteInputRef}
+                    autoFocus
+                    type="url"
+                    value={fastPasteTarget.urlInput}
+                    onChange={e => setFastPasteTarget({
+                      ...fastPasteTarget,
+                      urlInput: e.target.value
+                    })}
+                    onPaste={async (e) => {
+                      const pasted = e.clipboardData.getData('text').trim();
+                      if (pasted && (pasted.startsWith('http://') || pasted.startsWith('https://'))) {
+                        setFastPasteTarget({
+                          ...fastPasteTarget,
+                          urlInput: pasted
+                        });
+                        setTimeout(() => {
+                          handleValidateAndSaveCertificate(fastPasteTarget.student, pasted);
+                        }, 50);
+                      }
+                    }}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleValidateAndSaveCertificate(fastPasteTarget.student, fastPasteTarget.urlInput);
+                      } else if (e.key === 'Escape') {
+                        setFastPasteTarget(null);
+                      }
+                    }}
+                    placeholder="Havolani bu yerga qo'ying (Ctrl + V)..."
+                    className="w-full pl-3 pr-28 py-2.5 text-xs sm:text-sm bg-white border border-slate-300 rounded-xl text-slate-900 font-mono focus:outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-500/20 shadow-xs"
+                  />
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        if (navigator.clipboard && navigator.clipboard.readText) {
+                          const text = (await navigator.clipboard.readText() || '').trim();
+                          if (text) {
+                            setFastPasteTarget({
+                              ...fastPasteTarget,
+                              urlInput: text
+                            });
+                            handleValidateAndSaveCertificate(fastPasteTarget.student, text);
+                            return;
+                          }
+                        }
+                      } catch {}
+                      fastPasteInputRef.current?.focus();
+                      showQuickToast("⌨️ Iltimos klaviaturada Ctrl+V bosing", 2000);
+                    }}
+                    className="absolute right-1.5 px-2.5 py-1.5 text-xs font-bold rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1 transition-colors cursor-pointer"
+                    title="Buferdagi havolani olish"
+                  >
+                    <Clipboard className="w-3.5 h-3.5" />
+                    <span>Qo'yish</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-200 text-xs text-blue-950 space-y-1">
+                <div className="font-bold flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-blue-700" />
+                  <span>Tezkor biriktirish va tekshirish:</span>
+                </div>
+                <p className="text-[11px] text-blue-900 leading-relaxed">
+                  Havolani nusxalagan bo'lsangiz, shunchaki <strong>Ctrl + V</strong> bosing — tizim Coursera manzilini tekshirib, darhol o'quvchiga <strong>"Tayyor"</strong> maqomi bilan biriktiradi.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setFastPasteTarget(null)}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors cursor-pointer"
+              >
+                Bekor qilish (ESC)
+              </button>
+
+              <button
+                type="button"
+                disabled={isValidatingCert || !fastPasteTarget.urlInput.trim()}
+                onClick={() => handleValidateAndSaveCertificate(fastPasteTarget.student, fastPasteTarget.urlInput)}
+                className="px-5 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded-xl shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                {isValidatingCert ? (
+                  <>
+                    <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    <span>Tekshirilmoqda...</span>
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-4 h-4" />
+                    <span>Sertifikatni Saqlash (Enter)</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       </div>
     </UnifiedGlassProvider>
   );
