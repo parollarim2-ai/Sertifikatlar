@@ -9,6 +9,13 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { Browser } from 'puppeteer';
 
 puppeteerExtra.use(StealthPlugin());
+
+process.on('uncaughtException', (err) => {
+  console.error('Unhandled Exception caught in server.ts:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
 import {
   startTelegramBot,
   stopTelegramBot,
@@ -102,22 +109,13 @@ async function getBrowser(): Promise<Browser> {
 
 async function startServer() {
   const app = express();
-  // Port determination:
-  // 1. If explicit command-line flag is given: --port <num> (e.g. `npm run dev --port 3000`)
-  // 2. If running inside AI Studio dev container where Nginx is listening on NGINX_PORT (8080)
-  //    and reverse-proxying to DEFAULT_APP_PORT (3000), use DEFAULT_APP_PORT (3000).
-  // 3. Otherwise, for production Cloud Run deployment rollout, Render, Railway, or standalone,
-  //    use process.env.PORT (defaults to 8080 on Cloud Run, or 3000 as fallback).
   function determinePort(): number {
     const portArgIndex = process.argv.indexOf('--port');
     if (portArgIndex !== -1 && process.argv[portArgIndex + 1]) {
       return parseInt(process.argv[portArgIndex + 1], 10);
     }
-    if (process.env.NGINX_PORT && process.env.DEFAULT_APP_PORT) {
+    if (process.env.DEFAULT_APP_PORT) {
       return parseInt(process.env.DEFAULT_APP_PORT, 10) || 3000;
-    }
-    if (process.env.PORT) {
-      return parseInt(process.env.PORT, 10);
     }
     return 3000;
   }
@@ -125,9 +123,22 @@ async function startServer() {
 
   app.use(express.json({ limit: '50mb' }));
 
-  // Cloud Run / container health check endpoints
+  // Immediate Cloud Run / Nginx container health check endpoint
   app.get(['/health', '/healthz', '/_health'], (_req, res) => {
     res.status(200).json({ status: 'ok', uptime: process.uptime() });
+  });
+
+  // Start listening on port 3000 immediately so Nginx reverse-proxy NEVER gets 502 Bad Gateway
+  const server = app.listen(port, '0.0.0.0', () => {
+    console.log(`🚀 Fast-start: Server actively listening on http://0.0.0.0:${port} (NODE_ENV: ${process.env.NODE_ENV || 'development'})`);
+    // Start background Telegram Bot runner AFTER port is listening
+    setTimeout(() => {
+      try {
+        startTelegramBot();
+      } catch (botErr) {
+        console.log("Could not start Telegram Bot:", botErr);
+      }
+    }, 3000);
   });
 
   // Security & Hardening Headers
@@ -2618,19 +2629,6 @@ Javobni FAQAT toza JSON formatida qaytaring:
       res.status(503).send('Ilova yuklanmoqda... Iltimos bir necha soniyadan so\'ng qayta yangilang.');
     });
   }
-
-  const server = app.listen(port, '0.0.0.0', () => {
-    console.log(`Server running on http://0.0.0.0:${port} (NODE_ENV: ${process.env.NODE_ENV || 'not set'})`);
-    // Start background Telegram Bot runner AFTER port is successfully listening
-    // Delay 3s so Cloud Run health check passes immediately and traffic shift completes
-    setTimeout(() => {
-      try {
-        startTelegramBot();
-      } catch (botErr) {
-        console.log("Could not start Telegram Bot:", botErr);
-      }
-    }, 3000);
-  });
 
   // Graceful shutdown on Cloud Run rollout / scale-down
   const shutdown = () => {

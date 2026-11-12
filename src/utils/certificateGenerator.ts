@@ -635,13 +635,15 @@ export async function generateUnifiedCertificatesPdf(
 
 // Format all student certificates into clipboard-ready text
 export function formatClassCertificatesForClipboard(students: Student[], classGroup: ClassGroup): string {
+  const isDev = classGroup.projectType === 'developer';
+  const trackTitle = isDev ? "Besh million sun'iy intellekt yetakchilari (omp.aistudy.uz)" : "Bir million promter (Coursera)";
   const certified = students.filter(s => s.status === 'certified' && s.classId === classGroup.id);
   
   if (certified.length === 0) {
     return `${classGroup.name} sinfida hali sertifikat olgan o'quvchilar yo'q.`;
   }
 
-  let text = `🎓 ${classGroup.name} sinf o'quvchilarining "Bir Million Dasturchi" sertifikatlari ro'yxati:\n`;
+  let text = `🎓 ${classGroup.name} sinf o'quvchilarining "${trackTitle}" sertifikatlari ro'yxati:\n`;
   text += `👩‍🏫 Sinf rahbari: ${classGroup.teacherName}\n`;
   text += `📊 Jami sertifikat olganlar: ${certified.length} nafar\n\n`;
 

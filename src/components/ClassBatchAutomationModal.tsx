@@ -88,6 +88,7 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
   const [isAutopilotRunning, setIsAutopilotRunning] = useState<boolean>(false);
   const [fetchingCertIndex, setFetchingCertIndex] = useState<number | null>(null);
   const [showBookmarkletModal, setShowBookmarkletModal] = useState<boolean>(false);
+  const [skipAileaders, setSkipAileaders] = useState<boolean>(true);
 
   const isPausedRef = useRef<boolean>(false);
   const isRunningRef = useRef<boolean>(false);
@@ -249,7 +250,11 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
       try {
         data = JSON.parse(text);
       } catch {
-        data = { success: false, error: text || `Server xatosi (Status ${res.status})` };
+        const isHtml = text && (text.includes('<!doctype') || text.includes('<html') || text.includes('Starting Server'));
+        const safeError = isHtml
+          ? "Server yangilanmoqda, iltimos 5 soniyadan so'ng qayta urinib ko'ring"
+          : (text ? text.slice(0, 200) : `Server xatosi (Status ${res.status})`);
+        data = { success: false, error: safeError };
       }
 
       const finalEmail = data.targetEmail || item.assignedEmail;
@@ -304,7 +309,13 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
         return true;
       } else {
         // Error from Aileaders
-        const errorMsg = data.error || data.message || "Ro'yxatdan o'tishda noma'lum xatolik";
+        let errorMsg = data.error || data.message || "Ro'yxatdan o'tishda noma'lum xatolik";
+        if (typeof errorMsg === 'string' && (errorMsg.includes('<!doctype') || errorMsg.includes('<html') || errorMsg.includes('Starting Server'))) {
+          errorMsg = "Server yangilanmoqda, iltimos 5 soniyadan so'ng qayta urinib ko'ring";
+        }
+        if (typeof errorMsg === 'string' && (errorMsg.includes('timeout') || errorMsg.includes('Navigation timeout'))) {
+          errorMsg = "⚠️ aileaders.uz serveri javob bermayapti (Navigation timeout). Saytda profilaktika ketmoqda yoki server band.";
+        }
         setItems(prev => {
           const next = [...prev];
           next[index] = {
@@ -326,13 +337,17 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
         return false;
       }
     } catch (err: any) {
+      const safeErr = err?.message && (err.message.includes('<!doctype') || err.message.includes('Unexpected token') || err.message.includes('Starting Server'))
+        ? "Server vaqtincha javob bermadi, qayta urinib ko'ring"
+        : (err?.message || "Noma'lum server xatosi");
+
       setItems(prev => {
         const next = [...prev];
         next[index] = {
           ...next[index],
           status: 'error',
-          errorMessage: err.message,
-          logs: [...(next[index].logs || []), `❌ Server xatosi: ${err.message}`],
+          errorMessage: safeErr,
+          logs: [...(next[index].logs || []), `❌ Server xatosi: ${safeErr}`],
         };
         return next;
       });
@@ -341,7 +356,7 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
         ...item.student,
         status: 'error',
         hasError: true,
-        errorReason: err.message,
+        errorReason: safeErr,
       });
 
       return false;
@@ -418,6 +433,14 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
       let aileadersSuccess = items[i].status === 'success';
       if (!aileadersSuccess) {
         aileadersSuccess = await processStudent(i);
+        if (!aileadersSuccess) {
+          // If server is unreachable or timed out, stop the batch immediately to save teacher's time
+          const err = items[i].errorMessage || '';
+          if (err.includes('timeout') || err.includes('ishlamayapti') || err.includes('ko\'chirilgan')) {
+            showToast("⚠️ 'aileaders.uz' portali javob bermayapti. Vaqtni tejash maqsadida ro'yxatdan o'tkazish to'xtatildi. 'Faqat Testlar' (Coursera) rejimini ishlating!");
+            break;
+          }
+        }
         await new Promise(r => setTimeout(r, 1200));
       }
     }
@@ -802,23 +825,38 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
 
       setCurrentQuizIndex(i);
 
-      // Step 0: Aileaders OneID registration (if not yet registered)
-      const isAileadersRegistered = items[i].status === 'success' || items[i].status === 'certified';
-      if (!isAileadersRegistered) {
-        setCurrentIndex(i);
-        showToast(`⚡️ 1/3. ${currentStudent.fullName}: Aileaders OneID tizimidan ro'yxatdan o'tkazilmoqda...`);
-        await processStudent(i);
-        if (!isAutopilotRunningRef.current) break;
-        await new Promise(r => setTimeout(r, 2000));
+      // Step 0: Aileaders OneID registration (if not yet registered and not skipped)
+      if (!skipAileaders) {
+        const isAileadersRegistered = items[i].status === 'success' || items[i].status === 'certified';
+        if (!isAileadersRegistered) {
+          setCurrentIndex(i);
+          showToast(`⚡️ 1/3. ${currentStudent.fullName}: Aileaders tizimidan ro'yxatdan o'tkazilmoqda...`);
+          const okAileaders = await processStudent(i);
+          if (!isAutopilotRunningRef.current) break;
+          await new Promise(r => setTimeout(r, 1500));
 
-        // Quick IMAP check to activate Aileaders email link
-        try {
-          await fetch('/api/gmail/sync-and-activate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ targetEmail: items[i].assignedEmail, retries: 3, delaySeconds: 2 }),
-          });
-        } catch {}
+          if (okAileaders) {
+            // Quick IMAP check to activate Aileaders email link
+            try {
+              await fetch('/api/gmail/sync-and-activate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ targetEmail: items[i].assignedEmail, retries: 2, delaySeconds: 2 }),
+              });
+            } catch {}
+          } else {
+            showToast(`⚠️ ${currentStudent.fullName}: Aileaders o'tkazib yuborildi, to'g'ridan-to'g'ri Coursera'ga o'tilmoqda...`);
+          }
+        }
+      } else {
+        setItems(prev => {
+          const next = [...prev];
+          next[i] = {
+            ...next[i],
+            logs: [...(next[i].logs || []), "⚡️ Aileaders bosqichi o'tkazib yuborildi (To'g'ridan-to'g'ri Coursera rejimida)."],
+          };
+          return next;
+        });
       }
 
       // Step 1: If student is not yet registered on Coursera, register them automatically!
@@ -1080,10 +1118,38 @@ export const ClassBatchAutomationModal: React.FC<ClassBatchAutomationModalProps>
                 className="w-full px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg text-slate-900 font-mono focus:border-blue-600 focus:outline-none"
               />
               <span className="text-[10px] text-slate-500 mt-0.5 block">
-                Aileaders shakliga kiritiladigan raqam
+                Shakllarga kiritiladigan raqam
               </span>
             </div>
           </div>
+        </div>
+
+        {/* Status Notice for Aileaders & Quick Bypass */}
+        <div className="px-6 py-2.5 bg-gradient-to-r from-amber-50 to-orange-50 border-b border-amber-200 flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500"></span>
+            </span>
+            <span className="font-bold text-amber-950 text-[11px]">
+              Eslatma: <code className="bg-amber-100 text-amber-900 px-1 py-0.5 rounded font-mono text-[10.5px]">aileaders.uz</code> serveri hozirda javob bermayapti (timeout). Tizim to'g'ridan-to'g'ri Coursera orqali testlarni yechishga sozlangan.
+            </span>
+          </div>
+
+          <label className="flex items-center gap-2 cursor-pointer bg-white px-3 py-1 rounded-lg border border-amber-300 shadow-2xs hover:border-amber-400 transition-colors">
+            <input
+              type="checkbox"
+              checked={skipAileaders}
+              onChange={e => setSkipAileaders(e.target.checked)}
+              className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 cursor-pointer"
+            />
+            <span className="font-bold text-slate-800 text-[11.5px]">
+              ⚡️ Aileaders'ni o'tkazib yuborish (To'g'ridan-to'g'ri Coursera & Sertifikat)
+            </span>
+            <span className="text-[9.5px] bg-emerald-100 text-emerald-800 font-black px-1.5 py-0.5 rounded uppercase">
+              Tavsiya
+            </span>
+          </label>
         </div>
 
         {/* Action Controls & Stats */}

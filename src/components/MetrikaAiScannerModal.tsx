@@ -6,6 +6,7 @@ import {
   chunkArray 
 } from '../utils/certificateCompressor';
 import { distributeEmailsToStudents } from '../utils/emailManager';
+import { generateStudentLogin } from '../utils/studentLoginHelper';
 import confetti from 'canvas-confetti';
 import {
   X,
@@ -84,6 +85,7 @@ export const MetrikaAiScannerModal: React.FC<MetrikaAiScannerModalProps> = ({
   const [teacherPhone, setTeacherPhone] = useState('');
   const [isExternalSchool, setIsExternalSchool] = useState(false);
   const [schoolName, setSchoolName] = useState('');
+  const [projectType, setProjectType] = useState<'ai' | 'developer'>('developer');
 
   // Selected & compressed image files
   const [certificates, setCertificates] = useState<CompressedCertificate[]>([]);
@@ -423,7 +425,8 @@ export const MetrikaAiScannerModal: React.FC<MetrikaAiScannerModalProps> = ({
         teacherName: teacherName.trim() || 'Ustoz',
         teacherPhone: teacherPhone.trim() || '+998 90 000 00 00',
         paidAmount: 0,
-        pricePerStudent: 5000,
+        projectType: projectType,
+        pricePerStudent: projectType === 'developer' ? 7000 : 5000,
         isExternalSchool: isExternalSchool || false,
         schoolName: isExternalSchool ? (schoolName.trim() || 'Boshqa maktab') : undefined,
       };
@@ -436,18 +439,42 @@ export const MetrikaAiScannerModal: React.FC<MetrikaAiScannerModalProps> = ({
       targetClass = existing;
     }
 
+    const isDeveloper = targetClass.projectType === 'developer' || (uploadMode === 'new' && projectType === 'developer');
     const now = new Date().toISOString();
+
+    if (isDeveloper) {
+      const createdStudents: Student[] = validRows.map((item, idx) => ({
+        id: `st-${Date.now()}-${idx}`,
+        fullName: item.fullName.trim(),
+        birthDate: item.birthDate.trim(),
+        passportOrId: item.passportOrId.trim(),
+        classId: targetClass.id,
+        projectType: 'developer',
+        assignedLogin: generateStudentLogin(item.fullName.trim(), 0),
+        loginVariantIndex: 0,
+        assignedPassword: 'MaktabPass2026!',
+        status: 'pending',
+        createdAt: now,
+      }));
+
+      onSaveClassAndStudents(targetClass, createdStudents, emailPool);
+      confetti({ particleCount: 90, spread: 80 });
+      onClose();
+      return;
+    }
+
     const createdStudents: Student[] = validRows.map((item, idx) => ({
       id: `st-${Date.now()}-${idx}`,
       fullName: item.fullName.trim(),
       birthDate: item.birthDate.trim(),
       passportOrId: item.passportOrId.trim(),
       classId: targetClass.id,
+      projectType: 'ai',
       status: 'pending',
       createdAt: now,
     }));
 
-    // Auto distribute emails
+    // Auto distribute emails for AI track
     const { updatedStudents, updatedEmailPool } = distributeEmailsToStudents(
       [...students, ...createdStudents],
       emailPool,
@@ -545,6 +572,48 @@ export const MetrikaAiScannerModal: React.FC<MetrikaAiScannerModalProps> = ({
 
             {uploadMode === 'new' ? (
               <div className="space-y-3 pt-1">
+                {/* Loyiha Yo'nalishi (Sertifikat Turi) */}
+                <div className="p-3 bg-purple-50/60 border border-purple-200/80 rounded-2xl">
+                  <span className="text-[11px] font-bold text-slate-800 block mb-2">
+                    Loyiha Yo'nalishi (Sertifikat Turi):
+                  </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setProjectType('developer')}
+                      className={`p-2.5 rounded-xl text-left border transition-all cursor-pointer ${
+                        projectType === 'developer'
+                          ? 'border-indigo-600 bg-white shadow-xs ring-1 ring-indigo-500'
+                          : 'border-slate-200 bg-slate-50/70 hover:bg-white text-slate-600'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className="text-xs font-bold text-indigo-950">💡 5M AI Yetakchilari</span>
+                        {projectType === 'developer' && <span className="w-2 h-2 rounded-full bg-indigo-600"></span>}
+                      </div>
+                      <p className="text-[10px] text-slate-500">omp.aistudy.uz — login & Telegram bot</p>
+                      <p className="text-[11px] font-bold text-indigo-700 mt-1">7 000 so'm / o'quvchi</p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setProjectType('ai')}
+                      className={`p-2.5 rounded-xl text-left border transition-all cursor-pointer ${
+                        projectType === 'ai'
+                          ? 'border-blue-600 bg-white shadow-xs ring-1 ring-blue-500'
+                          : 'border-slate-200 bg-slate-50/70 hover:bg-white text-slate-600'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className="text-xs font-bold text-blue-950">🚀 Bir Million Promter</span>
+                        {projectType === 'ai' && <span className="w-2 h-2 rounded-full bg-blue-600"></span>}
+                      </div>
+                      <p className="text-[10px] text-slate-500">AI Leaders & Coursera — email orqali</p>
+                      <p className="text-[11px] font-bold text-blue-700 mt-1">5 000 so'm / o'quvchi</p>
+                    </button>
+                  </div>
+                </div>
+
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-[11px] font-bold text-slate-700 mb-1">

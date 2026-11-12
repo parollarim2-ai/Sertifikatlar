@@ -3,6 +3,7 @@ import { ClassGroup, Student, EmailAccount } from '../types';
 import { extractStudentsFromFile } from '../utils/fileExtractor';
 import { parseStudentsFromText, ParsedStudentPreview } from '../utils/studentParser';
 import { distributeEmailsToStudents } from '../utils/emailManager';
+import { generateStudentLogin } from '../utils/studentLoginHelper';
 import confetti from 'canvas-confetti';
 import { 
   X, 
@@ -62,6 +63,7 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
   const [teacherPhone, setTeacherPhone] = useState('');
   const [isExternalSchool, setIsExternalSchool] = useState(false);
   const [schoolName, setSchoolName] = useState('');
+  const [projectType, setProjectType] = useState<'ai' | 'developer'>('ai');
   
   const [parsedStudents, setParsedStudents] = useState<ParsedStudentPreview[]>([]);
   const [uploadedFileName, setUploadedFileName] = useState('');
@@ -360,7 +362,8 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
         teacherName: teacherName.trim(),
         teacherPhone: teacherPhone.trim() || '+998 90 000 00 00',
         paidAmount: 0,
-        pricePerStudent: 5000,
+        pricePerStudent: projectType === 'developer' ? 7000 : 5000,
+        projectType: projectType,
         isExternalSchool: isExternalSchool || false,
         schoolName: isExternalSchool ? (schoolName.trim() || 'Boshqa maktab') : undefined,
       };
@@ -387,18 +390,36 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
       return;
     }
 
+    const effectiveProjectType = targetClass.projectType || projectType;
     const now = new Date().toISOString();
     const entropy = Math.random().toString(36).slice(2, 8);
-    const createdStudents: Student[] = studentsToInsert.map((item, idx) => ({
-      id: `st-${Date.now()}-${entropy}-${idx}`,
-      fullName: item.fullName.trim(),
-      birthDate: item.birthDate?.trim() || '',
-      passportOrId: item.passportOrId?.trim() || '',
-      classId: targetClass.id,
-      status: 'pending',
-      createdAt: now,
-    }));
+    const createdStudents: Student[] = studentsToInsert.map((item, idx) => {
+      const isDev = effectiveProjectType === 'developer';
+      const login = isDev ? generateStudentLogin(item.fullName.trim(), 0) : undefined;
+      return {
+        id: `st-${Date.now()}-${entropy}-${idx}`,
+        fullName: item.fullName.trim(),
+        birthDate: item.birthDate?.trim() || '',
+        passportOrId: item.passportOrId?.trim() || '',
+        classId: targetClass.id,
+        projectType: effectiveProjectType,
+        assignedLogin: login,
+        loginVariantIndex: isDev ? 0 : undefined,
+        assignedPassword: isDev ? 'MaktabPass2026!' : undefined,
+        status: 'pending',
+        createdAt: now,
+      };
+    });
 
+    // If Developer track: no need for email allocation from pool
+    if (effectiveProjectType === 'developer') {
+      onSaveClassAndStudents(targetClass, createdStudents, emailPool);
+      confetti({ particleCount: 70, spread: 80 });
+      onClose();
+      return;
+    }
+
+    // AI Leaders / Coursera track: distribute spare emails from pool
     const {
       updatedStudents,
       updatedEmailPool,
@@ -573,6 +594,58 @@ export const BulkStudentUploadModal: React.FC<BulkStudentUploadModalProps> = ({
                 <School className="w-4 h-4 text-blue-600" />
                 <span>Yangi Sinf Ma'lumotlari</span>
               </h3>
+
+              {/* Loyiha tanlash: Bir million promter vs Besh million sun'iy intellekt yetakchilari */}
+              <div className="p-3 bg-white border border-slate-200 rounded-xl space-y-1.5 shadow-2xs">
+                <label className="block text-xs font-bold text-slate-800">
+                  Qaysi loyiha bo'yicha sertifikat olinadi? <span className="text-rose-500">*</span>
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setProjectType('ai')}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      projectType === 'ai'
+                        ? 'bg-blue-50 border-blue-600 ring-2 ring-blue-500/30'
+                        : 'bg-white border-slate-300 hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-bold text-xs sm:text-sm text-blue-900 flex items-center gap-1.5">
+                        🚀 Bir Million Promter
+                      </span>
+                      <span className="text-[10px] font-bold text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full">
+                        5,000 so'm
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 leading-tight">
+                      Coursera & AI Leaders ta'lim dasturi. Zaxiradan bo'sh pochtalar biriktiriladi.
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setProjectType('developer')}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      projectType === 'developer'
+                        ? 'bg-purple-50 border-purple-600 ring-2 ring-purple-500/30'
+                        : 'bg-white border-slate-300 hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-bold text-xs sm:text-sm text-purple-900 flex items-center gap-1.5">
+                        💡 5M Sun'iy Intellekt Yetakchilari
+                      </span>
+                      <span className="text-[10px] font-bold text-purple-700 bg-purple-100 px-2 py-0.5 rounded-full">
+                        7,000 so'm
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 leading-tight">
+                      omp.aistudy.uz dasturi. Telegram orqali tasdiqlanadi va familya_ism logini beriladi.
+                    </p>
+                  </button>
+                </div>
+              </div>
               
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>

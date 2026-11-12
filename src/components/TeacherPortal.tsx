@@ -10,13 +10,16 @@ import {
   downloadAllCertificatesAsZip,
   generateUnifiedCertificatesPdf,
 } from '../utils/certificateGenerator';
+import {
+  parseMetrikaComponents,
+  getStudentTrackData,
+} from '../utils/studentLoginHelper';
 import confetti from 'canvas-confetti';
 import { 
   Users, 
   Award, 
   AlertCircle, 
   Copy, 
-  Download, 
   Search, 
   ExternalLink, 
   CheckCircle2, 
@@ -25,21 +28,19 @@ import {
   School, 
   UserCheck, 
   ChevronRight, 
-  ChevronDown,
   RefreshCw, 
   Clock, 
   Sparkles, 
-  CreditCard, 
-  Layers, 
-  FileSpreadsheet,
-  FolderArchive,
-  FileStack,
-  Bell,
-  BellRing,
-  Info,
-  ArrowLeft,
-  MessageSquare,
-  ShieldAlert
+  FolderArchive, 
+  FileStack, 
+  Bell, 
+  ArrowLeft, 
+  Key, 
+  Mail, 
+  Zap, 
+  Layers,
+  Laptop,
+  CheckCheck
 } from 'lucide-react';
 
 interface TeacherPortalProps {
@@ -62,8 +63,6 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   onRegisterSession,
   onMarkMessageAsRead,
   onOpenStudentModal,
-  onToggleStudentPayment,
-  onSaveStudent,
 }) => {
   // Device detection
   const currentDevice = useMemo(() => detectCurrentDevice(), []);
@@ -71,28 +70,50 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   // Check if current device is blocked in sessions
   const blockedSession = sessions.find(s => s.deviceId === currentDevice.deviceId && s.isBlocked);
 
-  // Timer for single click vs double click on passport
-  const passportClickTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // Active Project Track: 'ai' (Bir million promter) vs 'developer' (Besh million sun'iy intellekt yetakchilari)
+  const [activeProject, setActiveProject] = useState<'ai' | 'developer'>(() => {
+    try {
+      const saved = localStorage.getItem('teacher_portal_active_project');
+      if (saved === 'ai' || saved === 'developer') return saved;
+    } catch {}
+    return 'ai';
+  });
 
-  // Start with empty selectedClassId so every visit / refresh prompts teacher selection!
+  // Track whether teacher explicitly completed project selection screen on entry
+  const [hasChosenProject, setHasChosenProject] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('teacher_portal_has_chosen') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  // Currently selected class inside the active project
   const [selectedClassId, setSelectedClassId] = useState<string>('');
-  const [teacherSearchQuery, setTeacherSearchQuery] = useState('');
-  const [isTeacherPickerOpen, setIsTeacherPickerOpen] = useState(false);
-  const [isMessagesListOpen, setIsMessagesListOpen] = useState(false);
-  
-  // Class details state
-  const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'certified' | 'error'>('all');
+
+  // Class list search query (NO autoFocus so phone keyboard stays closed!)
+  const [classSearchQuery, setClassSearchQuery] = useState('');
+
+  // Inside selected class: search & filter
+  const [studentSearchQuery, setStudentSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'certified' | 'pending' | 'error'>('all');
+
+  // Toasts and notifications
   const [copySuccessToast, setCopySuccessToast] = useState('');
+  const [winVNotice, setWinVNotice] = useState('');
+
+  // Download states
   const [isZipping, setIsZipping] = useState(false);
   const [zipProgress, setZipProgress] = useState(0);
-
-  // Multi-option download popup emerging from the download button
   const downloadMenuRef = useRef<HTMLDivElement>(null);
   const [isDownloadMenuOpen, setIsDownloadMenuOpen] = useState(false);
   const [isGeneratingUnifiedPdf, setIsGeneratingUnifiedPdf] = useState(false);
   const [unifiedProgressText, setUnifiedProgressText] = useState('');
   const [unifiedProgressPercent, setUnifiedProgressPercent] = useState(0);
+
+  // Modals
+  const [isMessagesListOpen, setIsMessagesListOpen] = useState(false);
+  const [viewingProblemStudent, setViewingProblemStudent] = useState<Student | null>(null);
 
   // Telegram Share Modal state after PDF download completes
   const [telegramShareModalData, setTelegramShareModalData] = useState<{
@@ -111,7 +132,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     pdfBlob: null,
   });
 
-  // Click outside listener to close the download menu
+  // Click outside listener to close download menu
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (downloadMenuRef.current && !downloadMenuRef.current.contains(e.target as Node)) {
@@ -126,57 +147,87 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     };
   }, [isDownloadMenuOpen]);
 
-  // Problem view modal for teachers
-  const [viewingProblemStudent, setViewingProblemStudent] = useState<Student | null>(null);
-
-  // External School Access Restriction and Telegram Contact State
-  const [externalAccessAlert, setExternalAccessAlert] = useState<{
-    isOpen: boolean;
-    attemptCount: number;
-    attemptedClass: ClassGroup | null;
-    boundClass: ClassGroup | null;
-  } | null>(null);
-
-  // Load bound class id for this device from localStorage or session
-  const [boundClassId, setBoundClassId] = useState<string>(() => {
+  // Handle selecting a project track
+  const handleSelectProjectTrack = (proj: 'ai' | 'developer') => {
+    setActiveProject(proj);
+    setHasChosenProject(true);
+    setSelectedClassId('');
+    setClassSearchQuery('');
     try {
-      return localStorage.getItem(`teacher_bound_class_${currentDevice.deviceId}`) || '';
-    } catch {
-      return '';
-    }
-  });
+      localStorage.setItem('teacher_portal_active_project', proj);
+      localStorage.setItem('teacher_portal_has_chosen', 'true');
+    } catch {}
+  };
 
-  // Load unauthorized attempts count
-  const [unauthorizedAttempts, setUnauthorizedAttempts] = useState<number>(() => {
+  // Switch project track while keeping choice active
+  const handleToggleProject = (proj: 'ai' | 'developer') => {
+    setActiveProject(proj);
+    setSelectedClassId('');
+    setClassSearchQuery('');
     try {
-      return parseInt(localStorage.getItem(`teacher_wrong_attempts_${currentDevice.deviceId}`) || '0', 10);
-    } catch {
-      return 0;
-    }
-  });
+      localStorage.setItem('teacher_portal_active_project', proj);
+    } catch {}
+  };
 
-  // Check if admin has unlocked this device to allow picking another class once
-  const currentSession = sessions.find(s => s.deviceId === currentDevice.deviceId);
-  const isUnlockedByAdmin = currentSession?.allowClassChangeOnce || 
-    (typeof window !== 'undefined' && localStorage.getItem(`unlock_external_device_${currentDevice.deviceId}`) === 'true');
+  // Re-open project selection screen
+  const handleReopenProjectSelection = () => {
+    setHasChosenProject(false);
+    setSelectedClassId('');
+    try {
+      localStorage.removeItem('teacher_portal_has_chosen');
+    } catch {}
+  };
 
-  useEffect(() => {
-    if (isUnlockedByAdmin) {
-      // If admin unlocked, clear bound class and reset attempts so they can pick again!
-      try {
-        localStorage.removeItem(`teacher_bound_class_${currentDevice.deviceId}`);
-        localStorage.removeItem(`teacher_wrong_attempts_${currentDevice.deviceId}`);
-        localStorage.removeItem(`unlock_external_device_${currentDevice.deviceId}`);
-      } catch {}
-      setBoundClassId('');
-      setUnauthorizedAttempts(0);
-    }
-  }, [isUnlockedByAdmin, currentDevice.deviceId]);
+  // Filter classes according to active project:
+  // 'ai': classes without projectType or projectType !== 'developer'
+  // 'developer': classes with projectType === 'developer'
+  const visibleClasses = useMemo(() => {
+    return classes.filter(c => {
+      if (activeProject === 'developer') {
+        return c.projectType === 'developer';
+      }
+      return c.projectType !== 'developer';
+    });
+  }, [classes, activeProject]);
 
-  const currentClass = classes.find(c => c.id === selectedClassId);
-  const classStudents = currentClass ? students.filter(s => s.classId === currentClass.id) : [];
+  // Filter classes by teacher name or class name in search
+  const filteredClasses = useMemo(() => {
+    const query = classSearchQuery.trim().toLowerCase();
+    if (!query) return visibleClasses;
+    return visibleClasses.filter(c => 
+      c.teacherName.toLowerCase().includes(query) ||
+      c.name.toLowerCase().includes(query) ||
+      (c.schoolName ? c.schoolName.toLowerCase().includes(query) : false)
+    );
+  }, [visibleClasses, classSearchQuery]);
 
-  // Register device session when class is selected (without overriding isBlocked)
+  // Currently selected class
+  const currentClass = useMemo(() => {
+    return classes.find(c => c.id === selectedClassId) || null;
+  }, [classes, selectedClassId]);
+
+  // Students for the currently selected class
+  const rawClassStudents = useMemo(() => {
+    if (!currentClass) return [];
+    return students.filter(s => s.classId === currentClass.id);
+  }, [students, currentClass]);
+
+  // Harmonized students with track isolation
+  const classStudents = useMemo(() => {
+    return rawClassStudents.map(st => {
+      const trackData = getStudentTrackData(st, activeProject);
+      return {
+        ...st,
+        status: trackData.status,
+        certificateLink: trackData.certificateLink,
+        certifiedAt: trackData.certifiedAt,
+        hasError: trackData.hasError,
+        errorReason: trackData.errorReason,
+      };
+    });
+  }, [rawClassStudents, activeProject]);
+
+  // Session registration when class is selected
   const onRegisterSessionRef = useRef(onRegisterSession);
   onRegisterSessionRef.current = onRegisterSession;
 
@@ -193,51 +244,45 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         os: currentDevice.os,
         screen: currentDevice.screen,
         lastActiveAt: new Date().toISOString(),
-        boundClassId: boundClassId || (currentClass.isExternalSchool ? currentClass.id : undefined),
-        isExternalTeacher: Boolean(currentClass.isExternalSchool || boundClassId),
       });
     }
-  }, [currentClass?.id, currentClass?.isExternalSchool, boundClassId, currentDevice.deviceId, currentDevice.deviceName, currentDevice.browser, currentDevice.os, currentDevice.screen]);
+  }, [currentClass?.id, currentDevice.deviceId, currentDevice.deviceName, currentDevice.browser, currentDevice.os, currentDevice.screen]);
 
-  // Clean up timer on unmount
-  useEffect(() => {
-    return () => {
-      if (passportClickTimeoutRef.current) {
-        clearTimeout(passportClickTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  const handlePassportSingleClick = (st: Student) => {
-    if (passportClickTimeoutRef.current) {
-      clearTimeout(passportClickTimeoutRef.current);
-      passportClickTimeoutRef.current = null;
+  // Sequential Multi-Item Clipboard Copy for Windows History (Win + V)
+  const handleSequentialCopyForWinV = async (student: Student) => {
+    const { formattedDate, number, series } = parseMetrikaComponents(student.birthDate, student.passportOrId);
+    
+    if (!formattedDate && !number && !series) {
+      setCopySuccessToast("⚠️ Nusxalash uchun sana yoki pasport ma'lumotlari topilmadi");
+      setTimeout(() => setCopySuccessToast(''), 3000);
+      return;
     }
-    passportClickTimeoutRef.current = setTimeout(() => {
-      const raw = st.passportOrId || '';
-      const digits = extractPassportDigits(raw);
-      if (digits) {
-        navigator.clipboard.writeText(digits);
-        setCopySuccessToast(`📋 Pasport raqami nusxalandi: "${digits}"`);
-        setTimeout(() => setCopySuccessToast(''), 1500);
-      }
-      passportClickTimeoutRef.current = null;
-    }, 220);
+
+    try {
+      setWinVNotice(`⏳ 1/3: Tug'ilgan sana nusxalanmoqda ("${formattedDate}")...`);
+      await navigator.clipboard.writeText(formattedDate || '');
+      await new Promise(r => setTimeout(r, 260));
+
+      setWinVNotice(`⏳ 2/3: Metrika raqami nusxalanmoqda ("${number}")...`);
+      await navigator.clipboard.writeText(number || '');
+      await new Promise(r => setTimeout(r, 260));
+
+      setWinVNotice(`⏳ 3/3: Metrika seriyasi nusxalanmoqda ("${series}")...`);
+      await navigator.clipboard.writeText(series || '');
+
+      setWinVNotice(`⚡ Tayyor! Win + V tarixiga yozildi: Seriya (${series}) → Raqam (${number}) → Sana (${formattedDate})`);
+      setCopySuccessToast(`⚡ Win + V: Seriya, Raqam va Sana alohida nusxalandi!`);
+      setTimeout(() => setWinVNotice(''), 4500);
+      setTimeout(() => setCopySuccessToast(''), 3500);
+    } catch {
+      const fallback = [series, number, formattedDate].filter(Boolean).join(' ');
+      navigator.clipboard.writeText(fallback);
+      setCopySuccessToast(`📋 Nusxalandi: ${fallback}`);
+      setTimeout(() => setCopySuccessToast(''), 3000);
+    }
   };
 
-  const handlePassportDoubleClick = (st: Student) => {
-    if (passportClickTimeoutRef.current) {
-      clearTimeout(passportClickTimeoutRef.current);
-      passportClickTimeoutRef.current = null;
-    }
-    onOpenStudentModal?.(st, 'passport');
-  };
-
-  // Messages for this class
-  const classMessages = currentClass ? messages.filter(m => m.classId === currentClass.id) : [];
-  const unreadMessage = classMessages.find(m => !m.isRead);
-
-  // If device is blocked by admin, show blocked overlay
+  // If device is blocked by administrator, show blocked overlay
   if (blockedSession) {
     return (
       <BlockedAccessOverlay
@@ -247,41 +292,38 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     );
   }
 
-  // Statistics
+  // Statistics for selected class
   const totalStudents = classStudents.length;
   const certifiedStudents = classStudents.filter(s => s.status === 'certified');
   const certifiedCount = certifiedStudents.length;
   const errorStudents = classStudents.filter(s => s.hasError || s.status === 'error');
   const errorCount = errorStudents.length;
   const pendingCount = totalStudents - certifiedCount - errorCount;
-
-  // Percentage completion
   const completionRate = totalStudents > 0 ? Math.round((certifiedCount / totalStudents) * 100) : 0;
 
-  // Financials: exactly 5 000 UZS per certified student
-  const pricePerStudent = currentClass?.pricePerStudent || 5000;
+  // Financials: 5 000 UZS for 'ai' (Promter) vs 7 000 UZS for 'developer' (5M AI Yetakchilari)
+  const pricePerStudent = activeProject === 'developer' ? 7000 : (currentClass?.pricePerStudent || 5000);
   const totalDue = certifiedCount * pricePerStudent;
   const paidAmount = currentClass?.paidAmount || 0;
   const remainingDebt = Math.max(0, totalDue - paidAmount);
   const isFullyPaid = totalDue > 0 && paidAmount >= totalDue;
 
-  // Filter students
+  // Filter students within current class
   const filteredStudents = classStudents.filter(st => {
-    const matchesSearch = st.fullName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                          (st.passportOrId ? st.passportOrId.toLowerCase().includes(searchQuery.toLowerCase()) : false);
+    const q = studentSearchQuery.trim().toLowerCase();
+    const matchesSearch = !q || 
+      st.fullName.toLowerCase().includes(q) ||
+      (st.passportOrId ? st.passportOrId.toLowerCase().includes(q) : false) ||
+      (st.assignedLogin ? st.assignedLogin.toLowerCase().includes(q) : false) ||
+      (st.assignedEmail ? st.assignedEmail.toLowerCase().includes(q) : false);
 
     if (!matchesSearch) return false;
 
     if (statusFilter === 'certified') return st.status === 'certified';
+    if (statusFilter === 'pending') return st.status !== 'certified' && !st.hasError && st.status !== 'error';
     if (statusFilter === 'error') return st.hasError || st.status === 'error';
     return true;
   });
-
-  // Filter classes for teacher picker modal
-  const filteredClasses = classes.filter(c => 
-    c.teacherName.toLowerCase().includes(teacherSearchQuery.toLowerCase()) ||
-    c.name.toLowerCase().includes(teacherSearchQuery.toLowerCase())
-  );
 
   // Copy all certificates to clipboard (Formatted for Telegram)
   const handleCopyAllCertificates = async () => {
@@ -293,14 +335,10 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       return;
     }
 
-    const text = formatClassCertificatesForClipboard(students, currentClass);
+    const text = formatClassCertificatesForClipboard(classStudents, currentClass);
     try {
       await navigator.clipboard.writeText(text);
-      confetti({
-        particleCount: 50,
-        spread: 70,
-        origin: { y: 0.6 }
-      });
+      confetti({ particleCount: 50, spread: 70, origin: { y: 0.6 } });
       setCopySuccessToast(`✅ ${currentClass.name} sinfi sertifikatlari nusxalandi! Telegramga joylashingiz mumkin.`);
       setTimeout(() => setCopySuccessToast(''), 4000);
     } catch {
@@ -317,7 +355,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     setZipProgress(0);
 
     try {
-      await downloadAllCertificatesAsZip(students, currentClass, (pct) => {
+      await downloadAllCertificatesAsZip(classStudents, currentClass, (pct) => {
         setZipProgress(Math.round(pct));
       });
       confetti({ particleCount: 40 });
@@ -331,7 +369,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     }
   };
 
-  // Feature 2: Generate Unified Combined PDF from actual links sorted alphabetically by surname
+  // Generate Unified Combined PDF
   const handleGenerateUnifiedPdf = async () => {
     if (!currentClass || certifiedCount === 0) return;
     setIsDownloadMenuOpen(false);
@@ -340,19 +378,14 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     setUnifiedProgressText("Jarayon boshlanmoqda...");
 
     try {
-      const result = await generateUnifiedCertificatesPdf(students, currentClass, (statusText, current, total) => {
+      const result = await generateUnifiedCertificatesPdf(classStudents, currentClass, (statusText, current, total) => {
         setUnifiedProgressText(statusText);
         setUnifiedProgressPercent(Math.round((current / total) * 100));
       });
-      confetti({
-        particleCount: 60,
-        spread: 80,
-        origin: { y: 0.6 }
-      });
-      setCopySuccessToast(`✅ ${currentClass.name} sinfi uchun yagona birlashtirilgan PDF muvaffaqiyatli yaratildi va yuklandi!`);
-      setTimeout(() => setCopySuccessToast(''), 5000);
+      confetti({ particleCount: 60, spread: 80, origin: { y: 0.6 } });
+      setCopySuccessToast(`✅ ${currentClass.name} sinfi uchun yagona birlashtirilgan PDF tayyorlandi!`);
+      setTimeout(() => setCopySuccessToast(''), 4000);
 
-      // Prompt Telegram Share dialog immediately upon download completion!
       if (result?.filename) {
         setTelegramShareModalData({
           isOpen: true,
@@ -363,10 +396,10 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
           pdfBlob: result.blob || null,
         });
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error("Unified PDF generation error:", err);
-      setCopySuccessToast("⚠️ PDF yaratishda xatolik yuz berdi. Iltimos qaytadan urinib ko'ring.");
-      setTimeout(() => setCopySuccessToast(''), 5000);
+      setCopySuccessToast("⚠️ PDF yaratishda xatolik yuz berdi");
+      setTimeout(() => setCopySuccessToast(''), 4000);
     } finally {
       setIsGeneratingUnifiedPdf(false);
       setUnifiedProgressPercent(0);
@@ -374,384 +407,356 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     }
   };
 
-  const handleSelectClass = (targetClass: ClassGroup) => {
-    // 1. Agar ushbu qurilmada allaqachon boshqa maktab sinfi belgilangan bo'lsa (boundClassId)
-    // va yangi tanlanayotgan sinf o'sha biriktirilgan sinf bo'lmasa va admin ruxsat bermagan bo'lsa:
-    if (boundClassId && boundClassId !== targetClass.id && !isUnlockedByAdmin) {
-      const boundCls = classes.find(c => c.id === boundClassId) || null;
-      const newAttempts = unauthorizedAttempts + 1;
-      setUnauthorizedAttempts(newAttempts);
-      try {
-        localStorage.setItem(`teacher_wrong_attempts_${currentDevice.deviceId}`, newAttempts.toString());
-      } catch {}
+  // Messages for this class
+  const classMessages = currentClass ? messages.filter(m => m.classId === currentClass.id) : [];
+  const unreadMessage = classMessages.find(m => !m.isRead);
 
-      setExternalAccessAlert({
-        isOpen: true,
-        attemptCount: newAttempts,
-        attemptedClass: targetClass,
-        boundClass: boundCls,
-      });
-      return;
-    }
+  // Counts for tracks
+  const aiClassesCount = classes.filter(c => c.projectType !== 'developer').length;
+  const devClassesCount = classes.filter(c => c.projectType === 'developer').length;
 
-    // 2. Agar admin ruxsat bergan bo'lsa (isUnlockedByAdmin) yoki tanlanayotgan sinf boshqa maktab bo'lsa:
-    if (isUnlockedByAdmin || targetClass.isExternalSchool) {
-      setBoundClassId(targetClass.id);
-      try {
-        localStorage.setItem(`teacher_bound_class_${currentDevice.deviceId}`, targetClass.id);
-        localStorage.removeItem(`unlock_external_device_${currentDevice.deviceId}`);
-        localStorage.removeItem(`teacher_wrong_attempts_${currentDevice.deviceId}`);
-      } catch {}
-      setUnauthorizedAttempts(0);
-
-      // Admin bergan 1 martalik ruxsatni sarflandik deb yangilash
-      onRegisterSessionRef.current({
-        deviceId: currentDevice.deviceId,
-        boundClassId: targetClass.id,
-        isExternalTeacher: true,
-        allowClassChangeOnce: false,
-        className: targetClass.name,
-        classId: targetClass.id,
-        teacherName: targetClass.teacherName,
-      });
-    }
-
-    setSelectedClassId(targetClass.id);
-    setIsTeacherPickerOpen(false);
-    setTeacherSearchQuery('');
-  };
-
-  // Teacher Picker Modal (Accessible both on landing and in active class dashboard)
-  const renderTeacherPickerModal = () => {
-    if (!isTeacherPickerOpen) return null;
+  // =========================================================================
+  // VIEW 1: PROJECT TRACK SELECTION ON ENTRY (Asked immediately on entry!)
+  // =========================================================================
+  if (!hasChosenProject) {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
-        <div className="relative w-full max-w-lg bg-white border border-slate-200 rounded-2xl shadow-2xl p-5 space-y-4 max-h-[85vh] flex flex-col">
-          
-          <div className="flex items-center justify-between pb-3 border-b border-slate-200/70 flex-shrink-0">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg apple-badge-blue flex items-center justify-center">
-                <School className="w-4 h-4 text-blue-600" />
-              </div>
-              <div>
-                <h3 className="font-bold text-slate-900 text-sm">
-                  {selectedClassId ? "Sinfni almashtirish" : "O'z sinfingizni tanlang"}
-                </h3>
-                <p className="text-[11px] text-slate-500">Ism-familiyangiz yoki sinf nomini qidiring</p>
-              </div>
+      <div className="max-w-3xl mx-auto py-6 sm:py-10 px-3 sm:px-4 space-y-6 animate-fade-in">
+        
+        {/* Welcome Greeting Card */}
+        <div className="apple-glass-elevated rounded-3xl p-6 sm:p-9 shadow-xl border border-white/80 text-center space-y-4 relative overflow-hidden bg-white/90">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-sky-500 text-white flex items-center justify-center mx-auto shadow-lg shadow-blue-500/25">
+            <School className="w-8 h-8 text-white" />
+          </div>
+
+          <div className="space-y-2 max-w-xl mx-auto">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200/80 text-xs font-semibold">
+              <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+              <span>Sinf Rahbarlari & O'qituvchilar Portali</span>
             </div>
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
+              Assalomu alaykum, hurmatli ustoz!
+            </h1>
+            <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
+              Qaysi loyiha bo'yicha sertifikatlar va o'quvchilar ro'yxatini ko'rmoqchisiz? Davom etish uchun quyidagi yo'nalishlardan birini tanlang:
+            </p>
+          </div>
+
+          {/* Two Big Interactive Project Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4 text-left">
+            
+            {/* Project 1: Bir Million Promter */}
             <button
               type="button"
-              onClick={() => setIsTeacherPickerOpen(false)}
-              className="w-7 h-7 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center transition-colors cursor-pointer"
+              onClick={() => handleSelectProjectTrack('ai')}
+              className="p-5 sm:p-6 rounded-2xl border-2 border-blue-200 bg-gradient-to-br from-blue-50/90 via-white to-sky-50/50 hover:border-blue-600 hover:shadow-xl hover:shadow-blue-500/15 transition-all cursor-pointer group relative text-left active:scale-[0.98] flex flex-col justify-between"
             >
-              <X className="w-4 h-4" />
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="w-12 h-12 rounded-xl bg-blue-600 text-white flex items-center justify-center shadow-md shadow-blue-500/20 group-hover:scale-105 transition-transform">
+                    <span className="text-xl">🚀</span>
+                  </div>
+                  <span className="text-xs font-extrabold px-2.5 py-1 rounded-full bg-blue-100 text-blue-800 border border-blue-200">
+                    5 000 so'm
+                  </span>
+                </div>
+
+                <div>
+                  <h3 className="text-base sm:text-lg font-bold text-slate-900 group-hover:text-blue-700 transition-colors">
+                    Bir Million Promter
+                  </h3>
+                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                    Xalqaro Coursera ta'lim platformasi hamda AI Leaders dasturi bo'yicha beriladigan sertifikatlar.
+                  </p>
+                </div>
+              </div>
+
+              <div className="pt-4 mt-4 border-t border-blue-200/60 flex items-center justify-between text-xs font-bold text-blue-700">
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-blue-600"></span>
+                  <span>{aiClassesCount} ta sinf mavjud</span>
+                </span>
+                <div className="flex items-center gap-1 group-hover:translate-x-1 transition-transform">
+                  <span>Kirish</span>
+                  <ChevronRight className="w-4 h-4" />
+                </div>
+              </div>
+            </button>
+
+            {/* Project 2: Besh Million Sun'iy Intellekt Yetakchilari */}
+            <button
+              type="button"
+              onClick={() => handleSelectProjectTrack('developer')}
+              className="p-5 sm:p-6 rounded-2xl border-2 border-indigo-200 bg-gradient-to-br from-purple-50/90 via-white to-indigo-50/50 hover:border-indigo-600 hover:shadow-xl hover:shadow-indigo-500/15 transition-all cursor-pointer group relative text-left active:scale-[0.98] flex flex-col justify-between"
+            >
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-purple-600 to-indigo-600 text-white flex items-center justify-center shadow-md shadow-purple-500/20 group-hover:scale-105 transition-transform">
+                    <span className="text-xl">💡</span>
+                  </div>
+                  <span className="text-xs font-extrabold px-2.5 py-1 rounded-full bg-purple-100 text-purple-900 border border-purple-200">
+                    7 000 so'm
+                  </span>
+                </div>
+
+                <div>
+                  <h3 className="text-base sm:text-lg font-bold text-slate-900 group-hover:text-indigo-700 transition-colors">
+                    Besh Million AI Yetakchilari
+                  </h3>
+                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                    omp.aistudy.uz tizimi orqali Telegram botda tasdiqlanadigan va login bilan beriladigan sertifikatlar.
+                  </p>
+                </div>
+              </div>
+
+              <div className="pt-4 mt-4 border-t border-indigo-200/60 flex items-center justify-between text-xs font-bold text-indigo-700">
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-indigo-600"></span>
+                  <span>{devClassesCount} ta sinf mavjud</span>
+                </span>
+                <div className="flex items-center gap-1 group-hover:translate-x-1 transition-transform">
+                  <span>Kirish</span>
+                  <ChevronRight className="w-4 h-4" />
+                </div>
+              </div>
+            </button>
+
+          </div>
+
+          {/* Reassuring note */}
+          <div className="pt-2 text-center text-xs text-slate-500">
+            Istalgan vaqt yuqori paneldan loyihani bir teginishda almashtirishingiz mumkin.
+          </div>
+
+        </div>
+
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // VIEW 2: CLASS SELECTION SCREEN (Clean list on the main page, NO phone-freezing modal!)
+  // =========================================================================
+  if (!selectedClassId || !currentClass) {
+    const isDev = activeProject === 'developer';
+
+    return (
+      <div className="max-w-4xl mx-auto py-5 sm:py-8 px-3 sm:px-4 space-y-5 animate-fade-in">
+        
+        {/* Floating Success Toast */}
+        {copySuccessToast && (
+          <div className="fixed top-4 left-3 right-3 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 z-50 p-4 rounded-2xl bg-slate-900/95 backdrop-blur-xl text-white font-medium text-xs sm:text-sm shadow-2xl flex items-center justify-center gap-2.5 border border-slate-700 animate-fade-in">
+            <Check className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+            <span>{copySuccessToast}</span>
+          </div>
+        )}
+
+        {/* Top Navigation & Project Switcher */}
+        <div className="apple-glass rounded-2xl p-4 sm:p-5 shadow-xs border border-slate-200/90 space-y-4 bg-white">
+          
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                  Faol Yo'nalish
+                </span>
+              </div>
+              <h2 className="text-lg sm:text-xl font-bold text-slate-900">
+                {isDev ? "Besh Million Sun'iy Intellekt Yetakchilari" : "Bir Million Promter (Coursera)"}
+              </h2>
+            </div>
+
+            {/* Change project button */}
+            <button
+              type="button"
+              onClick={handleReopenProjectSelection}
+              className="px-3.5 py-2 apple-btn-secondary text-slate-700 text-xs font-bold rounded-xl flex items-center gap-1.5 self-start sm:self-auto cursor-pointer hover:border-blue-400"
+            >
+              <RefreshCw className="w-3.5 h-3.5 text-blue-600" />
+              <span>Loyihani almashtirish</span>
             </button>
           </div>
 
-          {/* Search input in modal */}
-          <div className="relative flex-shrink-0">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+          {/* Segmented Quick Switcher */}
+          <div className="grid grid-cols-2 gap-2 p-1.5 bg-slate-100/90 rounded-2xl border border-slate-200/80">
+            <button
+              type="button"
+              onClick={() => handleToggleProject('ai')}
+              className={`py-2.5 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                activeProject === 'ai'
+                  ? 'bg-blue-600 text-white shadow-md shadow-blue-500/25 ring-1 ring-blue-500'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+              }`}
+            >
+              <span>🚀 Bir Million Promter</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                activeProject === 'ai' ? 'bg-white/25 text-white' : 'bg-slate-200 text-slate-700'
+              }`}>
+                {aiClassesCount}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleToggleProject('developer')}
+              className={`py-2.5 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                activeProject === 'developer'
+                  ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-500/25 ring-1 ring-purple-500'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+              }`}
+            >
+              <span>💡 5M AI Yetakchilari</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                activeProject === 'developer' ? 'bg-white/25 text-white' : 'bg-slate-200 text-slate-700'
+              }`}>
+                {devClassesCount}
+              </span>
+            </button>
+          </div>
+
+          {/* Clean Search Input (NO autoFocus to prevent accidental keyboard opens!) */}
+          <div className="relative">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
             <input
               type="text"
-              placeholder="Ustoz ismi yoki sinf (masalan: 9-B)..."
-              value={teacherSearchQuery}
-              onChange={e => setTeacherSearchQuery(e.target.value)}
-              autoFocus
-              className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs sm:text-sm text-slate-900 focus:outline-none focus:bg-white focus:border-blue-600"
+              placeholder="O'z sinfingizni topish: ustoz ismi yoki sinf (masalan: 9-B)..."
+              value={classSearchQuery}
+              onChange={e => setClassSearchQuery(e.target.value)}
+              className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
             />
           </div>
 
-          {/* Class List inside Modal */}
-          <div className="space-y-1.5 overflow-y-auto flex-1 pr-1">
-            {filteredClasses.length === 0 ? (
-              <div className="py-8 text-center text-xs text-slate-400">
-                "{teacherSearchQuery}" bo'yicha sinf yoki o'qituvchi topilmadi
+        </div>
+
+        {/* Classes Responsive Grid */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between text-xs text-slate-500 px-1 font-medium">
+            <span>
+              Topilgan sinflar: <strong className="text-slate-900 font-bold">{filteredClasses.length}</strong> ta
+            </span>
+            <span>Sinfingiz ustiga bosib kiring</span>
+          </div>
+
+          {filteredClasses.length === 0 ? (
+            <div className="apple-glass rounded-2xl p-8 text-center space-y-3 border border-slate-200 bg-white">
+              <div className="w-14 h-14 rounded-2xl bg-slate-100 text-slate-500 flex items-center justify-center mx-auto">
+                <School className="w-7 h-7" />
               </div>
-            ) : (
-              filteredClasses.map(c => {
+              <h3 className="text-base font-bold text-slate-900">
+                {classSearchQuery
+                  ? `"${classSearchQuery}" bo'yicha sinf topilmadi`
+                  : `"${isDev ? "Besh Million Sun'iy Intellekt Yetakchilari" : "Bir Million Promter"}" yo'nalishida hali sinflar yo'q`}
+              </h3>
+              <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
+                {classSearchQuery
+                  ? "Iltimos, ustoz ismi yoki sinf nomini tekshirib qaytadan urinib ko'ring."
+                  : "Ma'muriyat sinf yuklaganda yoki ushbu yo'nalishga import qilganda sinflar shu yerda aks etadi."}
+              </p>
+              {!classSearchQuery && (
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => handleToggleProject(isDev ? 'ai' : 'developer')}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-all cursor-pointer shadow-xs"
+                  >
+                    <span>{isDev ? "Bir Million Promter sinflarini ko'rish" : "5M AI Yetakchilari sinflarini ko'rish"}</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+              {filteredClasses.map(c => {
                 const cStudents = students.filter(s => s.classId === c.id);
-                const cCert = cStudents.filter(s => s.status === 'certified').length;
-                const isCurrent = c.id === selectedClassId;
+                const cCertified = cStudents.filter(s => {
+                  const td = getStudentTrackData(s, activeProject);
+                  return td.status === 'certified';
+                }).length;
+                const total = cStudents.length;
+                const pct = total > 0 ? Math.round((cCertified / total) * 100) : 0;
+                const price = activeProject === 'developer' ? 7000 : (c.pricePerStudent || 5000);
+                const debt = Math.max(0, (cCertified * price) - (c.paidAmount || 0));
 
                 return (
                   <button
                     key={c.id}
                     type="button"
-                    onClick={() => handleSelectClass(c)}
-                    className={`w-full p-3 rounded-xl border flex items-center justify-between text-left transition-all cursor-pointer group relative ${
-                      isCurrent 
-                        ? 'border-blue-500 bg-blue-50/70 ring-1 ring-blue-500' 
-                        : 'border-slate-200/80 hover:border-blue-500 hover:bg-blue-50/50'
-                    }`}
+                    onClick={() => {
+                      setSelectedClassId(c.id);
+                      setStudentSearchQuery('');
+                      setStatusFilter('all');
+                    }}
+                    className="p-4 rounded-2xl border border-slate-200/90 bg-white hover:border-blue-500 hover:shadow-lg hover:shadow-blue-500/10 transition-all cursor-pointer text-left group flex flex-col justify-between space-y-3 active:scale-[0.98] min-h-[110px]"
                   >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className={`w-9 h-9 rounded-lg font-bold text-xs flex items-center justify-center flex-shrink-0 transition-colors ${
-                        isCurrent 
-                          ? 'bg-blue-600 text-white' 
-                          : 'apple-badge-blue group-hover:bg-blue-600 group-hover:text-white'
-                      }`}>
-                        {c.name}
-                      </div>
-                      <div className="min-w-0">
-                        {/* Boshqa maktab qizil yozuvli yorliq */}
-                        {c.isExternalSchool && (
-                          <div className="mb-1">
-                            <span className="text-[11px] font-black text-rose-600 tracking-wider uppercase inline-flex items-center gap-1.5 bg-rose-50 border border-rose-300 px-2 py-0.5 rounded-md shadow-2xs">
-                              <span className="w-1.5 h-1.5 rounded-full bg-rose-600 animate-pulse"></span>
-                              <span>{c.schoolName || '27-maktab'}</span>
-                            </span>
-                          </div>
-                        )}
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-slate-900 text-xs sm:text-sm block truncate group-hover:text-blue-700">
-                            {c.teacherName}
-                          </span>
-                          {isCurrent && (
-                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-blue-200 text-blue-900 font-bold">
-                              Hozirgi sinf
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-11 h-11 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 text-white font-black text-sm flex items-center justify-center flex-shrink-0 shadow-sm group-hover:scale-105 transition-transform">
+                          {c.name}
+                        </div>
+                        <div className="min-w-0">
+                          {c.isExternalSchool && (
+                            <span className="text-[10px] font-bold text-rose-600 bg-rose-50 border border-rose-200 px-1.5 py-0.2 rounded inline-block mb-0.5">
+                              {c.schoolName || 'Boshqa maktab'}
                             </span>
                           )}
+                          <h3 className="font-bold text-slate-900 text-sm group-hover:text-blue-700 truncate">
+                            {c.teacherName}
+                          </h3>
+                          <span className="text-[11px] text-slate-500 block truncate">
+                            {c.name} sinf rahbari
+                          </span>
                         </div>
-                        <span className="text-[11px] text-slate-500">
-                          {c.name} sinfi • {cStudents.length} ta o'quvchi ({cCert} ta tayyor)
+                      </div>
+                      <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-blue-600 group-hover:translate-x-0.5 transition-all flex-shrink-0 mt-1" />
+                    </div>
+
+                    {/* Progress & Counts */}
+                    <div className="space-y-1.5 pt-2 border-t border-slate-100">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-slate-500 font-medium">
+                          {total} o'quvchi
+                        </span>
+                        <span className="font-bold text-slate-900">
+                          {cCertified} ta tayyor <span className="text-blue-600 font-normal">({pct}%)</span>
+                        </span>
+                      </div>
+
+                      <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                        <div 
+                          className="bg-gradient-to-r from-blue-600 to-emerald-500 h-full rounded-full transition-all duration-300"
+                          style={{ width: `${pct}%` }}
+                        ></div>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-1">
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                          debt > 0 
+                            ? 'bg-amber-50 text-amber-800 border border-amber-200' 
+                            : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                        }`}>
+                          {debt > 0 ? `${debt.toLocaleString('uz-UZ')} so'm qarz` : "To'langan ✅"}
+                        </span>
+                        <span className="text-[11px] font-bold text-blue-600 group-hover:underline">
+                          Ochish →
                         </span>
                       </div>
                     </div>
-                    <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-blue-600 group-hover:translate-x-1 transition-all flex-shrink-0" />
                   </button>
                 );
-              })
-            )}
-          </div>
-
-          {/* Modal Footer */}
-          <div className="pt-2 border-t border-slate-200/70 flex items-center justify-between text-xs text-slate-500 flex-shrink-0">
-            <div className="flex items-center gap-2">
-              <span>Topildi: {filteredClasses.length} ta sinf</span>
-              {selectedClassId && (
-                <>
-                  <span>•</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedClassId('');
-                      setIsTeacherPickerOpen(false);
-                      setTeacherSearchQuery('');
-                    }}
-                    className="text-blue-600 hover:text-blue-800 font-bold hover:underline cursor-pointer flex items-center gap-1"
-                  >
-                    <ArrowLeft className="w-3.5 h-3.5" />
-                    <span>Bosh sahifaga chiqish</span>
-                  </button>
-                </>
-              )}
-            </div>
-            <button
-              type="button"
-              onClick={() => setIsTeacherPickerOpen(false)}
-              className="px-3.5 py-1.5 apple-btn-secondary text-slate-700 rounded-lg font-medium cursor-pointer"
-            >
-              Yopish
-            </button>
-          </div>
-
-        </div>
-      </div>
-    );
-  };
-
-  // External School Access Restriction Alert Modal (with Telegram contact button)
-  const renderExternalAccessAlertModal = () => {
-    if (!externalAccessAlert || !externalAccessAlert.isOpen) return null;
-
-    const { attemptCount, attemptedClass, boundClass } = externalAccessAlert;
-    const isOverLimit = attemptCount >= 3;
-
-    // Telegram link with pre-filled message
-    // "agarda 3 martadan keyin yana qayta kirishga urinsa, 'agarda xatolik yuzaga kelayotgan bo'lsa, bu sizning sinfingiz ekanligiga amin bo'lsangiz, Akramxon bilan bog'laning' deb aytadi va meni telegramimga yozish uchun havola beradi, yani bitta tugma, shuni bossa meni telegramim ochiladi va tayyor matn ham yoziladi, yani sinf ni o'sha ustozniki ekanligi, va xatolik yuzaga kelgani haqida (matn da qaysi sinf ekanligini ham aniq yozilgan bo'ladi va u qaysi sinf ustozi ekanligi qaysi sinf ga kirmoqchi bo'lib 3 marta xato kirgan bo'lsa shu sinf demak shu ustozniki ekan deb o'ylab manashu sinf deb biladi) yozilgan bo'ladi, ustoz telegramdan shu yuborish tugmasini bossa o'sha xabar meni telegramimga yuboriladi, meni telegram username: @qiziqyabsimi"
-    const targetClassName = attemptedClass ? attemptedClass.name : 'Noma\'lum sinf';
-    const targetTeacherName = attemptedClass ? attemptedClass.teacherName : 'Ustoz';
-    const boundClassName = boundClass ? `${boundClass.name} (${boundClass.schoolName || 'Boshqa maktab'})` : 'Boshqa maktab';
-
-    const telegramMessage = encodeURIComponent(
-      `Assalomu alaykum Akramxon! Men ${targetTeacherName}man. Saytda ${targetClassName} sinfiga kirmoqchi bo'lganimda boshqa maktab cheklovi bo'yicha xatolik yuzaga keldi (3 martadan ortiq urinildi). Aslida ${targetClassName} sinfi aynan mening sinfim hisoblanadi. Iltimos, ushbu sinfni tanlashim uchun tizimda ruxsat berib yuborsangiz!`
-    );
-    const telegramUrl = `https://t.me/qiziqyabsimi?text=${telegramMessage}`;
-
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-fade-in">
-        <div className="relative w-full max-w-md bg-white border border-rose-300 rounded-3xl shadow-2xl p-6 text-center space-y-4 animate-scale-up">
-          
-          <div className="w-16 h-16 rounded-2xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center mx-auto shadow-sm">
-            <ShieldAlert className="w-9 h-9 text-rose-600 animate-pulse" />
-          </div>
-
-          <div className="space-y-1.5">
-            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase bg-rose-100 text-rose-800 border border-rose-300">
-              Kirish Cheklovi • {attemptCount}-urinish
-            </span>
-            <h3 className="text-lg font-bold text-slate-900">
-              Bu sizning maktabingizdagi sinf emas!
-            </h3>
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Sizning qurilmangiz <b>{boundClassName}</b> sinfiga biriktirilgan. 
-              Siz boshqa maktab sinflarini va maktabimizning ichki sinflarini ko'ra olmaysiz.
-            </p>
-          </div>
-
-          {attemptedClass && (
-            <div className="p-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs space-y-1 text-left font-mono">
-              <div className="flex justify-between text-slate-500">
-                <span>Kirilmoqchi bo'lingan:</span>
-                <span className="font-bold text-slate-900 font-sans">{attemptedClass.name} sinfi</span>
-              </div>
-              <div className="flex justify-between text-slate-500">
-                <span>Sinf rahbari:</span>
-                <span className="font-semibold text-slate-800 font-sans">{attemptedClass.teacherName}</span>
-              </div>
-              <div className="flex justify-between text-slate-500">
-                <span>Qayta urinishlar:</span>
-                <span className={`font-bold ${isOverLimit ? 'text-rose-600' : 'text-amber-600'}`}>
-                  {attemptCount} / 3 marta
-                </span>
-              </div>
+              })}
             </div>
           )}
-
-          {isOverLimit ? (
-            <div className="p-4 bg-rose-50 border border-rose-300 rounded-2xl text-left space-y-3">
-              <p className="text-xs font-semibold text-rose-950 leading-relaxed">
-                Agarda xatolik yuzaga kelayotgan bo'lsa, bu sizning sinfingiz ekanligiga amin bo'lsangiz, Akramxon bilan bog'laning.
-              </p>
-              <a
-                href={telegramUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="w-full py-3 px-4 bg-gradient-to-r from-blue-600 to-sky-600 hover:from-blue-700 hover:to-sky-700 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-md transition-all active:scale-95 cursor-pointer"
-              >
-                <MessageSquare className="w-4 h-4" />
-                <span>Akramxonga Telegramdan yozish (@qiziqyabsimi)</span>
-              </a>
-              <p className="text-[10px] text-slate-500 text-center">
-                Tugmani bossangiz, Telegramda tayyor matn ochiladi va faqat yuborishni bosasiz.
-              </p>
-            </div>
-          ) : (
-            <p className="text-[11px] text-amber-700 font-medium bg-amber-50 p-2.5 rounded-xl border border-amber-200">
-              Diqqat: 3 martadan keyin noto'g'ri urinish amalga oshirilsa, admin bilan bog'lanish uchun havola paydo bo'ladi.
-            </p>
-          )}
-
-          <div className="pt-2">
-            <button
-              type="button"
-              onClick={() => setExternalAccessAlert(null)}
-              className="w-full py-2.5 apple-btn-secondary text-slate-800 text-xs font-bold rounded-xl transition-all cursor-pointer"
-            >
-              Tushundim, yopish
-            </button>
-          </div>
-
         </div>
-      </div>
-    );
-  };
-
-  // 1. If no classes exist at all in database
-  if (classes.length === 0) {
-    return (
-      <div className="max-w-md mx-auto py-12 px-4 text-center space-y-4 animate-fade-in">
-        <div className="w-16 h-16 rounded-2xl apple-glass text-blue-600 border border-slate-200 flex items-center justify-center mx-auto shadow-sm">
-          <School className="w-8 h-8 text-blue-600" />
-        </div>
-        <div className="space-y-1">
-          <h2 className="text-xl font-bold text-slate-900">Sinflar ro'yxati kiritilmadi</h2>
-          <p className="text-xs text-slate-500 leading-relaxed">
-            Hozircha tizimga sinflar kiritilmadi. Maktab ma'muriyati hujjatni yuklagandan so'ng sinf ma'lumotlari shu yerda aks etadi.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  // 2. INITIAL SELECTION LANDING (Clean, concise, NO long list on page!)
-  if (!selectedClassId || !currentClass) {
-    return (
-      <div className="max-w-xl mx-auto py-6 px-2 sm:px-0 animate-fade-in space-y-5">
-        
-        {/* Main Selection Card */}
-        <div className="apple-glass-elevated rounded-3xl p-6 sm:p-8 shadow-xl border border-white/80 space-y-6 text-center relative overflow-hidden">
-          
-          <div className="w-16 h-16 rounded-2xl apple-btn-blue text-white flex items-center justify-center mx-auto shadow-lg shadow-blue-500/25">
-            <UserCheck className="w-8 h-8 text-white" />
-          </div>
-
-          <div className="space-y-2">
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full apple-badge-blue text-xs font-semibold">
-              <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-              <span>Sinf Rahbarlari va O'qituvchilar Portali</span>
-            </div>
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
-              Assalomu alaykum, ustoz!
-            </h1>
-            <p className="text-xs sm:text-sm text-slate-600 max-w-md mx-auto leading-relaxed">
-              O'z sinfingiz o'quvchilari ro'yxati, to'lov holati va Coursera sertifikatlarini ko'rish uchun quyidagi tugmani bosing:
-            </p>
-          </div>
-
-          {/* Single Action Button that Opens Teacher Picker Modal */}
-          <div className="pt-2">
-            <button
-              type="button"
-              onClick={() => {
-                setTeacherSearchQuery('');
-                setIsTeacherPickerOpen(true);
-              }}
-              className="w-full py-4 px-6 apple-btn-blue hover:shadow-xl hover:shadow-blue-500/30 text-white font-bold text-base sm:text-lg rounded-2xl flex items-center justify-between gap-4 cursor-pointer transition-all active:scale-[0.98] shadow-lg shadow-blue-500/20 group"
-            >
-              <div className="flex items-center gap-3">
-                <School className="w-6 h-6 text-blue-200" />
-                <span>Ustozlar ro'yxatini ochish</span>
-              </div>
-              <div className="flex items-center gap-2 text-xs font-semibold bg-white/20 px-3 py-1.5 rounded-xl backdrop-blur-md">
-                <span>{classes.length} ta sinf</span>
-                <ChevronRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
-              </div>
-            </button>
-          </div>
-
-          {/* Quick Informational Cards */}
-          <div className="grid grid-cols-2 gap-3 pt-3 text-left border-t border-slate-200/60">
-            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80">
-              <span className="text-[11px] font-bold text-slate-700 block">📲 Telegram hisobot</span>
-              <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
-                Barcha tayyor sertifikatlarni bitta tugma bilan guruhga nusxalash
-              </p>
-            </div>
-            <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200/80">
-              <span className="text-[11px] font-bold text-indigo-900 block">📑 Yagona PDF & ZIP</span>
-              <p className="text-[11px] text-indigo-700 mt-0.5 leading-snug">
-                Haqiqiy sertifikatlarni A-Z tartibda bitta PDF yoki ZIP arxivda yuklash
-              </p>
-            </div>
-          </div>
-
-        </div>
-
-        {/* MODAL: TEACHER PICKER POPUP */}
-        {renderTeacherPickerModal()}
-
-        {/* MODAL: EXTERNAL ACCESS RESTRICTION ALERT POPUP */}
-        {renderExternalAccessAlertModal()}
 
       </div>
     );
   }
 
-  // 3. TEACHER'S CLASS DASHBOARD (Apple Pro Executive Glass)
+  // =========================================================================
+  // VIEW 3: CLASS DASHBOARD (Inside Selected Class)
+  // =========================================================================
   return (
-    <div className="max-w-3xl mx-auto space-y-4 pb-16 animate-fade-in px-2 sm:px-0">
+    <div className="max-w-4xl mx-auto space-y-4 pb-16 animate-fade-in px-3 sm:px-4">
       
       {/* Toast Alert */}
       {copySuccessToast && (
@@ -761,50 +766,77 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         </div>
       )}
 
+      {/* Floating Win+V Feedback Alert */}
+      {winVNotice && (
+        <div className="fixed top-16 left-3 right-3 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 z-50 p-3.5 rounded-2xl bg-gradient-to-r from-blue-900 via-indigo-900 to-purple-950 text-white font-semibold text-xs shadow-2xl flex items-center justify-center gap-2 border border-blue-400/40 animate-fade-in">
+          <Zap className="w-4 h-4 text-amber-300 animate-bounce flex-shrink-0" />
+          <span>{winVNotice}</span>
+        </div>
+      )}
+
       {/* Top Class Banner in Frosted Glass */}
-      <div className="apple-glass-elevated rounded-2xl p-5 sm:p-6 shadow-md space-y-5">
+      <div className="apple-glass-elevated rounded-2xl p-5 sm:p-6 shadow-md space-y-5 bg-white">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/60 pb-4">
           <div className="flex items-center gap-3.5 min-w-0">
             <div className="w-13 h-13 rounded-2xl apple-btn-blue font-black text-xl flex items-center justify-center flex-shrink-0 shadow-md shadow-blue-500/25">
               {currentClass.name}
             </div>
             <div className="min-w-0">
-              {currentClass.isExternalSchool && (
-                <div className="mb-1">
-                  <span className="text-xs font-black text-rose-600 tracking-wide uppercase inline-flex items-center gap-1.5 bg-rose-50 px-2.5 py-0.5 rounded-md border border-rose-200">
-                    <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
-                    {currentClass.schoolName || '27-maktab'}
+              <div className="flex items-center gap-2 flex-wrap mb-0.5">
+                <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md border ${
+                  activeProject === 'developer'
+                    ? 'bg-purple-100 text-purple-900 border-purple-300'
+                    : 'bg-blue-100 text-blue-900 border-blue-300'
+                }`}>
+                  {activeProject === 'developer' ? '💡 5M AI Yetakchilari' : '🚀 Bir Million Promter'}
+                </span>
+                {currentClass.isExternalSchool && (
+                  <span className="text-[10px] font-black text-rose-600 uppercase bg-rose-50 px-2 py-0.5 rounded border border-rose-200">
+                    {currentClass.schoolName || 'Boshqa maktab'}
                   </span>
-                </div>
-              )}
-              <span className="text-xs text-blue-700 font-bold block uppercase tracking-wider">
-                {currentClass.name} sinf rahbari
-              </span>
+                )}
+              </div>
               <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 truncate">
                 {currentClass.teacherName}
               </h1>
+              <span className="text-xs text-slate-500">
+                {currentClass.name} sinfi • {pricePerStudent.toLocaleString('uz-UZ')} so'm / o'quvchi
+              </span>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            {/* Quick exit to landing / all teachers */}
+          {/* Action buttons in header */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Back to all classes */}
             <button
               type="button"
               onClick={() => {
                 setSelectedClassId('');
-                setTeacherSearchQuery('');
+                setClassSearchQuery('');
               }}
-              className="p-2.5 apple-btn-secondary rounded-xl text-slate-600 hover:text-slate-900 transition-all flex-shrink-0 cursor-pointer active:scale-95"
-              title="Bosh sahifaga chiqish"
+              className="px-3.5 py-2 apple-btn-secondary rounded-xl text-slate-700 hover:text-slate-900 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer active:scale-95 shadow-2xs"
+              title="Barcha sinflar ro'yxatiga qaytish"
             >
-              <ArrowLeft className="w-4 h-4" />
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Sinflar</span>
             </button>
 
-            {/* Messages button */}
+            {/* Change project track */}
+            <button
+              type="button"
+              onClick={handleReopenProjectSelection}
+              className="px-3 py-2 apple-btn-secondary hover:border-blue-400 rounded-xl text-xs font-bold text-slate-700 flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-2xs"
+              title="Loyihani almashtirish"
+            >
+              <RefreshCw className="w-3.5 h-3.5 text-blue-600" />
+              <span>Loyiha</span>
+            </button>
+
+            {/* Messages */}
             <button
               type="button"
               onClick={() => setIsMessagesListOpen(true)}
-              className="px-3.5 py-2 apple-btn-secondary rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all flex-shrink-0 cursor-pointer w-fit active:scale-95 relative"
+              className="px-3 py-2 apple-btn-secondary rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 relative"
               title="Ma'muriyatdan xabarlar"
             >
               <Bell className="w-3.5 h-3.5 text-amber-600" />
@@ -817,26 +849,12 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                 </span>
               )}
             </button>
-
-            {/* Sinfni almashtirish button */}
-            <button
-              type="button"
-              onClick={() => {
-                setTeacherSearchQuery('');
-                setIsTeacherPickerOpen(true);
-              }}
-              className="px-3.5 py-2 apple-btn-secondary hover:border-blue-500 hover:bg-blue-50/60 rounded-xl text-xs font-bold text-slate-800 flex items-center gap-1.5 transition-all flex-shrink-0 cursor-pointer w-fit active:scale-95 shadow-2xs"
-            >
-              <RefreshCw className="w-3.5 h-3.5 text-blue-600" />
-              <span>Sinfni almashtirish</span>
-            </button>
           </div>
         </div>
 
-        {/* 3 Metric Cards with Apple Glass & Micro Progress */}
+        {/* 3 Metric Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          {/* Total students */}
-          <div className="apple-glass-card rounded-xl p-4">
+          <div className="apple-glass-card rounded-xl p-4 bg-slate-50/60 border border-slate-200">
             <div className="flex items-center justify-between text-slate-500 mb-1.5">
               <span className="text-xs font-semibold">Jami O'quvchilar</span>
               <Users className="w-4 h-4 text-slate-600" />
@@ -849,246 +867,154 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
             </div>
           </div>
 
-          {/* Certified with Micro-Progress */}
-          <div className="apple-glass-card rounded-xl p-4 border-emerald-300/80 bg-emerald-50/30">
+          <div className="apple-glass-card rounded-xl p-4 bg-emerald-50/40 border border-emerald-200">
             <div className="flex items-center justify-between text-emerald-800 mb-1.5">
-              <span className="text-xs font-bold">Sertifikat Olganlar</span>
+              <span className="text-xs font-semibold">Tayyor Sertifikatlar</span>
               <Award className="w-4 h-4 text-emerald-600" />
             </div>
-            <div className="text-2xl font-black text-emerald-700">
-              {certifiedCount} <span className="text-xs text-emerald-600 font-medium">nafar</span>
+            <div className="text-2xl font-black text-emerald-950">
+              {certifiedCount} <span className="text-xs text-emerald-700 font-normal">({completionRate}%)</span>
             </div>
             <div className="w-full bg-emerald-200 h-1.5 rounded-full mt-2.5 overflow-hidden">
               <div 
-                className="bg-emerald-600 h-full rounded-full transition-all duration-500" 
+                className="bg-emerald-600 h-full rounded-full transition-all duration-300"
                 style={{ width: `${completionRate}%` }}
               ></div>
             </div>
-            <span className="text-[10px] text-emerald-700 font-semibold block mt-1">
-              {completionRate}% natija qayd etildi
-            </span>
           </div>
 
-          {/* Payment status */}
-          <div className="apple-glass-card rounded-xl p-4">
-            <div className="flex items-center justify-between text-slate-500 mb-1.5">
-              <span className="text-xs font-semibold">To'lov (5 000 / ta)</span>
-              <CreditCard className="w-4 h-4 text-slate-600" />
+          <div className="apple-glass-card rounded-xl p-4 bg-blue-50/40 border border-blue-200">
+            <div className="flex items-center justify-between text-blue-900 mb-1.5">
+              <span className="text-xs font-semibold">To'lov Holati</span>
+              <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
+                isFullyPaid ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'
+              }`}>
+                {isFullyPaid ? 'To\'langan' : remainingDebt > 0 ? 'Qarz bor' : 'Kutilmoqda'}
+              </span>
             </div>
-            <div className="mt-0.5">
-              {isFullyPaid ? (
-                <div className="text-base font-extrabold text-emerald-700 flex items-center gap-1.5">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  <span>To'lov yakunlandi</span>
-                </div>
-              ) : totalDue === 0 ? (
-                <div className="text-xs text-slate-500 font-medium">
-                  0 so'm (sertifikat kutilmoqda)
-                </div>
-              ) : (
-                <div className="text-xl font-black text-amber-700">
-                  {remainingDebt.toLocaleString()} so'm
-                </div>
-              )}
+            <div className="text-xl sm:text-2xl font-black text-slate-900">
+              {totalDue.toLocaleString('uz-UZ')} <span className="text-xs text-slate-500 font-normal">so'm</span>
             </div>
-            <span className="text-[10px] text-slate-500 block mt-1">
-              {isFullyPaid ? "Barcha to'lov to'liq amalga oshirildi" : "Kutilayotgan to'lov miqdori"}
-            </span>
+            <div className="text-[11px] text-slate-500 mt-2 flex justify-between">
+              <span>To'langan: {paidAmount.toLocaleString('uz-UZ')} so'm</span>
+              {remainingDebt > 0 && <span className="text-amber-700 font-bold">Qarz: {remainingDebt.toLocaleString('uz-UZ')} so'm</span>}
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Main Action Buttons: Apple Pro High-Gloss Blue */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <button
-          type="button"
-          onClick={handleCopyAllCertificates}
-          className="w-full py-3.5 px-4 apple-btn-blue text-white text-xs sm:text-sm font-bold rounded-xl shadow-md shadow-blue-500/20 flex items-center justify-center gap-2.5 transition-all cursor-pointer active:scale-[0.98]"
-        >
-          <Copy className="w-4 h-4 flex-shrink-0" />
-          <span>Telegram uchun nusxalash</span>
-        </button>
-
-        {/* Emergent Multi-Option Download Button */}
-        <div className="relative" ref={downloadMenuRef}>
+        {/* Action Buttons: Copy for Telegram & Download PDF/ZIP */}
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2 border-t border-slate-200/60">
           <button
             type="button"
-            disabled={certifiedCount === 0 || isZipping || isGeneratingUnifiedPdf}
-            onClick={() => setIsDownloadMenuOpen(prev => !prev)}
-            className={`w-full py-3.5 px-4 apple-btn-secondary disabled:opacity-50 text-slate-800 text-xs sm:text-sm font-semibold rounded-xl flex items-center justify-between gap-2.5 transition-all cursor-pointer active:scale-[0.98] ${
-              isDownloadMenuOpen ? 'ring-2 ring-blue-500 bg-blue-50/70 border-blue-400' : ''
-            }`}
+            onClick={handleCopyAllCertificates}
+            className="py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md shadow-blue-500/20 active:scale-95 transition-all cursor-pointer"
           >
-            <div className="flex items-center gap-2 min-w-0">
-              <Download className="w-4 h-4 text-blue-600 flex-shrink-0" />
-              <span className="truncate">
-                {isZipping 
-                  ? `Arxivlanmoqda... ${zipProgress}%` 
-                  : isGeneratingUnifiedPdf
-                  ? `PDF jamlanmoqda... ${unifiedProgressPercent}%`
-                  : `Barcha sertifikatlarni yuklash`}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5 flex-shrink-0">
-              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-blue-100 text-blue-800">
-                2 xil variant
-              </span>
-              <ChevronDown className={`w-4 h-4 text-slate-500 transition-transform duration-300 ${isDownloadMenuOpen ? 'rotate-180 text-blue-600' : ''}`} />
-            </div>
+            <Copy className="w-4 h-4" />
+            <span>📲 Telegram guruhga nusxalash ({certifiedCount} ta)</span>
           </button>
 
-          {/* Emergent Menu popping right from the button */}
-          {isDownloadMenuOpen && (
-            <div className="absolute right-0 top-full mt-2 w-full sm:w-[420px] z-40 bg-white/95 backdrop-blur-xl border border-blue-200/90 rounded-2xl shadow-2xl p-3.5 space-y-2.5 animate-scale-up origin-top-right">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-                <div className="flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-                  <span className="text-xs font-bold text-slate-900">Yuklash turini tanlang</span>
-                </div>
+          {/* Download Menu */}
+          <div className="relative" ref={downloadMenuRef}>
+            <button
+              type="button"
+              onClick={() => setIsDownloadMenuOpen(prev => !prev)}
+              disabled={certifiedCount === 0}
+              className={`w-full sm:w-auto py-3 px-5 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md ${
+                certifiedCount === 0
+                  ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                  : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white shadow-emerald-500/20 active:scale-95'
+              }`}
+            >
+              <FileStack className="w-4 h-4" />
+              <span>Sertifikatlarni yuklab olish ({certifiedCount} ta)</span>
+            </button>
+
+            {isDownloadMenuOpen && (
+              <div className="absolute right-0 bottom-full sm:bottom-auto sm:top-full mt-2 w-72 sm:w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl p-3 space-y-2 z-50 animate-fade-in">
                 <button
                   type="button"
-                  onClick={() => setIsDownloadMenuOpen(false)}
-                  className="w-6 h-6 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center transition-colors cursor-pointer"
+                  onClick={handleGenerateUnifiedPdf}
+                  className="w-full p-3 rounded-xl border border-indigo-200 bg-indigo-50/70 hover:bg-indigo-100/70 text-left flex items-start gap-3 transition-all cursor-pointer group"
                 >
-                  <X className="w-3.5 h-3.5" />
+                  <FileStack className="w-5 h-5 text-indigo-700 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <span className="text-xs sm:text-sm font-bold text-indigo-950 block">
+                      Yagona Birlashtirilgan PDF
+                    </span>
+                    <p className="text-[11px] text-slate-600 mt-0.5">
+                      Familiya bo'yicha tartiblangan (A-Z) bitta yagona PDF fayl
+                    </p>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsDownloadMenuOpen(false);
+                    handleDownloadZip();
+                  }}
+                  className="w-full p-3 rounded-xl border border-slate-200 hover:border-blue-400 hover:bg-blue-50/60 text-left flex items-start gap-3 transition-all cursor-pointer group"
+                >
+                  <FolderArchive className="w-5 h-5 text-blue-700 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <span className="text-xs sm:text-sm font-bold text-slate-900 block">
+                      ZIP arxiv (Alohida fayllar)
+                    </span>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Barcha o'quvchilar sertifikati alohida PDF sifatida bitta ZIP arxivda
+                    </p>
+                  </div>
                 </button>
               </div>
-
-              {/* Tugma 1: Existing ZIP option */}
-              <button
-                type="button"
-                onClick={() => {
-                  setIsDownloadMenuOpen(false);
-                  handleDownloadZip();
-                }}
-                className="w-full p-3 rounded-xl border border-slate-200/80 hover:border-blue-500 hover:bg-blue-50/60 text-left flex items-start gap-3 transition-all cursor-pointer group"
-              >
-                <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center flex-shrink-0 group-hover:bg-blue-600 group-hover:text-white transition-colors">
-                  <FolderArchive className="w-5 h-5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs sm:text-sm font-bold text-slate-900 group-hover:text-blue-700">
-                      ZIP to'plam (Alohida sertifikatlar)
-                    </span>
-                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
-                      .ZIP
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
-                    Har bir o'quvchi uchun alohida sertifikat fayli (.pdf va .html) bitta ZIP arxivda yuklanadi.
-                  </p>
-                </div>
-              </button>
-
-              {/* Tugma 2: New Unified PDF from actual links */}
-              <button
-                type="button"
-                onClick={handleGenerateUnifiedPdf}
-                className="w-full p-3 rounded-xl border-2 border-indigo-300 bg-gradient-to-r from-indigo-50/70 to-blue-50/70 hover:border-indigo-600 hover:from-indigo-100/70 hover:to-blue-100/70 text-left flex items-start gap-3 transition-all cursor-pointer group shadow-xs"
-              >
-                <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center flex-shrink-0 shadow-md shadow-indigo-500/25 group-hover:scale-105 transition-transform">
-                  <FileStack className="w-5 h-5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-1">
-                    <span className="text-xs sm:text-sm font-bold text-indigo-950 group-hover:text-indigo-700 flex items-center gap-1.5">
-                      <span>Birlashtirilgan Yagona PDF</span>
-                      <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded-md bg-amber-400 text-amber-950">
-                        Yangi
-                      </span>
-                    </span>
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800">
-                      .PDF
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-slate-600 mt-1 leading-snug">
-                    Kiritilgan havolalardan sertifikat rasmlarini olib, <strong>familiya bo'yicha ketma-ketlikda (A-Z)</strong> bitta uzun ro'yxat PDF qilib beradi.
-                  </p>
-                </div>
-              </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
+
+        {/* Live Progress Card for PDF */}
+        {isGeneratingUnifiedPdf && (
+          <div className="p-3.5 rounded-xl bg-indigo-50 border border-indigo-200 space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-bold text-indigo-950 flex items-center gap-1.5">
+                <RefreshCw className="w-3.5 h-3.5 text-indigo-600 animate-spin" />
+                <span>{unifiedProgressText}</span>
+              </span>
+              <span className="font-mono font-bold text-indigo-700">{unifiedProgressPercent}%</span>
+            </div>
+            <div className="w-full bg-indigo-200 h-1.5 rounded-full overflow-hidden">
+              <div className="bg-indigo-600 h-full rounded-full transition-all" style={{ width: `${unifiedProgressPercent}%` }}></div>
+            </div>
+          </div>
+        )}
+
+        {/* Live Progress Card for ZIP */}
+        {isZipping && (
+          <div className="p-3.5 rounded-xl bg-blue-50 border border-blue-200 space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-bold text-blue-950 flex items-center gap-1.5">
+                <RefreshCw className="w-3.5 h-3.5 text-blue-600 animate-spin" />
+                <span>ZIP arxiv tayyorlanmoqda...</span>
+              </span>
+              <span className="font-mono font-bold text-blue-700">{zipProgress}%</span>
+            </div>
+            <div className="w-full bg-blue-200 h-1.5 rounded-full overflow-hidden">
+              <div className="bg-blue-600 h-full rounded-full transition-all" style={{ width: `${zipProgress}%` }}></div>
+            </div>
+          </div>
+        )}
+
       </div>
 
-      {/* Unified PDF Generation Live Progress Card */}
-      {isGeneratingUnifiedPdf && (
-        <div className="apple-glass rounded-2xl p-4 border border-indigo-200 bg-indigo-50/60 shadow-lg space-y-3 animate-fade-in">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center animate-spin">
-                <RefreshCw className="w-4 h-4" />
-              </div>
-              <div>
-                <h4 className="text-xs sm:text-sm font-bold text-indigo-950">
-                  Haqiqiy sertifikatlar jamlanmoqda...
-                </h4>
-                <p className="text-[11px] text-indigo-700 truncate max-w-xs sm:max-w-md">
-                  {unifiedProgressText}
-                </p>
-              </div>
-            </div>
-            <span className="text-sm font-black text-indigo-700 font-mono">
-              {unifiedProgressPercent}%
-            </span>
-          </div>
-
-          <div className="w-full bg-indigo-200/80 h-2 rounded-full overflow-hidden">
-            <div 
-              className="bg-indigo-600 h-full rounded-full transition-all duration-300"
-              style={{ width: `${unifiedProgressPercent}%` }}
-            ></div>
-          </div>
-          <div className="flex items-center justify-between text-[10px] text-slate-500">
-            <span>Familiya bo'yicha saralanmoqda</span>
-            <span>Iltimos, sahifani yopmang</span>
-          </div>
-        </div>
-      )}
-
-      {/* ZIP Generation Live Progress Card */}
-      {isZipping && (
-        <div className="apple-glass rounded-2xl p-4 border border-blue-200 bg-blue-50/60 shadow-lg space-y-3 animate-fade-in">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center animate-spin">
-                <RefreshCw className="w-4 h-4" />
-              </div>
-              <div>
-                <h4 className="text-xs sm:text-sm font-bold text-blue-950">
-                  ZIP arxiv tayyorlanmoqda...
-                </h4>
-                <p className="text-[11px] text-blue-700">
-                  Har bir o'quvchi sertifikati PDF shaklida arxivlanmoqda
-                </p>
-              </div>
-            </div>
-            <span className="text-sm font-black text-blue-700 font-mono">
-              {zipProgress}%
-            </span>
-          </div>
-
-          <div className="w-full bg-blue-200/80 h-2 rounded-full overflow-hidden">
-            <div 
-              className="bg-blue-600 h-full rounded-full transition-all duration-300"
-              style={{ width: `${zipProgress}%` }}
-            ></div>
-          </div>
-        </div>
-      )}
-
-      {/* Filter and Search Bar */}
-      <div className="apple-glass rounded-xl p-3 shadow-xs space-y-3">
+      {/* Filter and Search Bar for Students */}
+      <div className="apple-glass rounded-xl p-3 shadow-xs space-y-3 bg-white border border-slate-200">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="relative flex-1">
             <Search className="w-4 h-4 text-blue-600 absolute left-3 top-2.5" />
             <input
               type="text"
               placeholder="O'quvchi F.I.SH yoki ID raqami bo'yicha qidirish..."
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-3 py-1.5 apple-glass-input rounded-lg text-slate-900 text-xs sm:text-sm focus:outline-none"
+              value={studentSearchQuery}
+              onChange={e => setStudentSearchQuery(e.target.value)}
+              className="w-full pl-9 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-900 text-xs sm:text-sm focus:outline-none focus:bg-white focus:border-blue-500"
             />
           </div>
 
@@ -1097,9 +1023,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
             <button
               onClick={() => setStatusFilter('all')}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex-shrink-0 transition-all cursor-pointer ${
-                statusFilter === 'all'
-                  ? 'apple-btn-blue text-white shadow-xs'
-                  : 'apple-btn-secondary text-slate-600'
+                statusFilter === 'all' ? 'bg-blue-600 text-white shadow-xs' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
               }`}
             >
               Barchasi ({totalStudents})
@@ -1108,21 +1032,26 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
             <button
               onClick={() => setStatusFilter('certified')}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex-shrink-0 transition-all cursor-pointer ${
-                statusFilter === 'certified'
-                  ? 'bg-emerald-600 text-white shadow-xs'
-                  : 'apple-badge-green hover:bg-emerald-100'
+                statusFilter === 'certified' ? 'bg-emerald-600 text-white shadow-xs' : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
               }`}
             >
               Tayyor ({certifiedCount})
+            </button>
+
+            <button
+              onClick={() => setStatusFilter('pending')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex-shrink-0 transition-all cursor-pointer ${
+                statusFilter === 'pending' ? 'bg-amber-600 text-white shadow-xs' : 'bg-amber-50 text-amber-800 hover:bg-amber-100'
+              }`}
+            >
+              Kutilmoqda ({pendingCount})
             </button>
 
             {errorCount > 0 && (
               <button
                 onClick={() => setStatusFilter('error')}
                 className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex-shrink-0 transition-all cursor-pointer ${
-                  statusFilter === 'error'
-                    ? 'bg-rose-600 text-white shadow-xs'
-                    : 'apple-badge-rose hover:bg-rose-100'
+                  statusFilter === 'error' ? 'bg-rose-600 text-white shadow-xs' : 'bg-rose-50 text-rose-800 hover:bg-rose-100'
                 }`}
               >
                 Xatolik ({errorCount})
@@ -1132,102 +1061,148 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         </div>
       </div>
 
-      {/* Students List in Apple Frosted Glass Cards */}
+      {/* Students List Cards */}
       <div className="space-y-2.5">
         {filteredStudents.length === 0 ? (
-          <div className="p-8 text-center text-slate-500 text-xs apple-glass rounded-xl border border-slate-200">
-            Qidiruv natijasida o'quvchilar topilmadi.
+          <div className="p-8 text-center text-slate-500 text-xs apple-glass rounded-xl border border-slate-200 bg-white">
+            Qidiruv bo'yicha o'quvchilar topilmadi.
           </div>
         ) : (
           filteredStudents.map((st, idx) => {
             const isCertified = st.status === 'certified';
             const isError = st.hasError || st.status === 'error';
+            const metrika = parseMetrikaComponents(st.birthDate, st.passportOrId);
 
             return (
               <div
                 key={st.id}
-                className="apple-glass-card hover:border-blue-400/60 rounded-xl p-3.5 sm:p-4 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all"
+                className="apple-glass-card hover:border-blue-400/60 rounded-xl p-3.5 sm:p-4 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all bg-white border border-slate-200"
               >
                 {/* Student Info */}
                 <div 
-                  className="flex items-start gap-3 min-w-0 flex-1 cursor-pointer select-none"
+                  className="flex items-start gap-3 min-w-0 flex-1 select-none"
                   onDoubleClick={() => onOpenStudentModal?.(st)}
-                  title="1 marta bosing — nusxalash, 2 marta tez bosing — ko'rish/tahrirlash"
+                  title="2 marta tez bosing — to'liq ma'lumotlarni ko'rish yoki tahrirlash"
                 >
                   <span className="w-6 h-6 rounded-md bg-blue-50 border border-blue-200/80 text-blue-700 font-mono text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">
                     {idx + 1}
                   </span>
-                  <div className="min-w-0">
+                  
+                  <div className="min-w-0 space-y-1">
                     <h2 
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (st.fullName) {
-                          navigator.clipboard.writeText(st.fullName);
-                          setCopySuccessToast(`📋 Nusxalandi: "${st.fullName}"`);
-                          setTimeout(() => setCopySuccessToast(''), 1500);
-                        }
+                        navigator.clipboard.writeText(st.fullName);
+                        setCopySuccessToast(`📋 Nusxalandi: "${st.fullName}"`);
+                        setTimeout(() => setCopySuccessToast(''), 1500);
                       }}
-                      onDoubleClick={(e) => {
-                        e.stopPropagation();
-                        onOpenStudentModal?.(st);
-                      }}
-                      className="font-bold text-slate-900 text-sm sm:text-base leading-snug truncate hover:text-blue-600 transition-colors"
-                      title="1 marta bosing - nusxalash, 2 marta - tahrirlash"
+                      className="font-bold text-slate-900 text-sm sm:text-base leading-snug truncate hover:text-blue-600 transition-colors cursor-pointer"
+                      title="1 marta bosing — ism nusxalanadi"
                     >
                       {st.fullName}
                     </h2>
-                    <div className="flex flex-wrap items-center gap-2 mt-0.5 text-xs text-slate-500 font-mono">
-                      {st.birthDate && (
-                        <span
+
+                    {/* Metrika Chips & Sequential Win+V Button */}
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                      {metrika.formattedDate && (
+                        <button
+                          type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            navigator.clipboard.writeText(st.birthDate!);
-                            setCopySuccessToast(`📋 Nusxalandi: "${st.birthDate}"`);
+                            navigator.clipboard.writeText(metrika.formattedDate);
+                            setCopySuccessToast(`📋 Tug'ilgan sana nusxalandi: "${metrika.formattedDate}"`);
                             setTimeout(() => setCopySuccessToast(''), 1500);
                           }}
-                          onDoubleClick={(e) => {
-                            e.stopPropagation();
-                            onOpenStudentModal?.(st);
-                          }}
-                          className="hover:text-blue-600 transition-colors"
-                          title="1 marta bosing - nusxalash, 2 marta - tahrirlash"
+                          className="px-2 py-0.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 font-mono text-[11px] cursor-pointer"
+                          title="Faqat tug'ilgan sanani nusxalash"
                         >
-                          Tug'ilgan: {st.birthDate}
-                        </span>
+                          📅 {metrika.formattedDate}
+                        </button>
                       )}
-                      {st.passportOrId && (
-                        <span
+
+                      {metrika.number && (
+                        <button
+                          type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            handlePassportSingleClick(st);
-                          }}
-                          onDoubleClick={(e) => {
-                            e.stopPropagation();
-                            handlePassportDoubleClick(st);
-                          }}
-                          className="hover:text-blue-600 transition-colors cursor-pointer"
-                          title="1 marta bosing - faqat 7 talik raqamni nusxalash, 2 marta tez bosing - tahrirlash (Ctrl+A / Ctrl+C da I-FR bilan nusxalash)"
-                        >
-                          • ID: {st.passportOrId}
-                        </span>
-                      )}
-                      {st.assignedEmail && (
-                        <span
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            navigator.clipboard.writeText(st.assignedEmail!);
-                            setCopySuccessToast(`📋 Nusxalandi: "${st.assignedEmail}"`);
+                            navigator.clipboard.writeText(metrika.number);
+                            setCopySuccessToast(`📋 Raqam nusxalandi: "${metrika.number}"`);
                             setTimeout(() => setCopySuccessToast(''), 1500);
                           }}
-                          onDoubleClick={(e) => {
-                            e.stopPropagation();
-                            onOpenStudentModal?.(st);
-                          }}
-                          className="text-blue-600 font-semibold bg-blue-50 px-1.5 py-0.5 rounded hover:bg-blue-100 transition-colors"
-                          title="1 marta bosing - nusxalash, 2 marta - tahrirlash"
+                          className="px-2 py-0.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 font-mono text-[11px] cursor-pointer"
+                          title="Faqat 7 talik raqamni nusxalash"
                         >
-                          {st.assignedEmail}
-                        </span>
+                          🔢 {metrika.number}
+                        </button>
+                      )}
+
+                      {metrika.series && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            navigator.clipboard.writeText(metrika.series);
+                            setCopySuccessToast(`📋 Seriya nusxalandi: "${metrika.series}"`);
+                            setTimeout(() => setCopySuccessToast(''), 1500);
+                          }}
+                          className="px-2 py-0.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 font-mono text-[11px] font-bold cursor-pointer"
+                          title="Faqat seriyani nusxalash"
+                        >
+                          🔤 {metrika.series}
+                        </button>
+                      )}
+
+                      {/* Dedicated [⚡ Win+V] Button */}
+                      {(metrika.formattedDate || metrika.number || metrika.series) && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSequentialCopyForWinV(st);
+                          }}
+                          className="px-2 py-0.5 rounded-md bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-mono text-[10px] font-bold cursor-pointer shadow-2xs flex items-center gap-1 active:scale-95"
+                          title="Sana, Raqam va Seriyani alohida-alohida Windows xotirasiga yozadi (Win+V orqali qulay joylash)"
+                        >
+                          <Zap className="w-2.5 h-2.5 text-amber-300" />
+                          <span>Win+V</span>
+                        </button>
+                      )}
+
+                      {/* Track specific Login / Email */}
+                      {activeProject === 'developer' ? (
+                        st.assignedLogin && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigator.clipboard.writeText(st.assignedLogin!);
+                              setCopySuccessToast(`📋 Login nusxalandi: "${st.assignedLogin}"`);
+                              setTimeout(() => setCopySuccessToast(''), 1500);
+                            }}
+                            className="px-2 py-0.5 rounded-md bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-200 font-mono text-[11px] font-bold cursor-pointer flex items-center gap-1"
+                            title="Logini nusxalash"
+                          >
+                            <Key className="w-3 h-3 text-purple-700" />
+                            <span>{st.assignedLogin}</span>
+                          </button>
+                        )
+                      ) : (
+                        st.assignedEmail && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigator.clipboard.writeText(st.assignedEmail!);
+                              setCopySuccessToast(`📋 Email nusxalandi: "${st.assignedEmail}"`);
+                              setTimeout(() => setCopySuccessToast(''), 1500);
+                            }}
+                            className="px-2 py-0.5 rounded-md bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 font-mono text-[11px] cursor-pointer flex items-center gap-1"
+                            title="Emailni nusxalash"
+                          >
+                            <Mail className="w-3 h-3 text-blue-700" />
+                            <span>{st.assignedEmail}</span>
+                          </button>
+                        )
                       )}
                     </div>
                   </div>
@@ -1237,7 +1212,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                 <div className="flex items-center gap-2 self-end sm:self-center flex-shrink-0">
                   {isCertified ? (
                     <div className="flex items-center gap-2">
-                      <span className="px-2.5 py-1 rounded-full text-xs font-bold apple-badge-green flex items-center gap-1.5 shadow-xs">
+                      <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 flex items-center gap-1.5 shadow-xs">
                         <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
                         <span>Sertifikat tayyor</span>
                       </span>
@@ -1247,7 +1222,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                           href={st.certificateLink}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="p-1.5 text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded-lg transition-colors border border-blue-200/80"
+                          className="p-1.5 text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded-lg transition-colors border border-blue-200/80 cursor-pointer"
                           title="Sertifikatni ochish"
                         >
                           <ExternalLink className="w-4 h-4" />
@@ -1258,15 +1233,15 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                     <button
                       type="button"
                       onClick={() => setViewingProblemStudent(st)}
-                      className="px-2.5 py-1 rounded-full text-xs font-bold apple-badge-rose flex items-center gap-1.5 cursor-pointer hover:bg-rose-100 transition-colors"
+                      className="px-2.5 py-1 rounded-full text-xs font-bold bg-rose-50 text-rose-800 border border-rose-200 flex items-center gap-1.5 cursor-pointer hover:bg-rose-100 transition-colors"
                     >
                       <AlertCircle className="w-3.5 h-3.5 text-rose-600" />
-                      <span>Muammo aniqlandi (Ko'rish)</span>
+                      <span>Muammo (Ko'rish)</span>
                     </button>
                   ) : (
-                    <span className="px-2.5 py-1 rounded-full text-xs font-medium text-slate-500 bg-slate-100/90 border border-slate-200 flex items-center gap-1.5">
+                    <span className="px-2.5 py-1 rounded-full text-xs font-medium text-slate-500 bg-slate-100 border border-slate-200 flex items-center gap-1.5">
                       <Clock className="w-3.5 h-3.5 text-slate-400" />
-                      <span>Jarayonda</span>
+                      <span>Kutilmoqda</span>
                     </span>
                   )}
                 </div>
@@ -1276,7 +1251,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         )}
       </div>
 
-      {/* Teacher Incoming Notice Modal: pops up automatically if unread message exists! */}
+      {/* Teacher Incoming Notice Modal: pops up automatically if unread message exists */}
       {unreadMessage && (
         <TeacherIncomingNoticeModal
           message={unreadMessage}
@@ -1372,8 +1347,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                 <span className="text-sm font-bold text-slate-900">{viewingProblemStudent.fullName}</span>
               </div>
 
-              <div className="p-3.5 rounded-xl apple-badge-rose text-xs leading-relaxed">
-                <b>Mas'ul admin izohi:</b> {viewingProblemStudent.errorReason || "O'quvchi kiritgan ma'lumotlar Coursera tizimidagi profil bilan mos kelmadi."}
+              <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-950 text-xs leading-relaxed">
+                <b>Mas'ul admin izohi:</b> {viewingProblemStudent.errorReason || "O'quvchi kiritgan ma'lumotlarda nomuvofiqlik aniqlandi."}
               </div>
 
               {viewingProblemStudent.errorImage && (
@@ -1409,13 +1384,6 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         studentCount={telegramShareModalData.studentCount}
         pdfBlob={telegramShareModalData.pdfBlob}
       />
-
-      {/* Teacher Picker Modal (When switching class from dashboard) */}
-      {renderTeacherPickerModal()}
-
-      {/* External School Access Restriction Alert Modal */}
-      {renderExternalAccessAlertModal()}
-
 
     </div>
   );

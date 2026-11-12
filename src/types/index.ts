@@ -21,6 +21,29 @@ export interface Student {
   courseraRegisteredAt?: string;
   courseraQuizStatus?: 'pending' | 'solving' | 'completed' | 'error';
   courseraQuizCompletedAt?: string;
+  projectType?: 'ai' | 'developer'; // 'ai' = Bir million promter (5,000 so'm), 'developer' = Besh million sun'iy intellekt yetakchilari (7,000 so'm)
+  assignedLogin?: string; // Familya_ism formati
+  loginVariantIndex?: number; // 0=fam_ism, 1=ism_fam, 2=fam_ism1, 3=fam_ism2...
+
+  // AI track specific (Coursera / Bir million promter)
+  aiStatus?: 'pending' | 'certified' | 'error';
+  aiCertificateLink?: string;
+  aiCertifiedAt?: string;
+  aiCertificateDate?: string;
+  aiCertificateNumber?: string;
+  aiHasError?: boolean;
+  aiErrorReason?: string;
+  aiErrorImage?: string;
+
+  // Developer track specific (omp.aistudy.uz / Besh million sun'iy intellekt yetakchilari)
+  devStatus?: 'pending' | 'certified' | 'error';
+  devCertificateLink?: string;
+  devCertifiedAt?: string;
+  devCertificateDate?: string;
+  devCertificateNumber?: string;
+  devHasError?: boolean;
+  devErrorReason?: string;
+  devErrorImage?: string;
 }
 
 export interface ClassGroup {
@@ -29,7 +52,8 @@ export interface ClassGroup {
   teacherName: string;
   teacherPhone?: string;
   paidAmount: number; // in UZS
-  pricePerStudent: number; // 5000 UZS
+  pricePerStudent: number; // 5000 UZS (AI / Promter) or 7000 UZS (5M AI Yetakchilari)
+  projectType?: 'ai' | 'developer'; // 'ai' = Bir million promter (5,000 so'm), 'developer' = Besh million sun'iy intellekt yetakchilari (7,000 so'm)
   notes?: string;
   isExternalSchool?: boolean; // Boshqa maktab belgisi
   schoolName?: string; // Masalan: "27-maktab"

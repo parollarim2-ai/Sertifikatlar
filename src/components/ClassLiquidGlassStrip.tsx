@@ -11,7 +11,9 @@ import {
   ChevronUp, 
   CheckCircle2, 
   CreditCard,
-  Layers
+  Layers,
+  KeyRound,
+  Settings
 } from 'lucide-react';
 import { useUnifiedGlass } from '../context/UnifiedGlassContext';
 
@@ -24,6 +26,7 @@ interface ClassLiquidGlassStripProps {
   onOpenPaymentModal: (classGroup: ClassGroup) => void;
   onOpenTeacherMessageModal: (classGroup: ClassGroup) => void;
   onOpenClassBatch: (classGroup: ClassGroup) => void;
+  onGenerateClassLogins?: (classGroup: ClassGroup) => void;
   onEditClass: (classGroup: ClassGroup) => void;
   onDeleteClass: (classGroup: ClassGroup) => void;
 }
@@ -57,6 +60,7 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
   onOpenPaymentModal,
   onOpenTeacherMessageModal,
   onOpenClassBatch,
+  onGenerateClassLogins,
   onEditClass,
   onDeleteClass,
 }) => {
@@ -121,7 +125,8 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
       const total = cStudents.length;
       const certified = cStudents.filter(s => s.status === 'certified').length;
       const percent = total > 0 ? Math.round((certified / total) * 100) : 0;
-      const totalCost = certified * (c.pricePerStudent || 5000);
+      const price = c.pricePerStudent || (c.projectType === 'developer' ? 7000 : 5000);
+      const totalCost = certified * price;
       const debt = Math.max(0, totalCost - (c.paidAmount || 0));
       return {
         raw: c,
@@ -1211,6 +1216,14 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
                     <span className={`w-1.5 h-1.5 rounded-full ${selectedClass.debt > 0 ? 'bg-amber-600 animate-pulse' : 'bg-emerald-600'}`}></span>
                     <span>{selectedClass.debt > 0 ? `${fmt(selectedClass.debt)} so'm qarz` : "To'langan ✅"}</span>
                   </button>
+
+                  <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                    selectedClass.raw.projectType === 'developer'
+                      ? 'bg-purple-100 text-purple-800 border-purple-300'
+                      : 'bg-blue-100 text-blue-800 border-blue-300'
+                  }`}>
+                    {selectedClass.raw.projectType === 'developer' ? '💡 5M AI Yetakchi (7k)' : "🚀 1M Promter (5k)"}
+                  </span>
                 </div>
 
                 {/* Right: Sleek Action Buttons & Dismiss */}
@@ -1226,6 +1239,34 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
                   >
                     <Zap className="w-3 h-3 text-yellow-300" />
                     <span>Aileaders</span>
+                  </button>
+
+                  {onGenerateClassLogins && (
+                    <button
+                      type="button"
+                      onClick={e => {
+                        handleButtonRipple(e);
+                        onGenerateClassLogins(selectedClass.raw);
+                      }}
+                      className="px-2.5 py-1 bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-700 hover:to-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
+                      title="Sinfdagi barcha o'quvchilarga familya_ism formatida bexato login berish"
+                    >
+                      <KeyRound className="w-3 h-3 text-emerald-200" />
+                      <span>Login</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={e => {
+                      handleButtonRipple(e);
+                      onEditClass(selectedClass.raw);
+                    }}
+                    className="px-2.5 py-1 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-bold flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
+                    title="Sinf sozlamalari (Bir million promter / Besh million sun'iy intellekt yetakchilari yo'nalishini tanlash)"
+                  >
+                    <Settings className="w-3 h-3 text-cyan-300" />
+                    <span>Sozlamalar</span>
                   </button>
 
                   <button

@@ -14,10 +14,22 @@ import { MetrikaAiScannerModal } from './MetrikaAiScannerModal';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
 import { getStoredCertifyLogs, recordCertifyEvent } from '../utils/operatorSpeedTracker';
 import { 
+  generateStudentLogin, 
+  formatMetrikaForCopy, 
+  parseMetrikaComponents, 
+  syncStudentForTrack, 
+  getStudentTrackData,
+  isDeveloperCertificate,
+  isCourseraCertificate
+} from '../utils/studentLoginHelper';
+import { 
   Users, 
   Award, 
   Camera,
   AlertTriangle, 
+  FileText,
+  KeyRound,
+  Settings, 
   Plus, 
   Mail, 
   Mic,
@@ -57,7 +69,9 @@ import {
   Flame,
   Trophy,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  X,
+  AlertCircle
 } from 'lucide-react';
 
 export interface UnifiedItem {
@@ -72,6 +86,10 @@ export interface UnifiedItem {
   hasError?: boolean;
   isTeacher: boolean;
   badgeLabel: string;
+  projectType?: 'ai' | 'developer';
+  assignedLogin?: string;
+  loginVariantIndex?: number;
+  classId?: string;
   rawStudent?: Student;
   rawTeacher?: TeacherCertificate;
 }
@@ -149,6 +167,49 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   onSaveClassAndStudents,
   onUnlockExternalTeacher,
 }) => {
+  // Global Project Switcher: 'ai' (Bir million promter / Coursera — 5,000 UZS) vs 'developer' (Besh million sun'iy intellekt yetakchilari — 7,000 UZS)
+  const [activeProject, setActiveProject] = useState<'ai' | 'developer'>(() => {
+    try {
+      return (localStorage.getItem('maktab_active_project') as 'ai' | 'developer') || 'ai';
+    } catch {
+      return 'ai';
+    }
+  });
+
+  const handleSelectProject = (proj: 'ai' | 'developer') => {
+    setActiveProject(proj);
+    setSelectedClassId('all');
+    try {
+      localStorage.setItem('maktab_active_project', proj);
+    } catch {}
+    showQuickToast(
+      proj === 'developer'
+        ? "💡 'Besh Million Sun'iy Intellekt Yetakchilari' (7 000 so'm) bo'limiga o'tildi"
+        : "🚀 'Bir Million Promter (Coursera)' (5 000 so'm) bo'limiga o'tildi"
+    );
+  };
+
+  // Import existing AI class into Developer track modal state
+  const [isImportToDevModalOpen, setIsImportToDevModalOpen] = useState(false);
+  const [selectedClassToImport, setSelectedClassToImport] = useState<ClassGroup | null>(null);
+  const [importStep, setImportStep] = useState<'select' | 'confirm_login'>('select');
+
+  // Liquid glass animation modal notification (requested by user for import and login notifications)
+  const [liquidGlassNotification, setLiquidGlassNotification] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    subDetails?: string;
+  } | null>(null);
+
+  // Sequential clipboard copy status for Windows History (Win + V)
+  const [winVNotice, setWinVNotice] = useState<{
+    studentId: string;
+    step: number;
+    label: string;
+    text: string;
+  } | null>(null);
+
   const [activeTab, setActiveTab] = useState<'classes' | 'teachers' | 'finance' | 'emails' | 'sessions' | 'telegram'>('classes');
   const [selectedClassId, setSelectedClassId] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -276,6 +337,133 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
   };
 
+  // Sequential copy for Windows History (Win + V)
+  const handleSequentialCopyForWinV = async (birthDate?: string, passportOrId?: string, studentId?: string) => {
+    const m = parseMetrikaComponents(birthDate, passportOrId);
+    if (!m.formattedDate && !m.number && !m.series) {
+      showQuickToast("⚠️ Metrika yoki tug'ilgan sana kiritilmagan!");
+      return;
+    }
+
+    try {
+      // Step 1: Write Sana (earliest in history)
+      if (m.formattedDate) {
+        await navigator.clipboard.writeText(m.formattedDate);
+        setWinVNotice({
+          studentId: studentId || 'current',
+          step: 1,
+          label: "1/3: 📅 Tug'ilgan sana buferga yozildi",
+          text: m.formattedDate,
+        });
+        await new Promise(r => setTimeout(r, 260));
+      }
+
+      // Step 2: Write Raqam (middle in history)
+      if (m.number) {
+        await navigator.clipboard.writeText(m.number);
+        setWinVNotice({
+          studentId: studentId || 'current',
+          step: 2,
+          label: "2/3: 🔢 Metrika raqami buferga yozildi",
+          text: m.number,
+        });
+        await new Promise(r => setTimeout(r, 260));
+      }
+
+      // Step 3: Write Seriya (top of clipboard, immediately active for Ctrl+V)
+      if (m.series) {
+        await navigator.clipboard.writeText(m.series);
+        setWinVNotice({
+          studentId: studentId || 'current',
+          step: 3,
+          label: "3/3: 🔤 Metrika seriyasi (Ctrl+V) yozildi",
+          text: m.series,
+        });
+        await new Promise(r => setTimeout(r, 200));
+      }
+
+      playChime();
+      showQuickToast(`⚡ Win + V tayyor! 1-o'rinda: ${m.series || 'I-FR'} (Ctrl+V) ➔ 2: ${m.number} ➔ 3: ${m.formattedDate}`, 4500);
+
+      setTimeout(() => {
+        setWinVNotice(null);
+      }, 3500);
+    } catch {
+      navigator.clipboard.writeText(m.combined);
+      showQuickToast(`📋 Nusxalandi: "${m.combined}"`);
+    }
+  };
+
+  // Execute import of AI class into Developer track
+  const handleExecuteImportToDeveloper = async (withLogins: boolean) => {
+    if (!selectedClassToImport) return;
+    const targetClass = selectedClassToImport;
+    const classStudents = students.filter(s => s.classId === targetClass.id);
+
+    if (classStudents.length === 0) {
+      showQuickToast("Ushbu sinfda o'quvchilar mavjud emas!");
+      setIsImportToDevModalOpen(false);
+      return;
+    }
+
+    const newClassId = `class-dev-${Date.now()}`;
+    const newClass: ClassGroup = {
+      id: newClassId,
+      name: targetClass.name,
+      teacherName: targetClass.teacherName,
+      teacherPhone: targetClass.teacherPhone,
+      projectType: 'developer',
+      pricePerStudent: 7000,
+      paidAmount: 0,
+      isExternalSchool: targetClass.isExternalSchool,
+      schoolName: targetClass.schoolName,
+    };
+
+    const clonedStudents: Student[] = classStudents.map((st, idx) => {
+      const login = withLogins ? generateStudentLogin(st.fullName, 0) : undefined;
+      return {
+        id: `st-dev-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+        fullName: st.fullName.trim(),
+        birthDate: st.birthDate?.trim() || undefined,
+        passportOrId: st.passportOrId?.trim() || undefined,
+        classId: newClassId,
+        projectType: 'developer',
+        status: 'pending',
+        certificateLink: undefined,
+        certifiedAt: undefined,
+        hasError: false,
+        errorReason: undefined,
+        assignedLogin: login,
+        loginVariantIndex: withLogins ? 0 : undefined,
+        assignedPassword: withLogins ? 'MaktabPass2026!' : undefined,
+        createdAt: new Date().toISOString(),
+      };
+    });
+
+    if (onSaveClassAndStudents) {
+      onSaveClassAndStudents(newClass, clonedStudents, emailPool);
+    } else {
+      onSaveClass(newClass);
+      clonedStudents.forEach(cs => onAddSingleStudent(cs));
+    }
+
+    setSelectedClassId(newClassId);
+    setIsImportToDevModalOpen(false);
+    setSelectedClassToImport(null);
+    setImportStep('select');
+    playChime();
+
+    // Trigger user's requested liquid glass animation notification banner
+    setLiquidGlassNotification({
+      isOpen: true,
+      title: `✨ ${newClass.name} sinfi "Besh million sun'iy intellekt yetakchilari"ga import qilindi!`,
+      message: `Jami ${clonedStudents.length} ta o'quvchi ma'lumotlari nusxalandi.`,
+      subDetails: withLogins 
+        ? `Barcha o'quvchilarga tizim qoidasi bo'yicha 'familya_ism' logini va 'MaktabPass2026!' paroli biriktirildi.`
+        : `O'quvchilar loginlarsiz ko'chirildi. Istalgan payt barcha o'quvchilarga bitta tugma bilan login berishingiz mumkin.`
+    });
+  };
+
   // Direct, ultra-fast certificate paste with strict verification and resilient modal fallback
   const [isValidatingCert, setIsValidatingCert] = useState(false);
   const [fastPasteTarget, setFastPasteTarget] = useState<{
@@ -298,58 +486,90 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       return false;
     }
 
-    // 2. Strict Coursera domain check
-    const isCoursera = /coursera\.org/i.test(clipText) || /coursera_assets/i.test(clipText);
-    if (!isCoursera) {
-      showQuickToast("❌ Bu Coursera ta'lim platformasiga tegishli rasmiy sertifikat havolasi emas!", 4000);
-      return false;
+    const studentClass = classes.find(c => c.id === targetStudent.classId);
+    const isDeveloperTrack = targetStudent.projectType === 'developer' || studentClass?.projectType === 'developer' || activeProject === 'developer';
+
+    // 2. Strict track-based domain check
+    if (isDeveloperTrack) {
+      const isDev = isDeveloperCertificate(clipText);
+      if (!isDev) {
+        showQuickToast("❌ Bu 'Besh million sun'iy intellekt yetakchilari' sertifikati emas! Sertifikat https://omp.aistudy.uz/certificate?id=... yoki aistudy.uz shaklida bo'ladi.", 4500);
+        return false;
+      }
+    } else {
+      const isCoursera = isCourseraCertificate(clipText);
+      if (!isCoursera) {
+        showQuickToast("❌ Bu 'Bir million promter' (Coursera) rasmiy sertifikat havolasi emas! (https://coursera.org/verify/...)", 4000);
+        return false;
+      }
     }
 
     // 3. Duplicate check across all other students
     const existingDuplicate = students.find(s => 
       s.id !== targetStudent.id && 
-      s.certificateLink && 
-      s.certificateLink.trim().toLowerCase() === clipText.toLowerCase()
+      ((isDeveloperTrack && s.devCertificateLink && s.devCertificateLink.trim().toLowerCase() === clipText.toLowerCase()) ||
+       (!isDeveloperTrack && s.aiCertificateLink && s.aiCertificateLink.trim().toLowerCase() === clipText.toLowerCase()) ||
+       (s.certificateLink && s.certificateLink.trim().toLowerCase() === clipText.toLowerCase()))
     );
     if (existingDuplicate) {
       showQuickToast(`❌ Bu sertifikat havolasi allaqachon boshqa o'quvchiga (${existingDuplicate.fullName}) biriktirilgan!`, 4500);
       return false;
     }
 
-    // 4. Server-side deep validation of certificate recipient name
-    setIsValidatingCert(true);
-    showQuickToast(`🔍 ${targetStudent.fullName} uchun Coursera sertifikati tekshirilmoqda...`, 2000);
+    // 4. Server-side deep validation of certificate recipient name (only for Coursera)
+    if (!isDeveloperTrack) {
+      setIsValidatingCert(true);
+      showQuickToast(`🔍 ${targetStudent.fullName} uchun Coursera sertifikati tekshirilmoqda...`, 2000);
 
-    try {
-      const res = await fetch('/api/coursera/validate-certificate-recipient', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: clipText,
-          expectedFullName: targetStudent.fullName,
-        }),
-      });
-      const data = await res.json();
-      if (!data.valid) {
-        showQuickToast(data.reason || "❌ Sertifikat tekshiruvdan o'tmadi!", 4500);
+      try {
+        const res = await fetch('/api/coursera/validate-certificate-recipient', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: clipText,
+            expectedFullName: targetStudent.fullName,
+          }),
+        });
+        const data = await res.json();
+        if (!data.valid) {
+          showQuickToast(data.reason || "❌ Sertifikat tekshiruvdan o'tmadi!", 4500);
+          setIsValidatingCert(false);
+          return false;
+        }
+      } catch (e) {
+        console.warn("Validation endpoint network error, falling back:", e);
+      } finally {
         setIsValidatingCert(false);
-        return false;
       }
-    } catch (e) {
-      console.warn("Validation endpoint network error, falling back:", e);
-    } finally {
-      setIsValidatingCert(false);
     }
 
-    // 5. Save verified student
+    // 5. Save verified student with strict isolation
+    const nowIso = new Date().toISOString();
+    const todayDate = nowIso.split('T')[0];
     const updatedStudent: Student = {
       ...targetStudent,
+      projectType: isDeveloperTrack ? 'developer' : 'ai',
       certificateLink: clipText,
       status: 'certified',
       hasError: false,
       errorReason: '',
-      certifiedAt: new Date().toISOString(),
-      certificateDate: new Date().toISOString().split('T')[0],
+      certifiedAt: nowIso,
+      certificateDate: todayDate,
+      ...(isDeveloperTrack ? {
+        devCertificateLink: clipText,
+        devStatus: 'certified',
+        devCertifiedAt: nowIso,
+        devCertificateDate: todayDate,
+        devHasError: false,
+        devErrorReason: '',
+      } : {
+        aiCertificateLink: clipText,
+        aiStatus: 'certified',
+        aiCertifiedAt: nowIso,
+        aiCertificateDate: todayDate,
+        aiHasError: false,
+        aiErrorReason: '',
+      })
     };
 
     if (onSaveStudent) {
@@ -357,7 +577,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
     recordCertifyEvent(targetStudent.id, targetStudent.fullName, updatedStudent.certifiedAt);
     playChime();
-    showQuickToast(`✅ ${targetStudent.fullName}ga Coursera sertifikati biriktirildi va saqlandi!`, 3500);
+    showQuickToast(
+      isDeveloperTrack
+        ? `✅ ${targetStudent.fullName}ga Besh million sun'iy intellekt yetakchilari sertifikati biriktirildi va saqlandi!`
+        : `✅ ${targetStudent.fullName}ga Bir million promter (Coursera) sertifikati biriktirildi va saqlandi!`,
+      3500
+    );
     setFastPasteTarget(null);
     return true;
   };
@@ -430,19 +655,87 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     showQuickToast(`📋 Nusxalandi: "${text}"`);
   };
 
-  // Overall statistics (Students + Teachers)
-  const totalStudents = students.length;
-  const certifiedStudents = students.filter(s => s.status === 'certified');
-  const certifiedCount = certifiedStudents.length;
-  const totalPotentialRevenue = certifiedCount * 5000;
+  // Class lookup map for project type
+  const classMap = useMemo(() => new Map(classes.map(c => [c.id, c])), [classes]);
+
+  // Visible classes filtered strictly by activeProject ('ai' vs 'developer')
+  const visibleClasses = useMemo(() => {
+    return classes.filter(c => activeProject === 'developer' ? c.projectType === 'developer' : c.projectType !== 'developer');
+  }, [classes, activeProject]);
+
+  const visibleClassIds = useMemo(() => new Set(visibleClasses.map(c => c.id)), [visibleClasses]);
+
+  // Students belonging to current active project
+  const activeProjectStudents = useMemo(() => {
+    return students.filter(s => {
+      const cg = classMap.get(s.classId);
+      const isDev = cg?.projectType === 'developer' || s.projectType === 'developer';
+      return activeProject === 'developer' ? isDev : !isDev;
+    });
+  }, [students, classMap, activeProject]);
+
+  const totalActiveStudents = activeProjectStudents.length;
+
+  // Student categorization by project with domain verification
+  const aiCertifiedStudents = useMemo(() => {
+    return students.filter(s => {
+      const cg = classMap.get(s.classId);
+      const isDev = cg?.projectType === 'developer' || s.projectType === 'developer';
+      if (isDev) return false;
+      const td = getStudentTrackData(s, 'ai');
+      return td.status === 'certified';
+    });
+  }, [students, classMap]);
+
+  const devCertifiedStudents = useMemo(() => {
+    return students.filter(s => {
+      const cg = classMap.get(s.classId);
+      const isDev = cg?.projectType === 'developer' || s.projectType === 'developer';
+      if (!isDev) return false;
+      const td = getStudentTrackData(s, 'developer');
+      return td.status === 'certified';
+    });
+  }, [students, classMap]);
+
+  const aiCertifiedCount = aiCertifiedStudents.length;
+  const devCertifiedCount = devCertifiedStudents.length;
+
+  const currentProjectCertifiedCount = activeProject === 'developer' ? devCertifiedCount : aiCertifiedCount;
+  const currentProjectCertifiedPercent = totalActiveStudents > 0 ? Math.round((currentProjectCertifiedCount / totalActiveStudents) * 100) : 0;
+
+  // Potential revenue: AI = 5,000 UZS, Developer = 7,000 UZS
+  const aiPotentialRevenue = aiCertifiedCount * 5000;
+  const devPotentialRevenue = devCertifiedCount * 7000;
+  const totalPotentialRevenue = aiPotentialRevenue + devPotentialRevenue;
+
+  // Paid revenue breakdown by class projectType
+  const aiPaidRevenue = useMemo(() => {
+    return classes
+      .filter(c => (c.projectType || 'ai') === 'ai')
+      .reduce((sum, c) => sum + (c.paidAmount || 0), 0);
+  }, [classes]);
+
+  const devPaidRevenue = useMemo(() => {
+    return classes
+      .filter(c => c.projectType === 'developer')
+      .reduce((sum, c) => sum + (c.paidAmount || 0), 0);
+  }, [classes]);
+
+  const currentProjectPaidRevenue = activeProject === 'developer' ? devPaidRevenue : aiPaidRevenue;
+  const currentProjectPotentialRevenue = activeProject === 'developer' ? devPotentialRevenue : aiPotentialRevenue;
+  const currentProjectRemainingDebt = Math.max(0, currentProjectPotentialRevenue - currentProjectPaidRevenue);
+
   const totalPaidRevenue = classes.reduce((sum, c) => sum + (c.paidAmount || 0), 0);
   const totalRemainingDebt = Math.max(0, totalPotentialRevenue - totalPaidRevenue);
   const unusedEmails = emailPool.filter(e => !e.isUsed).length;
-  const errorCount = students.filter(s => s.hasError || s.status === 'error').length;
-  const certifiedPercent = totalStudents > 0 ? Math.round((certifiedCount / totalStudents) * 100) : 0;
-  const studentsWithoutEmail = students.filter(s => !s.assignedEmail || s.assignedEmail.trim() === '');
+  const errorCount = activeProjectStudents.filter(s => {
+    const td = getStudentTrackData(s, activeProject);
+    return td.hasError || td.status === 'error';
+  }).length;
+  const studentsWithoutEmail = activeProjectStudents.filter(s => !s.assignedEmail || s.assignedEmail.trim() === '');
+  const studentsWithoutLogin = activeProjectStudents.filter(s => !s.assignedLogin || s.assignedLogin.trim() === '');
 
-  // Teacher statistics
+  // Teacher statistics (for AI mode)
   const totalTeachers = teacherCertificates.length;
   const certifiedTeachers = teacherCertificates.filter(t => t.status === 'certified');
   const teachersRevenue = teacherCertificates.reduce((sum, t) => sum + (t.price || 5000), 0);
@@ -450,10 +743,50 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const teachersDebt = Math.max(0, teachersRevenue - teachersPaid);
 
   // Grand totals across all certificates (Students + Teachers)
-  const grandTotalCertified = certifiedCount + certifiedTeachers.length;
-  const grandTotalPotentialRevenue = totalPotentialRevenue + teachersRevenue;
-  const grandTotalPaidRevenue = totalPaidRevenue + teachersPaid;
-  const grandTotalRemainingDebt = totalRemainingDebt + teachersDebt;
+  const grandTotalCertified = (activeProject === 'developer' ? devCertifiedCount : aiCertifiedCount) + (activeProject === 'ai' ? certifiedTeachers.length : 0);
+  const grandTotalPotentialRevenue = currentProjectPotentialRevenue + (activeProject === 'ai' ? teachersRevenue : 0);
+  const grandTotalPaidRevenue = currentProjectPaidRevenue + (activeProject === 'ai' ? teachersPaid : 0);
+  const grandTotalRemainingDebt = currentProjectRemainingDebt + (activeProject === 'ai' ? teachersDebt : 0);
+
+  // Handle generating logins for all students in a class (Besh Million Dasturchi)
+  const handleGenerateClassLogins = (cg: ClassGroup) => {
+    const classStudents = students.filter(s => s.classId === cg.id);
+    if (classStudents.length === 0) {
+      showQuickToast("Ushbu sinfda o'quvchilar mavjud emas!");
+      return;
+    }
+
+    let updatedCount = 0;
+    classStudents.forEach(st => {
+      const login = generateStudentLogin(st.fullName, 0);
+      const updated: Student = {
+        ...st,
+        projectType: 'developer',
+        assignedLogin: login,
+        loginVariantIndex: 0,
+        assignedPassword: st.assignedPassword || 'MaktabPass2026!',
+      };
+      if (onSaveStudent) {
+        onSaveStudent(updated);
+      }
+      updatedCount++;
+    });
+
+    if (cg.projectType !== 'developer') {
+      onSaveClass({
+        ...cg,
+        projectType: 'developer',
+        pricePerStudent: 7000,
+      });
+    }
+
+    playChime();
+    setLiquidGlassNotification({
+      isOpen: true,
+      title: `✨ ${cg.name} sinfiga loginlar biriktirildi!`,
+      message: `Barcha ${updatedCount} ta o'quvchiga 'familya_ism' logini va 'MaktabPass2026!' paroli muvaffaqiyatli berildi.`,
+    });
+  };
 
   // Aniq mahalliy kun (kechasi 12:00 / 00:00:00 dan 23:59:59 gacha) bo'yicha sertifikat kiritilganini tekshirish
   const isCertifiedTodayLocal = useCallback((dateString?: string): boolean => {
@@ -480,23 +813,37 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     return dateString.includes(localIso) || dateString.includes(localDot);
   }, []);
 
-  // Bugun olingan sertifikatlar aniq miqdori (O'quvchilar + Ustozlar + Loglar)
+  // Bugun olingan sertifikatlar aniq miqdori (Strict Track Isolation)
   const todayCertificatesCount = useMemo(() => {
-    const studentCount = students.filter(s => {
-      if (s.status !== 'certified') return false;
-      return isCertifiedTodayLocal(s.certifiedAt);
-    }).length;
+    if (activeProject === 'developer') {
+      // ONLY developer certificates
+      return students.filter(s => {
+        const cg = classMap.get(s.classId);
+        const isDev = cg?.projectType === 'developer' || s.projectType === 'developer';
+        if (!isDev) return false;
+        const td = getStudentTrackData(s, 'developer');
+        if (td.status !== 'certified') return false;
+        return isCertifiedTodayLocal(td.certifiedAt);
+      }).length;
+    } else {
+      // AI Leaders & Coursera
+      const studentCount = students.filter(s => {
+        const cg = classMap.get(s.classId);
+        const isDev = cg?.projectType === 'developer' || s.projectType === 'developer';
+        if (isDev) return false;
+        const td = getStudentTrackData(s, 'ai');
+        if (td.status !== 'certified') return false;
+        return isCertifiedTodayLocal(td.certifiedAt);
+      }).length;
 
-    const teacherCount = teacherCertificates.filter(t => {
-      if (t.status !== 'certified') return false;
-      return isCertifiedTodayLocal(t.certifiedAt);
-    }).length;
+      const teacherCount = teacherCertificates.filter(t => {
+        if (t.status !== 'certified') return false;
+        return isCertifiedTodayLocal(t.certifiedAt);
+      }).length;
 
-    const logs = getStoredCertifyLogs(students);
-    const logsToday = logs.filter(l => isCertifiedTodayLocal(l.timestamp)).length;
-
-    return Math.max(studentCount + teacherCount, logsToday);
-  }, [students, teacherCertificates, isCertifiedTodayLocal]);
+      return studentCount + teacherCount;
+    }
+  }, [students, teacherCertificates, activeProject, classMap, isCertifiedTodayLocal]);
 
   // Unified list of people for the table (Students + Teachers when selected or searching)
   const unifiedList = useMemo(() => {
@@ -505,8 +852,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     // Add students if not explicitly filtering only teachers
     if (selectedClassId !== 'only_teachers') {
       students.forEach(st => {
-        if (selectedClassId !== 'all' && selectedClassId !== 'all_with_teachers' && st.classId !== selectedClassId) return;
         const stClass = classes.find(c => c.id === st.classId);
+        const isDev = stClass?.projectType === 'developer' || st.projectType === 'developer';
+
+        // Filter strictly by active project!
+        if (activeProject === 'developer' && !isDev) return;
+        if (activeProject === 'ai' && isDev) return;
+
+        if (selectedClassId !== 'all' && selectedClassId !== 'all_with_teachers' && st.classId !== selectedClassId) return;
+
+        const effectiveTrack: 'ai' | 'developer' = activeProject;
+        const td = getStudentTrackData(st, effectiveTrack);
         list.push({
           id: st.id,
           fullName: st.fullName,
@@ -514,18 +870,22 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           birthDate: st.birthDate,
           assignedEmail: st.assignedEmail,
           assignedPassword: st.assignedPassword,
-          status: st.status,
-          certificateLink: st.certificateLink,
-          hasError: st.hasError || st.status === 'error',
+          status: td.status,
+          certificateLink: td.certificateLink,
+          hasError: td.hasError,
           isTeacher: false,
           badgeLabel: stClass?.name || 'Sinf',
+          projectType: effectiveTrack,
+          assignedLogin: st.assignedLogin,
+          loginVariantIndex: st.loginVariantIndex,
+          classId: st.classId,
           rawStudent: st,
         });
       });
     }
 
-    // Add teachers if selectedClassId === 'all_with_teachers' or if user is searching or only_teachers
-    if (selectedClassId === 'all_with_teachers' || selectedClassId === 'only_teachers' || searchQuery.trim().length > 0) {
+    // Add teachers ONLY in AI mode if selectedClassId === 'all_with_teachers' or if user is searching or only_teachers
+    if (activeProject === 'ai' && (selectedClassId === 'all_with_teachers' || selectedClassId === 'only_teachers' || searchQuery.trim().length > 0)) {
       teacherCertificates.forEach(t => {
         list.push({
           id: t.id,
@@ -539,6 +899,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           hasError: t.hasError || t.status === 'error',
           isTeacher: true,
           badgeLabel: t.subject ? `Ustoz: ${t.subject}` : 'Ustoz',
+          projectType: 'ai',
           rawTeacher: t,
         });
       });
@@ -551,12 +912,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         item.fullName.toLowerCase().includes(q) ||
         (item.passportOrId && item.passportOrId.toLowerCase().includes(q)) ||
         (item.assignedEmail && item.assignedEmail.toLowerCase().includes(q)) ||
+        (item.assignedLogin && item.assignedLogin.toLowerCase().includes(q)) ||
         item.badgeLabel.toLowerCase().includes(q)
       );
     }
 
     return list;
-  }, [students, teacherCertificates, classes, selectedClassId, searchQuery]);
+  }, [students, teacherCertificates, classes, selectedClassId, searchQuery, activeProject]);
+
+  // Current selected class group and whether it is in developer mode
+  const selectedClassGroup = useMemo(() => classes.find(c => c.id === selectedClassId), [classes, selectedClassId]);
+  const isCurrentViewDeveloper = activeProject === 'developer';
 
   // Status toifasini aniqlash: 'certified' (Tayyor) | 'error' (Xatolik) | 'pending' (Kutilmoqda)
   const getItemStatusCategory = (item: UnifiedItem): StatusFilterType => {
@@ -784,7 +1150,24 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     e.preventDefault();
     if (!editingClass) return;
     onSaveClass(editingClass);
+
+    const targetTrack: 'ai' | 'developer' = editingClass.projectType === 'developer' ? 'developer' : 'ai';
+    const classStudents = students.filter(s => s.classId === editingClass.id);
+
+    // Synchronize all students in this class cleanly to the target track without data loss
+    classStudents.forEach(st => {
+      const synced = syncStudentForTrack(st, targetTrack);
+      if (onSaveStudent) {
+        onSaveStudent(synced);
+      }
+    });
+
     setEditingClass(null);
+    showQuickToast(
+      targetTrack === 'developer'
+        ? `✅ ${editingClass.name} sinfi "Besh million sun'iy intellekt yetakchilari (7 000 so'm)" yo'nalishiga o'tkazildi va loginlar biriktirildi!`
+        : `✅ ${editingClass.name} sinfi "Bir million promter (5 000 so'm)" yo'nalishiga o'tkazildi!`
+    );
   };
 
   return (
@@ -799,21 +1182,97 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         </div>
       )}
 
+      {/* 🌟 GLOBAL PROJECT SWITCHER (Liquid Glass Segmented Bar) */}
+      <div className="bg-white/90 backdrop-blur-md border border-slate-200/90 rounded-2xl p-2 sm:p-2.5 shadow-sm relative overflow-hidden">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2 pl-2">
+            <span className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+              <Layers className="w-4 h-4 text-blue-600" />
+              <span>Faol Loyiha / Yo'nalish:</span>
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 flex-1 sm:max-w-2xl">
+            {/* Button 1: Sun'iy Intellekt */}
+            <button
+              type="button"
+              onClick={() => handleSelectProject('ai')}
+              className={`relative px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-between gap-2 cursor-pointer ${
+                activeProject === 'ai'
+                  ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-500/25 ring-2 ring-blue-400/40'
+                  : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-base">🚀</span>
+                <div className="text-left leading-tight">
+                  <div className="font-extrabold">Bir Million Promter</div>
+                  <div className={`text-[10px] font-normal ${activeProject === 'ai' ? 'text-blue-100' : 'text-slate-500'}`}>
+                    AI Leaders & Coursera • 5 000 so'm
+                  </div>
+                </div>
+              </div>
+              <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                activeProject === 'ai' ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-700'
+              }`}>
+                {classes.filter(c => c.projectType !== 'developer').length} sinf • {aiCertifiedCount} ta
+              </span>
+            </button>
+
+            {/* Button 2: Besh Million Sun'iy Intellekt Yetakchilari */}
+            <button
+              type="button"
+              onClick={() => handleSelectProject('developer')}
+              className={`relative px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-between gap-2 cursor-pointer ${
+                activeProject === 'developer'
+                  ? 'bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 text-white shadow-md shadow-purple-500/25 ring-2 ring-purple-400/40'
+                  : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-base">💡</span>
+                <div className="text-left leading-tight">
+                  <div className="font-extrabold">Besh Million AI Yetakchilari</div>
+                  <div className={`text-[10px] font-normal ${activeProject === 'developer' ? 'text-purple-100' : 'text-slate-500'}`}>
+                    omp.aistudy.uz • 7 000 so'm
+                  </div>
+                </div>
+              </div>
+              <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                activeProject === 'developer' ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-700'
+              }`}>
+                {classes.filter(c => c.projectType === 'developer').length} sinf • {devCertifiedCount} ta
+              </span>
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Executive Header Banner */}
       <div className="bg-white border border-slate-200/90 rounded-2xl p-5 sm:p-6 shadow-xs relative overflow-hidden">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5">
           <div className="space-y-1.5">
             <div className="flex items-center gap-2">
-              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-blue-50 text-blue-800 border border-blue-200 tracking-wide uppercase">
-                ADMINISTRATOR KABINETI
+              <span className={`px-2.5 py-0.5 rounded text-[11px] font-bold tracking-wide uppercase border ${
+                activeProject === 'developer'
+                  ? 'bg-purple-50 text-purple-800 border-purple-200'
+                  : 'bg-blue-50 text-blue-800 border-blue-200'
+              }`}>
+                {activeProject === 'developer' ? '💡 5M SUN\'IY INTELLEKT YETAKCHILARI' : '🚀 BIR MILLION PROMTER'}
               </span>
-              <span className="text-xs text-slate-500 font-medium">Boshqaruv va Monitoring</span>
+              <span className="text-xs text-slate-500 font-medium">
+                {activeProject === 'developer' ? 'omp.aistudy.uz tizimi' : 'Boshqaruv va Monitoring'}
+              </span>
             </div>
             <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-              Maktab Sertifikat & O'quvchilar Bazasini Boshqarish
+              {activeProject === 'developer' 
+                ? "Besh Million Sun'iy Intellekt Yetakchilari — Sertifikat & O'quvchilar Boshqaruvi"
+                : "Bir Million Promter — Maktab Sertifikat & O'quvchilar Bazasini Boshqarish"}
             </h1>
             <p className="text-xs text-slate-500 max-w-2xl leading-relaxed">
-              O'quvchilar reestri, email zaxirasini taqsimlash, Coursera sertifikatlarini biriktirish va sinflar to'lov monitoringi.
+              {activeProject === 'developer'
+                ? "Metrika ma'lumotlari (Sana, Raqam, Seriya) Win+V nusxalash, 'familya_ism' loginlari va 5M AI Yetakchilari sertifikatlari (7 000 so'm)."
+                : "O'quvchilar reestri, email zaxirasini taqsimlash, Coursera sertifikatlari (5 000 so'm) va sinflar to'lov monitoringi."}
             </p>
           </div>
 
@@ -831,6 +1290,23 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 </span>
               </div>
             </div>
+
+            {/* Dasturchi bo'limida maxsus "Mavjud sinfni Dasturchiga import qilish" tugmasi */}
+            {activeProject === 'developer' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedClassToImport(null);
+                  setImportStep('select');
+                  setIsImportToDevModalOpen(true);
+                }}
+                className="px-3.5 py-2.5 bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-700 hover:to-indigo-800 text-white text-xs font-bold rounded-xl shadow-xs flex items-center gap-2 transition-all cursor-pointer ring-1 ring-purple-400/40"
+                title="Bir million promter bo'limidagi mavjud sinf o'quvchilarini pasport/metrika ma'lumotlari bilan ushbu bo'limga import qilish"
+              >
+                <Upload className="w-4 h-4 flex-shrink-0" />
+                <span>📥 Mavjud sinfni 5M AI Yetakchiga import qilish</span>
+              </button>
+            )}
 
             <button
               onClick={() => setIsMetrikaScannerOpen(true)}
@@ -860,13 +1336,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               <span>+ O'quvchi</span>
             </button>
 
-            <button
-              onClick={onOpenBulkEmailModal}
-              className="px-3.5 py-2.5 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold rounded-xl border border-slate-300 shadow-xs flex items-center gap-2 transition-colors cursor-pointer"
-            >
-              <Mail className="w-4 h-4 text-blue-700 flex-shrink-0" />
-              <span>Pochta zaxirasi</span>
-            </button>
+            {activeProject === 'ai' && (
+              <button
+                onClick={onOpenBulkEmailModal}
+                className="px-3.5 py-2.5 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold rounded-xl border border-slate-300 shadow-xs flex items-center gap-2 transition-colors cursor-pointer"
+              >
+                <Mail className="w-4 h-4 text-blue-700 flex-shrink-0" />
+                <span>Pochta zaxirasi</span>
+              </button>
+            )}
 
             <button
               onClick={() => setIsVoiceAssistantOpen(prev => !prev)}
@@ -893,18 +1371,20 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         </div>
       </div>
 
-      {/* 4 Key Executive Performance Metrics */}
+      {/* 4 Key Executive Performance Metrics (strictly isolated by activeProject) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
         {/* Total students */}
         <div className="bg-white border border-slate-200/90 rounded-2xl p-4.5 shadow-xs">
           <div className="flex items-center justify-between text-slate-500 mb-1.5">
             <span className="text-xs font-medium">Jami O'quvchilar</span>
-            <div className="w-7 h-7 rounded-lg bg-blue-50 text-blue-700 flex items-center justify-center">
+            <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${
+              activeProject === 'developer' ? 'bg-purple-50 text-purple-700' : 'bg-blue-50 text-blue-700'
+            }`}>
               <Users className="w-4 h-4" />
             </div>
           </div>
-          <div className="text-2xl font-bold text-slate-900">{totalStudents} <span className="text-xs text-slate-500 font-normal">nafar</span></div>
-          <div className="text-xs text-slate-500 mt-1">{classes.length} ta sinf bo'yicha</div>
+          <div className="text-2xl font-bold text-slate-900">{totalActiveStudents} <span className="text-xs text-slate-500 font-normal">nafar</span></div>
+          <div className="text-xs text-slate-500 mt-1">{visibleClasses.length} ta sinf bo'yicha</div>
         </div>
 
         {/* Total Certified */}
@@ -915,15 +1395,20 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               <Award className="w-4 h-4" />
             </div>
           </div>
-          <div className="text-2xl font-bold text-emerald-800">{certifiedCount} <span className="text-xs text-emerald-700 font-normal">nafar</span></div>
-          <div className="flex items-center gap-2 mt-1.5">
+          <div className="text-2xl font-bold text-emerald-800">{currentProjectCertifiedCount} <span className="text-xs text-emerald-700 font-normal">nafar</span></div>
+
+          <div className="text-xs text-slate-500 mt-1">
+            {activeProject === 'developer' ? 'omp.aistudy.uz orqali (7 000 so\'m)' : 'Coursera orqali (5 000 so\'m)'}
+          </div>
+
+          <div className="flex items-center gap-2 mt-2">
             <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
               <div 
                 className="h-full bg-emerald-600 rounded-full transition-all duration-500" 
-                style={{ width: `${certifiedPercent}%` }}
+                style={{ width: `${currentProjectCertifiedPercent}%` }}
               />
             </div>
-            <span className="text-[11px] font-semibold text-emerald-700">{certifiedPercent}%</span>
+            <span className="text-[11px] font-semibold text-emerald-700">{currentProjectCertifiedPercent}%</span>
           </div>
         </div>
 
@@ -936,31 +1421,55 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             </div>
           </div>
           <div className="text-2xl font-bold text-slate-900">
-            {totalPaidRevenue.toLocaleString('uz-UZ')} <span className="text-xs text-slate-500 font-normal">so'm</span>
+            {currentProjectPaidRevenue.toLocaleString('uz-UZ')} <span className="text-xs text-slate-500 font-normal">so'm</span>
           </div>
           <div className="text-xs text-amber-800 font-medium mt-1">
-            Qarz: {totalRemainingDebt.toLocaleString('uz-UZ')} so'm
+            Qarz: {currentProjectRemainingDebt.toLocaleString('uz-UZ')} so'm
+          </div>
+          <div className="text-[10px] text-slate-400 mt-1">
+            Kutilayotgan tushum: {currentProjectPotentialRevenue.toLocaleString('uz-UZ')} so'm
           </div>
         </div>
 
-        {/* Email Pool status */}
+        {/* Login or Email status */}
         <div className="bg-white border border-slate-200/90 rounded-2xl p-4.5 shadow-xs">
           <div className="flex items-center justify-between text-slate-500 mb-1.5">
-            <span className="text-xs font-medium">Zaxira Emaillar</span>
-            <div className="w-7 h-7 rounded-lg bg-blue-50 text-blue-700 flex items-center justify-center">
-              <Database className="w-4 h-4" />
+            <span className="text-xs font-medium">
+              {activeProject === 'developer' ? "Loginlar Holati" : "Zaxira Emaillar"}
+            </span>
+            <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${
+              activeProject === 'developer' ? 'bg-purple-50 text-purple-700' : 'bg-blue-50 text-blue-700'
+            }`}>
+              {activeProject === 'developer' ? <KeyRound className="w-4 h-4" /> : <Database className="w-4 h-4" />}
             </div>
           </div>
-          <div className="text-2xl font-bold text-blue-800">{unusedEmails} <span className="text-xs text-blue-700 font-normal">ta bo'sh</span></div>
-          <div className="text-xs text-slate-500 mt-1">
-            {studentsWithoutEmail.length > 0 ? (
-              <span className="text-amber-700 font-semibold">{studentsWithoutEmail.length} ta o'quvchida email yo'q</span>
-            ) : errorCount > 0 ? (
-              <span className="text-rose-700 font-semibold">{errorCount} ta muammoli o'quvchi</span>
-            ) : (
-              `Jami ${emailPool.length} ta pochta`
-            )}
-          </div>
+          {activeProject === 'developer' ? (
+            <>
+              <div className="text-2xl font-bold text-purple-800">
+                {totalActiveStudents - studentsWithoutLogin.length} <span className="text-xs text-purple-700 font-normal">logini bor</span>
+              </div>
+              <div className="text-xs text-slate-500 mt-1">
+                {studentsWithoutLogin.length > 0 ? (
+                  <span className="text-amber-700 font-semibold">{studentsWithoutLogin.length} ta o'quvchida login yo'q</span>
+                ) : (
+                  <span className="text-emerald-700 font-semibold">Barcha o'quvchilarda login bor</span>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="text-2xl font-bold text-blue-800">{unusedEmails} <span className="text-xs text-blue-700 font-normal">ta bo'sh</span></div>
+              <div className="text-xs text-slate-500 mt-1">
+                {studentsWithoutEmail.length > 0 ? (
+                  <span className="text-amber-700 font-semibold">{studentsWithoutEmail.length} ta o'quvchida email yo'q</span>
+                ) : errorCount > 0 ? (
+                  <span className="text-rose-700 font-semibold">{errorCount} ta muammoli o'quvchi</span>
+                ) : (
+                  `Jami ${emailPool.length} ta pochta`
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -968,7 +1477,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       <NavigationLiquidGlassTabs
         activeTab={activeTab}
         onSelectTab={setActiveTab}
-        teacherCertificatesCount={teacherCertificates?.length || 0}
+        teacherCertificatesCount={activeProject === 'ai' ? (teacherCertificates?.length || 0) : 0}
         sessionsCount={sessions?.length || 0}
         hasBlockedSession={sessions.some(s => s.isBlocked)}
         telegramUsersCount={telegramUsers?.length || 0}
@@ -977,28 +1486,59 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       {/* TAB 1: Classes & Students */}
       {activeTab === 'classes' && (
         <div className="space-y-5">
-          {/* Claude UI/UX Spec: Liquid Glass Class Selection Strip & Emergent Popover */}
-          <ClassLiquidGlassStrip
-            classes={classes}
-            students={students}
-            selectedClassId={selectedClassId}
-            onSelectClass={(cid) => setSelectedClassId(cid)}
-            onOpenBulkUploadModal={(cid) => onOpenBulkUploadModal(cid)}
-            onOpenPaymentModal={(cg) => onOpenPaymentModal(cg)}
-            onOpenTeacherMessageModal={(cg) => onOpenTeacherMessageModal(cg)}
-            onOpenClassBatch={(cg) => handleOpenClassBatch(cg)}
-            onEditClass={(cg) => setEditingClass(cg)}
-            onDeleteClass={(cg) => {
-              const cStudents = students.filter(s => s.classId === cg.id);
-              setDeleteConfirmation({
-                isOpen: true,
-                type: 'class',
-                id: cg.id,
-                name: `${cg.name} sinfi`,
-                subtitle: `${cg.teacherName} rahbarligidagi barcha ${cStudents.length} ta o'quvchi ham butunlay o'chiriladi.`
-              });
-            }}
-          />
+          {/* If Developer view has 0 classes: render clean welcoming liquid glass import prompt */}
+          {activeProject === 'developer' && visibleClasses.length === 0 ? (
+            <div className="bg-gradient-to-br from-purple-500/10 via-white to-indigo-500/10 border-2 border-dashed border-purple-300 rounded-3xl p-8 text-center space-y-4 shadow-xs backdrop-blur-md">
+              <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-purple-600 to-indigo-600 text-white flex items-center justify-center mx-auto shadow-lg shadow-purple-500/25">
+                <School className="w-8 h-8" />
+              </div>
+              <div className="max-w-md mx-auto space-y-1.5">
+                <h3 className="text-lg font-bold text-slate-900 tracking-tight">
+                  "Besh Million Sun'iy Intellekt Yetakchilari" bo'limida hali sinflar yo'q
+                </h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  "Bir million promter" (Coursera) bo'limidagi mavjud sinfni o'quvchilarining pasport va tug'ilgan sana ma'lumotlari bilan ushbu bo'limga to'g'ridan-to'g'ri import qilishingiz mumkin.
+                </p>
+              </div>
+              <div className="pt-2 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedClassToImport(null);
+                    setImportStep('select');
+                    setIsImportToDevModalOpen(true);
+                  }}
+                  className="px-5 py-3 rounded-2xl bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-700 hover:to-indigo-800 text-white text-xs font-bold shadow-lg shadow-purple-600/30 flex items-center gap-2.5 transition-all cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>📥 Mavjud sinfni 5M AI Yetakchiga import qilish</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <ClassLiquidGlassStrip
+              classes={visibleClasses}
+              students={activeProjectStudents}
+              selectedClassId={selectedClassId}
+              onSelectClass={(cid) => setSelectedClassId(cid)}
+              onOpenBulkUploadModal={(cid) => onOpenBulkUploadModal(cid)}
+              onOpenPaymentModal={(cg) => onOpenPaymentModal(cg)}
+              onOpenTeacherMessageModal={(cg) => onOpenTeacherMessageModal(cg)}
+              onOpenClassBatch={(cg) => handleOpenClassBatch(cg)}
+              onGenerateClassLogins={(cg) => handleGenerateClassLogins(cg)}
+              onEditClass={(cg) => setEditingClass(cg)}
+              onDeleteClass={(cg) => {
+                const cStudents = students.filter(s => s.classId === cg.id);
+                setDeleteConfirmation({
+                  isOpen: true,
+                  type: 'class',
+                  id: cg.id,
+                  name: `${cg.name} sinfi`,
+                  subtitle: `${cg.teacherName} rahbarligidagi barcha ${cStudents.length} ta o'quvchi ham butunlay o'chiriladi.`
+                });
+              }}
+            />
+          )}
 
           {/* Search & Filter Bar with Samsung Keyboard Glass Letter Popups */}
           <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
@@ -1017,10 +1557,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   onChange={e => setSelectedClassId(e.target.value)}
                   className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 text-xs font-semibold focus:outline-none focus:bg-white focus:border-blue-700 cursor-pointer"
                 >
-                  <option value="all">Barcha sinflar ({totalStudents})</option>
-                  <option value="all_with_teachers">🎓 Barcha sertifikatlar (O'quvchilar + Ustozlar: {totalStudents + totalTeachers})</option>
-                  <option value="only_teachers">👨‍🏫 Faqat Ustozlar ({totalTeachers})</option>
-                  {classes.map(c => (
+                  <option value="all">Barcha sinflar ({totalActiveStudents})</option>
+                  {activeProject === 'ai' && (
+                    <>
+                      <option value="all_with_teachers">🎓 Barcha sertifikatlar (O'quvchilar + Ustozlar: {totalActiveStudents + totalTeachers})</option>
+                      <option value="only_teachers">👨‍🏫 Faqat Ustozlar ({totalTeachers})</option>
+                    </>
+                  )}
+                  {visibleClasses.map(c => (
                     <option key={c.id} value={c.id}>
                       {c.isExternalSchool ? `[bm] ` : ''}{c.name} sinfi ({c.teacherName}){c.isExternalSchool && c.schoolName ? ` — ${c.schoolName}` : ''}
                     </option>
@@ -1235,7 +1779,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     <th className="py-3 pl-5 pr-2">№</th>
                     <th className="py-3 px-3">O'quvchi F.I.SH</th>
                     <th className="py-3 px-3">Sinf</th>
-                    <th className="py-3 px-3">Biriktirilgan Pochta</th>
+                    <th className="py-3 px-3">
+                      {isCurrentViewDeveloper ? "Metrika / Pasport (Sana • Raqam • Seriya)" : "Biriktirilgan Pochta"}
+                    </th>
                     <th className="py-3 px-3">Holat</th>
                     <th className="py-3 px-3">Sertifikat</th>
                     <th className="py-3 pr-5 pl-3 text-right">Amal</th>
@@ -1252,12 +1798,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     filteredStudents.map((st, idx) => {
                       const isCertified = st.status === 'certified';
                       const isError = st.hasError || st.status === 'error';
+                      const isDeveloperStudent = st.projectType === 'developer' || (!st.isTeacher && selectedClassGroup?.projectType === 'developer');
 
                       return (
                         <tr
                           key={st.id}
                           className={`hover:bg-slate-50/80 transition-colors select-none ${
-                            isError ? 'bg-rose-50/40' : st.isTeacher ? 'bg-purple-50/25' : ''
+                            isError ? 'bg-rose-50/40' : st.isTeacher ? 'bg-purple-50/25' : isDeveloperStudent ? 'hover:bg-purple-50/30' : ''
                           }`}
                           onDoubleClick={() => {
                             if (st.isTeacher) {
@@ -1276,7 +1823,28 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                               <span
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  handleCopyField(st.fullName, st.isTeacher ? "Ustoz F.I.SH" : "O'quvchi F.I.SH");
+                                  if (isDeveloperStudent) {
+                                    let login = st.assignedLogin;
+                                    if (!login) {
+                                      login = generateStudentLogin(st.fullName, 0);
+                                      if (st.rawStudent) {
+                                        const updated: Student = {
+                                          ...st.rawStudent,
+                                          projectType: 'developer',
+                                          assignedLogin: login,
+                                          loginVariantIndex: 0,
+                                          assignedPassword: st.rawStudent.assignedPassword || 'MaktabPass2026!'
+                                        };
+                                        if (onSaveStudent) {
+                                          onSaveStudent(updated);
+                                        }
+                                      }
+                                    }
+                                    navigator.clipboard.writeText(login);
+                                    showQuickToast(`📋 Login nusxalandi: "${login}"`);
+                                  } else {
+                                    handleCopyField(st.fullName, st.isTeacher ? "Ustoz F.I.SH" : "O'quvchi F.I.SH");
+                                  }
                                 }}
                                 onDoubleClick={(e) => {
                                   e.stopPropagation();
@@ -1287,7 +1855,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                   }
                                 }}
                                 className="cursor-pointer hover:text-blue-700 hover:underline active:opacity-70 transition-all rounded px-1 -mx-1"
-                                title="1 marta bosing - nusxalash"
+                                title={isDeveloperStudent ? "1 marta bosing - loginni nusxalash, 2 marta - tahrirlash" : "1 marta bosing - F.I.SH nusxalash"}
                               >
                                 {st.fullName}
                               </span>
@@ -1296,51 +1864,66 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                   USTOZ
                                 </span>
                               )}
+                              {isDeveloperStudent && !st.isTeacher && (
+                                <span className="px-1.5 py-0.2 text-[9px] font-bold rounded bg-purple-100 text-purple-800 border border-purple-200 uppercase tracking-wider font-sans">
+                                  DASTURCHI
+                                </span>
+                              )}
                               {isError && (
                                 <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-rose-100 text-rose-800 border border-rose-200 font-sans">
                                   XATO
                                 </span>
                               )}
                             </div>
-                            <div className="text-[11px] text-slate-500 font-mono mt-0.5 font-normal flex items-center gap-2">
-                              {st.passportOrId ? (
-                                <span
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handlePassportSingleClick(st);
-                                  }}
-                                  onDoubleClick={(e) => {
-                                    e.stopPropagation();
-                                    handlePassportDoubleClick(st);
-                                  }}
-                                  className="cursor-pointer hover:text-blue-700 hover:underline active:opacity-70 transition-all rounded px-1 -mx-1"
-                                  title="1 marta bosing - faqat 7 talik raqamni nusxalash, 2 marta tez bosing - tahrirlash (Ctrl+A / Ctrl+C da I-FR bilan nusxalash)"
-                                >
-                                  {st.passportOrId}
+
+                            {/* Under name: if Developer student, show login badge; if AI student, show small metrika */}
+                            {isDeveloperStudent ? (
+                              <div className="text-[11px] text-purple-700 font-mono mt-0.5 font-bold flex items-center gap-1.5">
+                                <span className="bg-purple-100 text-purple-900 px-1.5 py-0.5 rounded border border-purple-200">
+                                  login: {st.assignedLogin || generateStudentLogin(st.fullName, 0)}
                                 </span>
-                              ) : (
-                                <span className="text-slate-400">ID yo'q</span>
-                              )}
-                              <span>•</span>
-                              {st.birthDate ? (
-                                <span
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleCopyField(st.birthDate!, "Tug'ilgan sana");
-                                  }}
-                                  onDoubleClick={(e) => {
-                                    e.stopPropagation();
-                                    if (st.rawStudent) onOpenStudentModal(st.rawStudent);
-                                  }}
-                                  className="cursor-pointer hover:text-blue-700 hover:underline active:opacity-70 transition-all rounded px-1 -mx-1"
-                                  title="1 marta bosing - nusxalash, 2 marta - tahrirlash"
-                                >
-                                  {st.birthDate}
-                                </span>
-                              ) : (
-                                <span className="text-slate-400">Sana yo'q</span>
-                              )}
-                            </div>
+                              </div>
+                            ) : (
+                              <div className="text-[11px] text-slate-500 font-mono mt-0.5 font-normal flex items-center gap-2">
+                                {st.passportOrId ? (
+                                  <span
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handlePassportSingleClick(st);
+                                    }}
+                                    onDoubleClick={(e) => {
+                                      e.stopPropagation();
+                                      handlePassportDoubleClick(st);
+                                    }}
+                                    className="cursor-pointer hover:text-blue-700 hover:underline active:opacity-70 transition-all rounded px-1 -mx-1"
+                                    title="1 marta bosing - faqat 7 talik raqamni nusxalash, 2 marta tez bosing - tahrirlash (Ctrl+A / Ctrl+C da I-FR bilan nusxalash)"
+                                  >
+                                    {st.passportOrId}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400">ID yo'q</span>
+                                )}
+                                <span>•</span>
+                                {st.birthDate ? (
+                                  <span
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleCopyField(st.birthDate!, "Tug'ilgan sana");
+                                    }}
+                                    onDoubleClick={(e) => {
+                                      e.stopPropagation();
+                                      if (st.rawStudent) onOpenStudentModal(st.rawStudent);
+                                    }}
+                                    className="cursor-pointer hover:text-blue-700 hover:underline active:opacity-70 transition-all rounded px-1 -mx-1"
+                                    title="1 marta bosing - nusxalash, 2 marta - tahrirlash"
+                                  >
+                                    {st.birthDate}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400">Sana yo'q</span>
+                                )}
+                              </div>
+                            )}
                           </td>
 
                           <td className="py-3 px-3 text-slate-800 font-sans">
@@ -1355,31 +1938,133 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                             )}
                           </td>
 
-                          {/* Email with Single-Click Copy and Double-Click Edit */}
+                          {/* Email or Prominent Metrika in Developer Mode */}
                           <td className="py-3 px-3">
-                            {st.assignedEmail ? (
-                              <span
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleCopyField(st.assignedEmail!, "Email manzili");
-                                }}
-                                onDoubleClick={(e) => {
-                                  e.stopPropagation();
-                                  if (st.isTeacher) {
-                                    setActiveTab('teachers');
-                                  } else if (st.rawStudent) {
-                                    onOpenStudentModal(st.rawStudent);
-                                  }
-                                }}
-                                className="text-slate-800 font-mono text-[11px] cursor-pointer hover:text-blue-700 hover:underline active:opacity-70 transition-all rounded px-1 -mx-1 block"
-                                title="1 marta bosing - nusxalash"
-                              >
-                                {st.assignedEmail}
-                              </span>
+                            {isDeveloperStudent ? (
+                              st.passportOrId || st.birthDate ? (
+                                (() => {
+                                  const m = parseMetrikaComponents(st.birthDate, st.passportOrId);
+                                  return (
+                                    <div className="flex flex-wrap items-center gap-1.5 py-0.5 max-w-sm">
+                                      {/* 1. Tug'ilgan sana chipi (02.06.2011) */}
+                                      {m.formattedDate && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            navigator.clipboard.writeText(m.formattedDate);
+                                            showQuickToast(`📅 Tug'ilgan sana nusxalandi: "${m.formattedDate}"`);
+                                          }}
+                                          className="px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-950 border border-indigo-200 text-xs font-mono font-bold flex items-center gap-1 transition-all cursor-pointer shadow-2xs hover:scale-105 active:scale-95"
+                                          title="Tug'ilgan sanani nusxalash (02.06.2011)"
+                                        >
+                                          <span className="text-[10px] text-indigo-500 font-sans font-medium">Sana:</span>
+                                          <span>{m.formattedDate}</span>
+                                          <Copy className="w-2.5 h-2.5 text-indigo-500" />
+                                        </button>
+                                      )}
+
+                                      {/* 2. Metrika raqami chipi (0539632) */}
+                                      {m.number && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            navigator.clipboard.writeText(m.number);
+                                            showQuickToast(`🔢 Raqam nusxalandi: "${m.number}"`);
+                                          }}
+                                          className="px-2 py-1 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-950 border border-purple-200 text-xs font-mono font-bold flex items-center gap-1 transition-all cursor-pointer shadow-2xs hover:scale-105 active:scale-95"
+                                          title="Metrika raqamini nusxalash (masalan: 0539632)"
+                                        >
+                                          <span className="text-[10px] text-purple-500 font-sans font-medium">Raqam:</span>
+                                          <span>{m.number}</span>
+                                          <Copy className="w-2.5 h-2.5 text-purple-500" />
+                                        </button>
+                                      )}
+
+                                      {/* 3. Metrika seriyasi chipi (I-FR) */}
+                                      {m.series && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            navigator.clipboard.writeText(m.series);
+                                            showQuickToast(`🔤 Seriya nusxalandi: "${m.series}"`);
+                                          }}
+                                          className="px-2 py-1 rounded-lg bg-pink-50 hover:bg-pink-100 text-pink-950 border border-pink-200 text-xs font-mono font-bold flex items-center gap-1 transition-all cursor-pointer shadow-2xs hover:scale-105 active:scale-95"
+                                          title="Metrika seriyasini nusxalash (masalan: I-FR)"
+                                        >
+                                          <span className="text-[10px] text-pink-500 font-sans font-medium">Seriya:</span>
+                                          <span>{m.series}</span>
+                                          <Copy className="w-2.5 h-2.5 text-pink-500" />
+                                        </button>
+                                      )}
+
+                                      {/* 4. Ketma-ket Win+V uchun maxsus tugma */}
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleSequentialCopyForWinV(st.birthDate, st.passportOrId, st.id);
+                                        }}
+                                        className={`px-2 py-1 rounded-lg text-xs font-sans font-bold flex items-center gap-1 shadow-2xs transition-all cursor-pointer hover:scale-105 active:scale-95 ${
+                                          winVNotice && winVNotice.studentId === st.id
+                                            ? 'bg-amber-600 text-white animate-pulse'
+                                            : 'bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 hover:from-amber-600 hover:to-orange-600 text-white'
+                                        }`}
+                                        title="Windows Bufer Tarixi (Win+V) uchun ketma-ket yozish: 1. Sana ➔ 2. Raqam ➔ 3. Seriya (Ctrl+V)"
+                                      >
+                                        <Zap className="w-3 h-3 text-amber-200 fill-amber-200" />
+                                        <span>Win+V</span>
+                                      </button>
+
+                                      {/* 5. Hammasi birga chipi */}
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          navigator.clipboard.writeText(m.combined);
+                                          showQuickToast(`📋 Barchasi nusxalandi: "${m.combined}"`);
+                                        }}
+                                        className="px-1.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-semibold flex items-center gap-0.5 transition-all cursor-pointer"
+                                        title="Barchasini ketma-ket nusxalash (02.06.2011 0539632 I-FR)"
+                                      >
+                                        <Copy className="w-2.5 h-2.5 text-slate-500" />
+                                        <span>Barchasi</span>
+                                      </button>
+                                    </div>
+                                  );
+                                })()
+                              ) : (
+                                <span className="text-slate-400 font-sans text-[11px] italic">
+                                  Metrika kiritilmagan
+                                </span>
+                              )
                             ) : (
-                              <span className="text-slate-400 font-sans text-[11px] italic">
-                                Email biriktirilmagan
-                              </span>
+                              st.assignedEmail ? (
+                                <span
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleCopyField(st.assignedEmail!, "Email manzili");
+                                  }}
+                                  onDoubleClick={(e) => {
+                                    e.stopPropagation();
+                                    if (st.isTeacher) {
+                                      setActiveTab('teachers');
+                                    } else if (st.rawStudent) {
+                                      onOpenStudentModal(st.rawStudent);
+                                    }
+                                  }}
+                                  className="text-slate-800 font-mono text-[11px] cursor-pointer hover:text-blue-700 hover:underline active:opacity-70 transition-all rounded px-1 -mx-1 block"
+                                  title="1 marta bosing - nusxalash"
+                                >
+                                  {st.assignedEmail}
+                                </span>
+                              ) : (
+                                <span className="text-slate-400 font-sans text-[11px] italic">
+                                  Email biriktirilmagan
+                                </span>
+                              )
                             )}
                           </td>
 
@@ -2126,6 +2811,60 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           <div className="relative w-full max-w-md bg-white border border-slate-300 rounded-2xl shadow-2xl p-6 my-6">
             <h3 className="text-base font-bold text-slate-900 mb-4">Sinf Ma'lumotlarini Tahrirlash</h3>
             <form onSubmit={handleSaveClassEdit} className="space-y-4">
+              {/* Loyiha Yo'nalishi / Sertifikat Turi */}
+              <div>
+                <label className="text-xs font-semibold text-slate-700 block mb-1.5">
+                  Loyiha yo'nalishi (Sertifikat turi):
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingClass({
+                      ...editingClass,
+                      projectType: 'ai',
+                      pricePerStudent: 5000,
+                    })}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      editingClass.projectType !== 'developer'
+                        ? 'border-blue-600 bg-blue-50/70 shadow-xs ring-1 ring-blue-500'
+                        : 'border-slate-200 bg-white hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-bold text-slate-900">🚀 Bir million promter</span>
+                      {editingClass.projectType !== 'developer' && (
+                        <span className="w-2 h-2 rounded-full bg-blue-600"></span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-tight">AI Leaders & Coursera (email orqali)</p>
+                    <p className="text-[11px] font-bold text-blue-700 mt-1">5 000 so'm / o'quvchi</p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setEditingClass({
+                      ...editingClass,
+                      projectType: 'developer',
+                      pricePerStudent: 7000,
+                    })}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      editingClass.projectType === 'developer'
+                        ? 'border-indigo-600 bg-indigo-50/70 shadow-xs ring-1 ring-indigo-500'
+                        : 'border-slate-200 bg-white hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-bold text-indigo-950">💡 5M AI Yetakchilari</span>
+                      {editingClass.projectType === 'developer' && (
+                        <span className="w-2 h-2 rounded-full bg-indigo-600"></span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-tight">omp.aistudy.uz (login & Telegram bot)</p>
+                    <p className="text-[11px] font-bold text-indigo-700 mt-1">7 000 so'm / o'quvchi</p>
+                  </button>
+                </div>
+              </div>
+
               <div>
                 <label className="text-xs font-semibold text-slate-700 block mb-1">Sinf nomi (Masalan: 10-A):</label>
                 <input
@@ -2509,6 +3248,204 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 )}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+      {/* 📥 MODAL: Import Existing Class into Developer Track */}
+      {isImportToDevModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
+          <div className="relative w-full max-w-lg bg-white rounded-3xl shadow-2xl overflow-hidden border border-slate-200 animate-scale-up">
+            {/* Modal Header */}
+            <div className="px-6 py-4.5 bg-gradient-to-r from-purple-50 via-indigo-50 to-purple-50 border-b border-purple-100 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-purple-600 to-indigo-600 text-white flex items-center justify-center shadow-md shadow-purple-500/20">
+                  <Upload className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    Sinfni "5M Sun'iy Intellekt Yetakchilari"ga Import Qilish
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Besh Million Sun'iy Intellekt Yetakchilari (omp.aistudy.uz) yo'nalishi
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsImportToDevModalOpen(false);
+                  setSelectedClassToImport(null);
+                  setImportStep('select');
+                }}
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-xl hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 space-y-4 text-xs">
+              {/* Important Isolation Warning */}
+              <div className="p-3.5 rounded-2xl bg-amber-50/80 border border-amber-200 text-amber-950 space-y-1">
+                <div className="font-bold flex items-center gap-1.5">
+                  <AlertCircle className="w-4 h-4 text-amber-700" />
+                  <span>Qat'iy Ma'lumot Izolyatsiyasi:</span>
+                </div>
+                <p className="text-[11px] text-amber-900 leading-relaxed">
+                  "Bir million promter"da olingan Coursera sertifikatlari bu yerga <strong>ko'chirilmaydi</strong>. Faqat shaxsiy ma'lumotlar: <strong>F.I.SH, Pasport/Metrika seriyasi va Tug'ilgan sana</strong> o'tadi. Barcha o'quvchilar holati yangidan <strong>"Kutilmoqda"</strong> bo'ladi.
+                </p>
+              </div>
+
+              {importStep === 'select' ? (
+                <div className="space-y-3">
+                  <label className="block text-xs font-bold text-slate-800">
+                    Qaysi sinfni "Besh million sun'iy intellekt yetakchilari" yo'nalishiga nusxalamoqchisiz?
+                  </label>
+                  
+                  {classes.filter(c => c.projectType !== 'developer').length === 0 ? (
+                    <div className="p-6 text-center text-slate-400 bg-slate-50 rounded-2xl border border-slate-200">
+                      "Bir million promter" bo'limida hali sinflar yo'q.
+                    </div>
+                  ) : (
+                    <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                      {classes.filter(c => c.projectType !== 'developer').map(cls => {
+                        const count = students.filter(s => s.classId === cls.id).length;
+                        return (
+                          <div
+                            key={cls.id}
+                            onClick={() => {
+                              setSelectedClassToImport(cls);
+                              setImportStep('confirm_login');
+                            }}
+                            className="p-3.5 rounded-2xl border border-slate-200 bg-white hover:bg-purple-50/50 hover:border-purple-300 transition-all flex items-center justify-between cursor-pointer group shadow-2xs hover:shadow-xs"
+                          >
+                            <div className="space-y-0.5">
+                              <div className="font-bold text-slate-900 group-hover:text-purple-900 flex items-center gap-2">
+                                <span>{cls.isExternalSchool ? `[bm] ` : ''}{cls.name} sinfi</span>
+                                {cls.isExternalSchool && cls.schoolName && (
+                                  <span className="text-[10px] text-slate-500 font-normal">({cls.schoolName})</span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-slate-500">
+                                Rahbar: {cls.teacherName}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2.5">
+                              <span className="px-2.5 py-1 rounded-xl bg-purple-100 text-purple-900 font-mono font-bold text-[11px]">
+                                {count} o'quvchi
+                              </span>
+                              <span className="text-purple-600 font-bold group-hover:translate-x-1 transition-transform">
+                                ➔
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                selectedClassToImport && (
+                  <div className="space-y-4 animate-fade-in">
+                    <div className="p-4 rounded-2xl bg-purple-50 border border-purple-200 space-y-2 text-center">
+                      <div className="w-12 h-12 rounded-2xl bg-purple-600 text-white flex items-center justify-center mx-auto shadow-md shadow-purple-500/20 font-bold text-lg">
+                        💻
+                      </div>
+                      <h4 className="text-sm font-black text-purple-950">
+                        {selectedClassToImport.name} sinfida {students.filter(s => s.classId === selectedClassToImport.id).length} ta o'quvchi bor.
+                      </h4>
+                      <p className="text-xs text-purple-800 leading-relaxed font-medium">
+                        Ularning barchasiga bir vaqtning o'zida <strong>'familya_ism'</strong> logini va <strong>'MaktabPass2026!'</strong> paroli berilsinmi?
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => handleExecuteImportToDeveloper(true)}
+                        className="w-full px-4 py-3 rounded-2xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white text-xs font-bold shadow-md shadow-purple-500/20 flex items-center justify-center gap-2 transition-all cursor-pointer transform hover:scale-[1.02] active:scale-[0.98]"
+                      >
+                        <Check className="w-4 h-4" />
+                        <span>Ha, login berilsin</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleExecuteImportToDeveloper(false)}
+                        className="w-full px-4 py-3 rounded-2xl bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 text-xs font-bold transition-all cursor-pointer shadow-2xs hover:scale-[1.02] active:scale-[0.98]"
+                      >
+                        <span>Yo'q, keyinroq beraman</span>
+                      </button>
+                    </div>
+
+                    <div className="text-center pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setImportStep('select')}
+                        className="text-xs text-slate-500 hover:text-slate-800 font-semibold hover:underline cursor-pointer"
+                      >
+                        ⬅️ Boshqa sinf tanlash
+                      </button>
+                    </div>
+                  </div>
+                )
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ✨ LIQUID GLASS NOTIFICATION MODAL (Animated Shimmer Pill) */}
+      {liquidGlassNotification && liquidGlassNotification.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-md animate-fade-in">
+          <div className="relative w-full max-w-md bg-white/95 backdrop-blur-2xl border-2 border-purple-300/80 rounded-3xl shadow-[0_25px_60px_-15px_rgba(120,60,220,0.3)] p-6 space-y-4 animate-scale-up text-center overflow-hidden">
+            {/* Shimmer Highlight */}
+            <div className="absolute -inset-full bg-gradient-to-r from-transparent via-white/40 to-transparent rotate-45 pointer-events-none animate-pulse" />
+
+            <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-purple-600 via-indigo-600 to-pink-600 text-white flex items-center justify-center mx-auto shadow-xl shadow-purple-500/30 font-bold text-2xl">
+              ✨
+            </div>
+
+            <div className="space-y-1.5 relative z-10">
+              <h3 className="text-base font-black text-slate-900 tracking-tight">
+                {liquidGlassNotification.title}
+              </h3>
+              <p className="text-xs text-slate-600 leading-relaxed font-medium">
+                {liquidGlassNotification.message}
+              </p>
+              {liquidGlassNotification.subDetails && (
+                <div className="mt-2 p-2.5 bg-purple-50/80 rounded-xl border border-purple-200 text-[11px] text-purple-900 font-medium">
+                  {liquidGlassNotification.subDetails}
+                </div>
+              )}
+            </div>
+
+            <div className="pt-2 relative z-10">
+              <button
+                type="button"
+                onClick={() => setLiquidGlassNotification(null)}
+                className="w-full px-5 py-2.5 rounded-2xl bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-700 hover:to-indigo-800 text-white text-xs font-bold shadow-md shadow-purple-500/25 transition-all cursor-pointer"
+              >
+                Tushundim, davom etish
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Win+V Sequential Copy Progress Toast */}
+      {winVNotice && (
+        <div className="fixed bottom-6 right-6 z-50 px-4 py-3 bg-slate-900/95 backdrop-blur-xl border border-amber-400 text-white rounded-2xl shadow-2xl flex items-center gap-3 animate-scale-up max-w-sm">
+          <div className="w-8 h-8 rounded-xl bg-amber-500 text-slate-950 flex items-center justify-center font-black text-sm flex-shrink-0 animate-bounce">
+            ⚡
+          </div>
+          <div className="text-xs leading-tight">
+            <span className="text-[10px] text-amber-300 font-bold uppercase tracking-wider block">
+              {winVNotice.label}
+            </span>
+            <span className="font-mono font-bold text-white">
+              "{winVNotice.text}"
+            </span>
           </div>
         </div>
       )}

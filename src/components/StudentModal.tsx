@@ -3,6 +3,14 @@ import { Student, ClassGroup } from '../types';
 import { printCertificate } from '../utils/certificateGenerator';
 import { checkStudentConflicts, extractPassportDigits } from '../utils/studentValidator';
 import { recordCertifyEvent } from '../utils/operatorSpeedTracker';
+import { 
+  generateStudentLogin, 
+  formatMetrikaForCopy, 
+  parseMetrikaComponents, 
+  getStudentTrackData,
+  isDeveloperCertificate,
+  isCourseraCertificate
+} from '../utils/studentLoginHelper';
 import { AiLeadersAutomationModal } from './AiLeadersAutomationModal';
 import { 
   X, 
@@ -95,6 +103,7 @@ export const StudentModal: React.FC<StudentModalProps> = ({
   const [isSolvingQuizzes, setIsSolvingQuizzes] = useState(false);
   const [quizNotice, setQuizNotice] = useState('');
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+  const isDeveloperMode = classGroup?.projectType === 'developer' || formData.projectType === 'developer';
 
   const playChime = () => {
     try {
@@ -300,12 +309,29 @@ export const StudentModal: React.FC<StudentModalProps> = ({
 
   useEffect(() => {
     if (student) {
-      setFormData({ ...student });
-      setIsProblemMode(!!student.hasError);
+      const isDev = classGroup?.projectType === 'developer' || student.projectType === 'developer';
+      const trackData = getStudentTrackData(student, isDev ? 'developer' : 'ai');
+
+      let cleanErrorReason = trackData.errorReason || '';
+      if (cleanErrorReason.includes('<!doctype') || cleanErrorReason.includes('<html') || cleanErrorReason.includes('Starting Server')) {
+        cleanErrorReason = '';
+      }
+
+      setFormData({
+        ...student,
+        projectType: isDev ? 'developer' : 'ai',
+        status: trackData.status,
+        certificateLink: trackData.certificateLink,
+        certifiedAt: trackData.certifiedAt,
+        hasError: trackData.hasError,
+        errorReason: cleanErrorReason,
+        errorImage: trackData.errorImage,
+      });
+      setIsProblemMode(trackData.hasError || !!cleanErrorReason);
       setPasteNotice('');
       setAllowDuplicateName(false);
     }
-  }, [student]);
+  }, [student, classGroup]);
 
   if (!isOpen || !student) return null;
 
@@ -341,11 +367,21 @@ export const StudentModal: React.FC<StudentModalProps> = ({
             return;
           }
 
-          const isCoursera = /coursera\.org/i.test(trimmed) || /coursera_assets/i.test(trimmed);
-          if (!isCoursera) {
-            setPasteNotice("❌ Bu havola Courseraga tegishli emas!");
-            setTimeout(() => setPasteNotice(''), 3000);
-            return;
+          const isDev = classGroup?.projectType === 'developer' || formData.projectType === 'developer';
+          if (isDev) {
+            const isDevCert = isDeveloperCertificate(trimmed);
+            if (!isDevCert) {
+              setPasteNotice("❌ Bu Besh million sun'iy intellekt yetakchilari sertifikati emas! (https://omp.aistudy.uz/certificate?id=...)");
+              setTimeout(() => setPasteNotice(''), 3500);
+              return;
+            }
+          } else {
+            const isCoursera = isCourseraCertificate(trimmed);
+            if (!isCoursera) {
+              setPasteNotice("❌ Bu Bir million promter (Coursera) sertifikati emas! (https://coursera.org/verify/...)");
+              setTimeout(() => setPasteNotice(''), 3500);
+              return;
+            }
           }
 
           setFormData(prev => ({
@@ -356,10 +392,10 @@ export const StudentModal: React.FC<StudentModalProps> = ({
             errorReason: '',
             certifiedAt: prev.certifiedAt || new Date().toISOString(),
             certificateDate: prev.certificateDate || new Date().toISOString().split('T')[0],
-            certificateNumber: prev.certificateNumber || `B1MD-${(classGroup?.name || 'MKT').replace(/[^a-zA-Z0-9]/g, '')}-${student.id.slice(-4)}`,
+            certificateNumber: prev.certificateNumber || `CERT-${(classGroup?.name || 'MKT').replace(/[^a-zA-Z0-9]/g, '')}-${student.id.slice(-4)}`,
           }));
           playChime();
-          setPasteNotice("✅ Coursera sertifikat havolasi buferdan muvaffaqiyatli qo'yildi!");
+          setPasteNotice(isDev ? "✅ Besh million sun'iy intellekt yetakchilari sertifikat havolasi buferdan qo'yildi!" : "✅ Bir million promter sertifikat havolasi buferdan muvaffaqiyatli qo'yildi!");
           setTimeout(() => setPasteNotice(''), 3000);
           return;
         }
@@ -378,6 +414,40 @@ export const StudentModal: React.FC<StudentModalProps> = ({
     navigator.clipboard.writeText(text);
     setQuickCopiedField(label);
     setTimeout(() => setQuickCopiedField(''), 1500);
+  };
+
+  // Sequential copy for Windows History (Win + V) inside modal
+  const handleSequentialCopyForWinV = async (birthDate?: string, passportOrId?: string) => {
+    const m = parseMetrikaComponents(birthDate, passportOrId);
+    if (!m.formattedDate && !m.number && !m.series) {
+      setQuickCopiedField("Ma'lumot topilmadi");
+      return;
+    }
+
+    try {
+      if (m.formattedDate) {
+        await navigator.clipboard.writeText(m.formattedDate);
+        setQuickCopiedField(`1/3: Sana (${m.formattedDate})`);
+        await new Promise(r => setTimeout(r, 260));
+      }
+      if (m.number) {
+        await navigator.clipboard.writeText(m.number);
+        setQuickCopiedField(`2/3: Raqam (${m.number})`);
+        await new Promise(r => setTimeout(r, 260));
+      }
+      if (m.series) {
+        await navigator.clipboard.writeText(m.series);
+        setQuickCopiedField(`3/3: Seriya (${m.series})`);
+        await new Promise(r => setTimeout(r, 200));
+      }
+      playChime();
+      setQuickCopiedField(`⚡ Win+V tayyor! 1: ${m.series || 'I-FR'} (Ctrl+V) ➔ 2: ${m.number} ➔ 3: ${m.formattedDate}`);
+      setTimeout(() => setQuickCopiedField(''), 3500);
+    } catch {
+      navigator.clipboard.writeText(m.combined);
+      setQuickCopiedField("Barchasi nusxalandi");
+      setTimeout(() => setQuickCopiedField(''), 2000);
+    }
   };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -401,7 +471,11 @@ export const StudentModal: React.FC<StudentModalProps> = ({
       return;
     }
 
-    let updated = { ...formData };
+    const isDev = classGroup?.projectType === 'developer' || formData.projectType === 'developer';
+    let updated: Student = { 
+      ...formData, 
+      projectType: isDev ? 'developer' : 'ai' 
+    };
 
     if (isProblemMode) {
       updated.hasError = true;
@@ -418,6 +492,36 @@ export const StudentModal: React.FC<StudentModalProps> = ({
       } else {
         updated.status = 'pending';
       }
+    }
+
+    if (isDev) {
+      updated.devStatus = updated.status;
+      updated.devCertificateLink = updated.certificateLink;
+      updated.devCertifiedAt = updated.certifiedAt;
+      updated.devHasError = updated.hasError;
+      updated.devErrorReason = updated.errorReason;
+      updated.devErrorImage = updated.errorImage;
+      // Retain existing AI fields intact
+      updated.aiStatus = student.aiStatus || (student.projectType !== 'developer' ? student.status : undefined);
+      updated.aiCertificateLink = student.aiCertificateLink || (student.projectType !== 'developer' ? student.certificateLink : undefined);
+      updated.aiCertifiedAt = student.aiCertifiedAt || (student.projectType !== 'developer' ? student.certifiedAt : undefined);
+      updated.aiHasError = student.aiHasError ?? (student.projectType !== 'developer' ? student.hasError : undefined);
+      updated.aiErrorReason = student.aiErrorReason || (student.projectType !== 'developer' ? student.errorReason : undefined);
+      updated.aiErrorImage = student.aiErrorImage || (student.projectType !== 'developer' ? student.errorImage : undefined);
+    } else {
+      updated.aiStatus = updated.status;
+      updated.aiCertificateLink = updated.certificateLink;
+      updated.aiCertifiedAt = updated.certifiedAt;
+      updated.aiHasError = updated.hasError;
+      updated.aiErrorReason = updated.errorReason;
+      updated.aiErrorImage = updated.errorImage;
+      // Retain existing Developer fields intact
+      updated.devStatus = student.devStatus || (student.projectType === 'developer' ? student.status : undefined);
+      updated.devCertificateLink = student.devCertificateLink || (student.projectType === 'developer' ? student.certificateLink : undefined);
+      updated.devCertifiedAt = student.devCertifiedAt || (student.projectType === 'developer' ? student.certifiedAt : undefined);
+      updated.devHasError = student.devHasError ?? (student.projectType === 'developer' ? student.hasError : undefined);
+      updated.devErrorReason = student.devErrorReason || (student.projectType === 'developer' ? student.errorReason : undefined);
+      updated.devErrorImage = student.devErrorImage || (student.projectType === 'developer' ? student.errorImage : undefined);
     }
 
     onSave(updated);
@@ -656,20 +760,22 @@ export const StudentModal: React.FC<StudentModalProps> = ({
               )}
             </div>
 
-            {isAdmin && (
-              <button
-                type="button"
-                onClick={() => setIsProblemMode(!isProblemMode)}
-                className={`text-xs px-3 py-1.5 rounded-lg border font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
-                  isProblemMode
-                    ? 'bg-rose-700 text-white border-rose-800 shadow-xs'
-                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
-                }`}
-              >
-                <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />
-                {isProblemMode ? "Muammoni bekor qilish" : "Muammo / Xato deb belgilash"}
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => {
+                const next = !isProblemMode;
+                setIsProblemMode(next);
+                setFormData(prev => ({ ...prev, hasError: next }));
+              }}
+              className={`text-xs px-3 py-1.5 rounded-lg border font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                isProblemMode
+                  ? 'bg-rose-700 text-white border-rose-800 shadow-xs'
+                  : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+              }`}
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />
+              {isProblemMode ? "Muammoni bekor qilish" : "Muammo / Xato deb belgilash"}
+            </button>
           </div>
 
           {/* Student basic info grid */}
@@ -752,32 +858,183 @@ export const StudentModal: React.FC<StudentModalProps> = ({
               </p>
             </div>
 
-            {/* Email allocation */}
-            <div className="space-y-1">
-              <label className="text-xs font-semibold text-slate-700 flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <Mail className="w-3.5 h-3.5 text-emerald-700" />
-                  Biriktirilgan Gmail:
-                </span>
-                {formData.assignedEmail && (
-                  <button
-                    type="button"
-                    onClick={() => handleCopyText(formData.assignedEmail || '', "Email")}
-                    className="text-[11px] text-blue-600 hover:text-blue-800 flex items-center gap-0.5 cursor-pointer"
-                  >
-                    <Copy className="w-3 h-3" />
-                    <span>Nusxalash</span>
-                  </button>
-                )}
-              </label>
-              <input
-                type="email"
-                value={formData.assignedEmail || ''}
-                placeholder="pochta@gmail.com yoki zaxiradan biriktiriladi"
-                onChange={e => setFormData({ ...formData, assignedEmail: e.target.value })}
-                className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:bg-white focus:border-blue-700 focus:ring-2 focus:ring-blue-500/20"
-              />
-            </div>
+            {/* Quick Metrika Component Copy Toolbar */}
+            {(formData.birthDate || formData.passportOrId) && (() => {
+              const m = parseMetrikaComponents(formData.birthDate, formData.passportOrId);
+              return (
+                <div className="md:col-span-2 p-2.5 rounded-xl bg-purple-50/70 border border-purple-200 flex flex-wrap items-center justify-between gap-2 animate-fade-in">
+                  <span className="text-[11px] font-bold text-purple-900 flex items-center gap-1.5">
+                    <FileText className="w-3.5 h-3.5 text-purple-700 flex-shrink-0" />
+                    <span>Metrika bo'yicha alohida nusxalash:</span>
+                  </span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {m.formattedDate && (
+                      <button
+                        type="button"
+                        onClick={() => handleCopyText(m.formattedDate, "Tug'ilgan sana")}
+                        className="px-2 py-1 rounded-lg bg-white hover:bg-indigo-50 border border-indigo-300 text-indigo-950 text-xs font-mono font-bold flex items-center gap-1 cursor-pointer transition-all shadow-2xs hover:scale-105 active:scale-95"
+                        title="Faqat tug'ilgan sanani nusxalash (02.06.2011)"
+                      >
+                        <span className="text-[10px] text-indigo-500 font-sans font-medium">Sana:</span>
+                        <span>{m.formattedDate}</span>
+                        <Copy className="w-2.5 h-2.5 text-indigo-600" />
+                      </button>
+                    )}
+                    {m.number && (
+                      <button
+                        type="button"
+                        onClick={() => handleCopyText(m.number, "Metrika raqami")}
+                        className="px-2 py-1 rounded-lg bg-white hover:bg-purple-50 border border-purple-300 text-purple-950 text-xs font-mono font-bold flex items-center gap-1 cursor-pointer transition-all shadow-2xs hover:scale-105 active:scale-95"
+                        title="Faqat metrika raqamini nusxalash (masalan: 0539632)"
+                      >
+                        <span className="text-[10px] text-purple-500 font-sans font-medium">Raqam:</span>
+                        <span>{m.number}</span>
+                        <Copy className="w-2.5 h-2.5 text-purple-600" />
+                      </button>
+                    )}
+                    {m.series && (
+                      <button
+                        type="button"
+                        onClick={() => handleCopyText(m.series, "Metrika seriyasi")}
+                        className="px-2 py-1 rounded-lg bg-white hover:bg-pink-50 border border-pink-300 text-pink-950 text-xs font-mono font-bold flex items-center gap-1 cursor-pointer transition-all shadow-2xs hover:scale-105 active:scale-95"
+                        title="Faqat metrika seriyasini nusxalash (masalan: I-FR)"
+                      >
+                        <span className="text-[10px] text-pink-500 font-sans font-medium">Seriya:</span>
+                        <span>{m.series}</span>
+                        <Copy className="w-2.5 h-2.5 text-pink-600" />
+                      </button>
+                    )}
+                    {/* 4. Ketma-ket Win+V uchun maxsus tugma */}
+                    <button
+                      type="button"
+                      onClick={() => handleSequentialCopyForWinV(formData.birthDate, formData.passportOrId)}
+                      className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 hover:from-amber-600 hover:to-orange-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer transition-all shadow-2xs hover:scale-105 active:scale-95"
+                      title="Windows Bufer Tarixi (Win+V) uchun ketma-ket yozish: 1. Sana ➔ 2. Raqam ➔ 3. Seriya (Ctrl+V)"
+                    >
+                      <Zap className="w-3 h-3 text-amber-200 fill-amber-200" />
+                      <span>Win+V</span>
+                    </button>
+
+                    {m.combined && (
+                      <button
+                        type="button"
+                        onClick={() => handleCopyText(m.combined, "Barchasi ketma-ket")}
+                        className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-all"
+                        title="Barchasini ketma-ket nusxalash (02.06.2011 0539632 I-FR)"
+                      >
+                        <Copy className="w-2.5 h-2.5 text-slate-600" />
+                        <span>Barchasi</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Email or Developer Login allocation */}
+            {isDeveloperMode ? (
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-700 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 font-bold text-purple-900">
+                    <Key className="w-3.5 h-3.5 text-purple-700" />
+                    Biriktirilgan Login (omp.aistudy.uz / 5M AI Yetakchilari):
+                  </span>
+                  {formData.assignedLogin && (
+                    <button
+                      type="button"
+                      onClick={() => handleCopyText(formData.assignedLogin || '', "Login")}
+                      className="text-[11px] text-purple-600 hover:text-purple-800 flex items-center gap-0.5 cursor-pointer font-bold"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Nusxalash</span>
+                    </button>
+                  )}
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={formData.assignedLogin || ''}
+                    placeholder="familya_ism"
+                    onChange={e => {
+                      const cleanVal = e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '');
+                      const updated: Student = { ...formData, assignedLogin: cleanVal, projectType: 'developer' };
+                      setFormData(updated);
+                      onSave(updated);
+                    }}
+                    className="flex-1 px-3 py-2 text-sm bg-white border border-purple-300 rounded-lg text-purple-950 font-mono font-bold focus:outline-none focus:bg-white focus:border-purple-700 focus:ring-2 focus:ring-purple-500/20"
+                  />
+                  {!formData.assignedLogin ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const login = generateStudentLogin(formData.fullName, 0);
+                        const updated: Student = {
+                          ...formData,
+                          assignedLogin: login,
+                          loginVariantIndex: 0,
+                          projectType: 'developer',
+                          assignedPassword: formData.assignedPassword || 'MaktabPass2026!'
+                        };
+                        setFormData(updated);
+                        onSave(updated);
+                        handleCopyText(login, "Login");
+                      }}
+                      className="px-3 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap"
+                    >
+                      Login berish
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextIndex = ((formData.loginVariantIndex ?? 0) + 1);
+                        const newLogin = generateStudentLogin(formData.fullName, nextIndex);
+                        const updated: Student = {
+                          ...formData,
+                          assignedLogin: newLogin,
+                          loginVariantIndex: nextIndex,
+                          projectType: 'developer'
+                        };
+                        setFormData(updated);
+                        onSave(updated);
+                        handleCopyText(newLogin, "Yangi login");
+                      }}
+                      className="px-3 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-bold transition-all cursor-pointer shadow-xs whitespace-nowrap flex items-center gap-1"
+                      title="Qayta boshqa login generatsiya qilish (ism_familya, familya_ism1, familya_ism2...)"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>Boshqa</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-700 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <Mail className="w-3.5 h-3.5 text-emerald-700" />
+                    Biriktirilgan Gmail:
+                  </span>
+                  {formData.assignedEmail && (
+                    <button
+                      type="button"
+                      onClick={() => handleCopyText(formData.assignedEmail || '', "Email")}
+                      className="text-[11px] text-blue-600 hover:text-blue-800 flex items-center gap-0.5 cursor-pointer"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Nusxalash</span>
+                    </button>
+                  )}
+                </label>
+                <input
+                  type="email"
+                  value={formData.assignedEmail || ''}
+                  placeholder="pochta@gmail.com yoki zaxiradan biriktiriladi"
+                  onChange={e => setFormData({ ...formData, assignedEmail: e.target.value })}
+                  className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg text-slate-900 font-mono focus:outline-none focus:bg-white focus:border-blue-700 focus:ring-2 focus:ring-blue-500/20"
+                />
+              </div>
+            )}
           </div>
 
           {/* Assigned Password if available */}
@@ -785,7 +1042,7 @@ export const StudentModal: React.FC<StudentModalProps> = ({
             <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs">
               <div className="flex items-center gap-2 text-slate-600">
                 <Key className="w-4 h-4 text-blue-700" />
-                <span>Pochta / Coursera paroli:</span>
+                <span>{isDeveloperMode ? 'Tizim paroli (omp.aistudy.uz):' : 'Pochta / Coursera paroli:'}</span>
                 <span className="font-mono text-slate-900 font-bold bg-white px-2 py-0.5 rounded border border-slate-200">
                   {formData.assignedPassword}
                 </span>
@@ -805,7 +1062,7 @@ export const StudentModal: React.FC<StudentModalProps> = ({
           <div className="p-4 rounded-xl bg-blue-50/40 border border-blue-200 space-y-3">
             <div className="flex items-center justify-between">
               <div className="font-bold text-slate-900 text-xs sm:text-sm flex items-center gap-2">
-                <span>Coursera / Bir Million Dasturchi Sertifikat Havolasi</span>
+                <span>{isDeveloperMode ? 'Besh Million Sun\'iy Intellekt Yetakchilari Sertifikat Havolasi' : 'Bir Million Promter (Coursera) Sertifikat Havolasi'}</span>
               </div>
               {pasteNotice && (
                 <span className="text-xs text-emerald-700 font-semibold animate-pulse">
@@ -824,37 +1081,42 @@ export const StudentModal: React.FC<StudentModalProps> = ({
                 <span>Havolani avtomatik buferdan qo'yish (Paste)</span>
               </button>
 
-              <button
-                type="button"
-                onClick={handleRegisterCourseraDirect}
-                disabled={isRegisteringCoursera}
-                className="px-3.5 py-2 text-xs font-bold rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
-                title="O'quvchini to'g'ridan-to'g'ri Coursera dasturidan ro'yxatdan o'tkazish va Gmail orqali hisobini faollashtirish"
-              >
-                <GraduationCap className={`w-3.5 h-3.5 ${isRegisteringCoursera ? 'animate-spin' : ''}`} />
-                <span>{isRegisteringCoursera ? "Coursera'dan o'tkazilmoqda..." : "🎓 Coursera orqali ro'yxatdan o'tish"}</span>
-              </button>
+              {/* In Developer Mode: completely hide Coursera automated buttons */}
+              {!isDeveloperMode && (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleRegisterCourseraDirect}
+                    disabled={isRegisteringCoursera}
+                    className="px-3.5 py-2 text-xs font-bold rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                    title="O'quvchini to'g'ridan-to'g'ri Coursera dasturidan ro'yxatdan o'tkazish va Gmail orqali hisobini faollashtirish"
+                  >
+                    <GraduationCap className={`w-3.5 h-3.5 ${isRegisteringCoursera ? 'animate-spin' : ''}`} />
+                    <span>{isRegisteringCoursera ? "Coursera'dan o'tkazilmoqda..." : "🎓 Coursera orqali ro'yxatdan o'tish"}</span>
+                  </button>
 
-              <button
-                type="button"
-                onClick={handleSolveCourseraQuizzesDirect}
-                disabled={isSolvingQuizzes}
-                className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
-                title="Coursera 4 ta testini (Introduction to Generative AI) avtomatik yechish"
-              >
-                <FileCheck className={`w-3.5 h-3.5 ${isSolvingQuizzes ? 'animate-spin' : ''}`} />
-                <span>{isSolvingQuizzes ? "Testlar yechilmoqda (1-4)..." : "🎯 Coursera Testlarini Yechish (Beta)"}</span>
-              </button>
+                  <button
+                    type="button"
+                    onClick={handleSolveCourseraQuizzesDirect}
+                    disabled={isSolvingQuizzes}
+                    className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                    title="Coursera 4 ta testini (Introduction to Generative AI) avtomatik yechish"
+                  >
+                    <FileCheck className={`w-3.5 h-3.5 ${isSolvingQuizzes ? 'animate-spin' : ''}`} />
+                    <span>{isSolvingQuizzes ? "Testlar yechilmoqda (1-4)..." : "🎯 Coursera Testlarini Yechish (Beta)"}</span>
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => setIsAiLeadersOpen(true)}
-                className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-indigo-600 via-blue-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02]"
-                title="aileaders.uz va Coursera saytida ro'yxatdan o'tkazish avtomati"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-                <span>⚡️ Sertifikat olish (AI Leaders & Coursera Avtomat)</span>
-              </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsAiLeadersOpen(true)}
+                    className="px-3.5 py-2 text-xs font-bold rounded-lg bg-gradient-to-r from-indigo-600 via-blue-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white shadow-xs flex items-center gap-1.5 transition-all cursor-pointer transform hover:scale-[1.02]"
+                    title="aileaders.uz va Coursera saytida ro'yxatdan o'tkazish avtomati"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>⚡️ Sertifikat olish (AI Leaders & Coursera Avtomat)</span>
+                  </button>
+                </>
+              )}
             </div>
 
             {/* Coursera Status / Notice */}
@@ -965,63 +1227,112 @@ export const StudentModal: React.FC<StudentModalProps> = ({
             )}
           </div>
 
-          {/* Problem Details Form if problem mode is active */}
-          {isProblemMode && (
-            <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 space-y-3 animate-fade-in">
-              <div className="flex items-center gap-2 text-rose-800 font-bold text-xs sm:text-sm">
-                <AlertTriangle className="w-4 h-4" />
-                <span>O'quvchida yuzaga kelgan xatolik / muammo tafsilotlari</span>
-              </div>
-              <p className="text-xs text-rose-700">
-                Ushbu izoh sinf rahbariga uning portalida ko'rinadi, shunda ustoz hujjatni o'quvchi orqali tuzattirishi mumkin.
-              </p>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">
-                  Batafsil sabab:
-                </label>
-                <textarea
-                  disabled={!isAdmin}
-                  rows={3}
-                  value={formData.errorReason || ''}
-                  placeholder="Masalan: Metrikadagi ism va pasport mos kelmadi, yoki platformada akkount bloklandi..."
-                  onChange={e => setFormData({ ...formData, errorReason: e.target.value })}
-                  className="w-full px-3 py-2 text-xs sm:text-sm bg-white border border-rose-300 rounded-lg text-slate-900 focus:outline-none focus:border-rose-600 disabled:opacity-80"
-                  required={isProblemMode}
-                />
+          {/* Problem Details Form & Section */}
+          <div className={`p-4 rounded-2xl border transition-all ${
+            isProblemMode 
+              ? 'bg-rose-50/80 border-rose-300 shadow-xs' 
+              : 'bg-slate-50 border-slate-200 hover:border-slate-300'
+          }`}>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className={`w-4 h-4 flex-shrink-0 ${isProblemMode ? 'text-rose-600' : 'text-slate-500'}`} />
+                <div>
+                  <span className={`text-xs sm:text-sm font-bold block ${isProblemMode ? 'text-rose-950' : 'text-slate-800'}`}>
+                    {isProblemMode ? "O'quvchida xatolik / muammo mavjud" : "Muammo yoki xatolik kiritish (Izoh)"}
+                  </span>
+                  <span className="text-[11px] text-slate-500">
+                    {isProblemMode ? "Ushbu izoh sinf rahbariga uning portalida qizil ogohlantirish sifatida ko'rinadi" : "Agar o'quvchi hujjatida yoki platformada muammo bo'lsa, bu yerni bosing"}
+                  </span>
+                </div>
               </div>
 
-              {/* Problem screenshot upload */}
-              <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">
-                  Muammo skrinshoti / rasmi (ixtiyoriy):
-                </label>
-                {formData.errorImage ? (
-                  <div className="relative rounded-lg overflow-hidden border border-rose-300 max-h-48 group">
-                    <img src={formData.errorImage} alt="Muammo rasmi" className="w-full object-cover max-h-48" />
-                    {isAdmin && (
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !isProblemMode;
+                  setIsProblemMode(next);
+                  setFormData(prev => ({ ...prev, hasError: next }));
+                }}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer flex-shrink-0 ${
+                  isProblemMode
+                    ? 'bg-rose-700 text-white hover:bg-rose-800 shadow-xs'
+                    : 'bg-white text-rose-700 border border-rose-300 hover:bg-rose-50'
+                }`}
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>{isProblemMode ? "Xatolikni bekor qilish" : "Xatolik deb belgilash"}</span>
+              </button>
+            </div>
+
+            {isProblemMode && (
+              <div className="mt-3 pt-3 border-t border-rose-200/80 space-y-3 animate-fade-in">
+                {/* Quick problem templates */}
+                <div>
+                  <span className="text-[11px] font-bold text-rose-900 block mb-1">
+                    Tezkor sabab shablonlari (1 marta bosing):
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      "Metrikadagi ism va pasport mos kelmadi",
+                      "Platformada hisob bloklandi",
+                      "Tug'ilgan sana noto'g'ri kiritilgan",
+                      "Telegram tasdiqlash kodi olinmadi",
+                      "Sertifikat testi topshirilmadi / rad etildi"
+                    ].map(tmpl => (
+                      <button
+                        type="button"
+                        key={tmpl}
+                        onClick={() => setFormData(prev => ({ ...prev, errorReason: tmpl }))}
+                        className="px-2.5 py-1 rounded-lg bg-white border border-rose-200 hover:border-rose-400 text-rose-900 text-[11px] font-medium transition-all cursor-pointer shadow-2xs hover:bg-rose-50"
+                      >
+                        + {tmpl}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-800 block mb-1">
+                    Batafsil muammo sababi:
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={formData.errorReason || ''}
+                    placeholder="Masalan: Metrikadagi ism va pasport mos kelmadi, yoki platformada hisob bloklandi..."
+                    onChange={e => setFormData({ ...formData, errorReason: e.target.value })}
+                    className="w-full px-3 py-2 text-xs sm:text-sm bg-white border border-rose-300 rounded-xl text-slate-900 focus:outline-none focus:border-rose-600 focus:ring-1 focus:ring-rose-500"
+                    required={isProblemMode}
+                  />
+                </div>
+
+                {/* Problem screenshot upload */}
+                <div>
+                  <label className="text-xs font-bold text-slate-800 block mb-1">
+                    Muammo skrinshoti / rasmi (ixtiyoriy):
+                  </label>
+                  {formData.errorImage ? (
+                    <div className="relative rounded-xl overflow-hidden border border-rose-300 max-h-52 group bg-slate-900 flex items-center justify-center">
+                      <img src={formData.errorImage} alt="Muammo rasmi" className="w-full object-contain max-h-52" />
                       <button
                         type="button"
                         onClick={() => setFormData({ ...formData, errorImage: undefined })}
-                        className="absolute top-2 right-2 p-1.5 rounded-md bg-rose-800 text-white hover:bg-rose-900"
+                        className="absolute top-2 right-2 p-1.5 rounded-lg bg-rose-800/90 hover:bg-rose-900 text-white shadow-md transition-colors cursor-pointer"
                         title="Rasmni o'chirish"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
-                    )}
-                  </div>
-                ) : (
-                  isAdmin && (
-                    <label className="flex items-center justify-center gap-2 p-3.5 border-2 border-dashed border-rose-300 rounded-xl cursor-pointer hover:bg-rose-100/40 transition-colors">
+                    </div>
+                  ) : (
+                    <label className="flex items-center justify-center gap-2 p-3.5 border-2 border-dashed border-rose-300 rounded-xl cursor-pointer hover:bg-rose-100/40 transition-colors bg-white">
                       <Upload className="w-4 h-4 text-rose-600" />
-                      <span className="text-xs text-rose-800 font-medium">Skrinshotni yuklash (PNG, JPG)</span>
+                      <span className="text-xs text-rose-800 font-semibold">Skrinshotni yuklash (PNG, JPG)</span>
                       <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
                     </label>
-                  )
-                )}
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
           {/* Action Buttons */}
           <div className="flex items-center justify-between pt-4 border-t border-slate-200">

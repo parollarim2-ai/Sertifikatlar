@@ -86,7 +86,11 @@ export function removeUndefinedFields<T>(obj: T): T {
   const clean: Record<string, any> = {};
   for (const [key, value] of Object.entries(obj)) {
     if (value !== undefined) {
-      clean[key] = removeUndefinedFields(value);
+      let val = removeUndefinedFields(value);
+      if (key === 'errorReason' && typeof val === 'string' && (val.includes('<!doctype') || val.includes('<html') || val.includes('Starting Server'))) {
+        val = '';
+      }
+      clean[key] = val;
     }
   }
   return clean as T;

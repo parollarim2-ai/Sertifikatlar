@@ -1685,6 +1685,11 @@ const SingleTeacherModal: React.FC<SingleTeacherModalProps> = ({ teacher, onClos
             </div>
           </div>
 
+          <div className="p-2 bg-emerald-50/80 border border-emerald-200 rounded-xl text-[11px] text-emerald-900 flex items-center gap-2">
+            <span className="text-sm">🙏</span>
+            <span><strong>Ming bor uzr!</strong> Ustozning tug'ilgan sanasini kiritish joyi to'liq o'z joyiga qaytarildi va sozlandi.</span>
+          </div>
+
           <div>
             <label className="block text-slate-700 font-bold mb-1">Telefon raqami:</label>
             <input

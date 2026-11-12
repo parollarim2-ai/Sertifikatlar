@@ -177,8 +177,12 @@ export const AiLeadersAutomationModal: React.FC<AiLeadersAutomationModalProps> =
             status: 'error',
           });
         } else {
-          setErrorMessage(data.error || "Xatolik yuz berdi");
-          addLog(`❌ Xatolik: ${data.error}`);
+          let errText = data.error || "Xatolik yuz berdi";
+          if (errText.includes('timeout') || errText.includes('Navigation timeout')) {
+            errText = "⚠️ aileaders.uz serveri hozirda javob bermayapti (timeout). Saytda profilaktika ketmoqda yoki server band.";
+          }
+          setErrorMessage(errText);
+          addLog(`❌ Xatolik: ${errText}`);
         }
         setIsRunning(false);
         return;
