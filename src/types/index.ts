@@ -44,6 +44,8 @@ export interface Student {
   devHasError?: boolean;
   devErrorReason?: string;
   devErrorImage?: string;
+  devRegistered?: boolean;
+  devRegisteredAt?: string;
 }
 
 export interface ClassGroup {
@@ -52,6 +54,8 @@ export interface ClassGroup {
   teacherName: string;
   teacherPhone?: string;
   paidAmount: number; // in UZS
+  aiPaidAmount?: number; // in UZS for AI track
+  devPaidAmount?: number; // in UZS for 5M Developer track
   pricePerStudent: number; // 5000 UZS (AI / Promter) or 7000 UZS (5M AI Yetakchilari)
   projectType?: 'ai' | 'developer'; // 'ai' = Bir million promter (5,000 so'm), 'developer' = Besh million sun'iy intellekt yetakchilari (7,000 so'm)
   notes?: string;

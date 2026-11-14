@@ -96,6 +96,12 @@ export const StudentModal: React.FC<StudentModalProps> = ({
   const [pasteNotice, setPasteNotice] = useState('');
   const [isProblemMode, setIsProblemMode] = useState(!!student?.hasError);
   const [allowDuplicateName, setAllowDuplicateName] = useState(false);
+  const [dismissedConflicts, setDismissedConflicts] = useState<{
+    passport?: boolean;
+    certificate?: boolean;
+    email?: boolean;
+    name?: boolean;
+  }>({});
   const [quickCopiedField, setQuickCopiedField] = useState('');
   const [isAiLeadersOpen, setIsAiLeadersOpen] = useState(false);
   const [isRegisteringCoursera, setIsRegisteringCoursera] = useState(false);
@@ -330,12 +336,16 @@ export const StudentModal: React.FC<StudentModalProps> = ({
       setIsProblemMode(trackData.hasError || !!cleanErrorReason);
       setPasteNotice('');
       setAllowDuplicateName(false);
+      setDismissedConflicts({});
     }
   }, [student, classGroup]);
 
   if (!isOpen || !student) return null;
 
-  // Real-time conflict checks
+  const currentTrack: 'ai' | 'developer' =
+    classGroup?.projectType === 'developer' || formData.projectType === 'developer' ? 'developer' : 'ai';
+
+  // Real-time conflict checks strictly scoped to the same project track
   const conflicts = checkStudentConflicts(
     {
       id: formData.id,
@@ -345,14 +355,15 @@ export const StudentModal: React.FC<StudentModalProps> = ({
       assignedEmail: formData.assignedEmail,
     },
     allStudents,
-    classes
+    classes,
+    currentTrack
   );
 
   const hasStrictBlockingConflict = 
-    conflicts.hasPassportConflict || 
-    conflicts.hasCertificateConflict || 
-    conflicts.hasEmailConflict || 
-    (conflicts.hasNameConflict && !allowDuplicateName);
+    (conflicts.hasPassportConflict && !dismissedConflicts.passport) || 
+    (conflicts.hasCertificateConflict && !dismissedConflicts.certificate) || 
+    (conflicts.hasEmailConflict && !dismissedConflicts.email) || 
+    (conflicts.hasNameConflict && !allowDuplicateName && !dismissedConflicts.name);
 
   // Fast paste from clipboard with validation
   const handlePasteClipboardLink = async () => {
@@ -582,15 +593,26 @@ export const StudentModal: React.FC<StudentModalProps> = ({
         {/* Content Body */}
         <form onSubmit={handleSubmit} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
           
-          {/* CONFLICT ALERTS WITH COMPLETE STUDENT INFORMATION */}
-          {conflicts.hasPassportConflict && conflicts.conflictingStudentByPassport && (
+          {/* CONFLICT ALERTS WITH COMPLETE STUDENT INFORMATION (DISMISSIBLE) */}
+          {conflicts.hasPassportConflict && !dismissedConflicts.passport && conflicts.conflictingStudentByPassport && (
             <div className="p-4 bg-rose-50 border-2 border-rose-300 rounded-xl text-xs text-rose-950 space-y-2 animate-scale-up">
-              <div className="flex items-center gap-2 font-bold text-rose-800">
-                <AlertOctagon className="w-4 h-4 text-rose-600 flex-shrink-0" />
-                <span className="text-sm">Pasport / ID seriyasi takrorlandi!</span>
+              <div className="flex items-center justify-between gap-2 font-bold text-rose-800">
+                <div className="flex items-center gap-2">
+                  <AlertOctagon className="w-4 h-4 text-rose-600 flex-shrink-0" />
+                  <span className="text-sm">Pasport / ID seriyasi takrorlandi!</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDismissedConflicts(prev => ({ ...prev, passport: true }))}
+                  className="px-2.5 py-1 rounded-lg bg-white hover:bg-rose-100 text-rose-800 border border-rose-300 text-[11px] font-bold transition-colors cursor-pointer flex items-center gap-1"
+                  title="Ogohlantirishni yopish va saqlashga ruxsat berish"
+                >
+                  <X className="w-3 h-3" />
+                  <span>Yopish / Ruxsat berish</span>
+                </button>
               </div>
               <p className="leading-relaxed text-[11px] text-rose-900">
-                Ushbu pasport seriyasi (<strong>{formData.passportOrId}</strong>) avvaldan tizimdagi o'quvchiga tegishli. Pasport raqami takrorlanishi qat'iy taqiqlanadi:
+                Ushbu pasport seriyasi (<strong>{formData.passportOrId}</strong>) shu loyiha ichidagi boshqa o'quvchiga biriktirilgan:
               </p>
               <div className="bg-white/90 rounded-lg p-3 border border-rose-200 space-y-1.5 font-mono text-[11px] text-slate-800">
                 <div className="flex justify-between items-center border-b border-slate-100 pb-1 font-sans">
@@ -623,14 +645,24 @@ export const StudentModal: React.FC<StudentModalProps> = ({
             </div>
           )}
 
-          {conflicts.hasCertificateConflict && conflicts.conflictingStudentByCertificate && (
+          {conflicts.hasCertificateConflict && !dismissedConflicts.certificate && conflicts.conflictingStudentByCertificate && (
             <div className="p-4 bg-rose-50 border-2 border-rose-300 rounded-xl text-xs text-rose-950 space-y-2 animate-scale-up">
-              <div className="flex items-center gap-2 font-bold text-rose-800">
-                <AlertOctagon className="w-4 h-4 text-rose-600 flex-shrink-0" />
-                <span className="text-sm">Sertifikat havolasi takrorlandi!</span>
+              <div className="flex items-center justify-between gap-2 font-bold text-rose-800">
+                <div className="flex items-center gap-2">
+                  <AlertOctagon className="w-4 h-4 text-rose-600 flex-shrink-0" />
+                  <span className="text-sm">Sertifikat havolasi takrorlandi!</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDismissedConflicts(prev => ({ ...prev, certificate: true }))}
+                  className="px-2.5 py-1 rounded-lg bg-white hover:bg-rose-100 text-rose-800 border border-rose-300 text-[11px] font-bold transition-colors cursor-pointer flex items-center gap-1"
+                >
+                  <X className="w-3 h-3" />
+                  <span>Yopish</span>
+                </button>
               </div>
               <p className="leading-relaxed text-[11px] text-rose-900">
-                Ushbu sertifikat havolasi avvaldan boshqa o'quvchiga biriktirilgan. Bitta sertifikat faqat bir o'quvchiga tegishli bo'lishi shart va takrorlash qat'iy taqiqlanadi:
+                Ushbu sertifikat havolasi avvaldan boshqa o'quvchiga biriktirilgan:
               </p>
               <div className="bg-white/90 rounded-lg p-3 border border-rose-200 space-y-1.5 font-mono text-[11px] text-slate-800">
                 <div className="flex justify-between items-center border-b border-slate-100 pb-1 font-sans">
@@ -663,14 +695,24 @@ export const StudentModal: React.FC<StudentModalProps> = ({
             </div>
           )}
 
-          {conflicts.hasEmailConflict && conflicts.conflictingStudentByEmail && (
+          {conflicts.hasEmailConflict && !dismissedConflicts.email && conflicts.conflictingStudentByEmail && (
             <div className="p-4 bg-rose-50 border-2 border-rose-300 rounded-xl text-xs text-rose-950 space-y-2 animate-scale-up">
-              <div className="flex items-center gap-2 font-bold text-rose-800">
-                <AlertOctagon className="w-4 h-4 text-rose-600 flex-shrink-0" />
-                <span className="text-sm">Email manzili takrorlandi!</span>
+              <div className="flex items-center justify-between gap-2 font-bold text-rose-800">
+                <div className="flex items-center gap-2">
+                  <AlertOctagon className="w-4 h-4 text-rose-600 flex-shrink-0" />
+                  <span className="text-sm">Email manzili takrorlandi!</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDismissedConflicts(prev => ({ ...prev, email: true }))}
+                  className="px-2.5 py-1 rounded-lg bg-white hover:bg-rose-100 text-rose-800 border border-rose-300 text-[11px] font-bold transition-colors cursor-pointer flex items-center gap-1"
+                >
+                  <X className="w-3 h-3" />
+                  <span>Yopish</span>
+                </button>
               </div>
               <p className="leading-relaxed text-[11px] text-rose-900">
-                Ushbu email manzili (<strong>{formData.assignedEmail}</strong>) allaqachon boshqa o'quvchiga berilgan. Har bir o'quvchiga alohida email bo'lishi shart:
+                Ushbu email manzili (<strong>{formData.assignedEmail}</strong>) allaqachon boshqa o'quvchiga berilgan:
               </p>
               <div className="bg-white/90 rounded-lg p-3 border border-rose-200 space-y-1.5 font-mono text-[11px] text-slate-800">
                 <div className="flex justify-between items-center border-b border-slate-100 pb-1 font-sans">
@@ -691,14 +733,27 @@ export const StudentModal: React.FC<StudentModalProps> = ({
             </div>
           )}
 
-          {conflicts.hasNameConflict && conflicts.conflictingStudentByName && (
+          {conflicts.hasNameConflict && !dismissedConflicts.name && conflicts.conflictingStudentByName && (
             <div className="p-4 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-950 space-y-2.5 animate-scale-up">
-              <div className="flex items-center gap-2 font-bold text-amber-800">
-                <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
-                <span className="text-sm">Bu ismdagi o'quvchi tizimda mavjud!</span>
+              <div className="flex items-center justify-between gap-2 font-bold text-amber-800">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                  <span className="text-sm">Bu ismdagi o'quvchi shu loyihada mavjud!</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAllowDuplicateName(true);
+                    setDismissedConflicts(prev => ({ ...prev, name: true }));
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-white hover:bg-amber-100 text-amber-900 border border-amber-300 text-[11px] font-bold transition-colors cursor-pointer flex items-center gap-1"
+                >
+                  <X className="w-3 h-3" />
+                  <span>Yopish</span>
+                </button>
               </div>
               <p className="leading-relaxed text-[11px] text-amber-900">
-                Tizimda allaqachon ushbu ism-familiyali o'quvchi ro'yxatga olingan:
+                Ushbu loyihada allaqachon shunday ism-familiyali o'quvchi ro'yxatga olingan:
               </p>
               <div className="bg-white/90 rounded-lg p-3 border border-amber-200 space-y-1.5 font-mono text-[11px] text-slate-800">
                 <div className="flex justify-between items-center border-b border-slate-100 pb-1 font-sans">

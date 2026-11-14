@@ -10,13 +10,16 @@
         "teacherPhone": { "type": "string" },
         "pricePerStudent": { "type": "number" },
         "paidAmount": { "type": "number" },
+        "aiPaidAmount": { "type": "number" },
+        "devPaidAmount": { "type": "number" },
+        "projectType": { "type": "string" },
         "notes": { "type": "string" }
       },
       "required": ["name", "teacherName"]
     },
     "students": {
       "title": "Student",
-      "description": "Students registered for Bir Million Dasturchi Coursera certificates",
+      "description": "Students registered for Bir Million Promter and 5M AI Yetakchilari certificates",
       "type": "object",
       "properties": {
         "fullName": { "type": "string" },
@@ -25,7 +28,11 @@
         "classId": { "type": "string" },
         "assignedEmail": { "type": "string" },
         "assignedPassword": { "type": "string" },
+        "assignedLogin": { "type": "string" },
+        "projectType": { "type": "string" },
         "status": { "type": "string" },
+        "devRegistered": { "type": "boolean" },
+        "devRegisteredAt": { "type": "string" },
         "hasError": { "type": "boolean" },
         "errorReason": { "type": "string" },
         "errorImage": { "type": "string" },

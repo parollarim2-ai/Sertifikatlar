@@ -96,6 +96,10 @@ export default function App() {
 
   // Sessions and Messages
   const [sessions, setSessions] = useState<TeacherSession[]>([]);
+  const sessionsRef = React.useRef<TeacherSession[]>([]);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
   const [messages, setMessages] = useState<TeacherMessage[]>([]);
   const [telegramUsers, setTelegramUsers] = useState<TelegramUser[]>([]);
 
@@ -479,9 +483,11 @@ export default function App() {
     const targetClass = classes.find(c => c.id === classId);
     if (!targetClass) return;
 
-    const updatedClass = {
+    const isDev = targetClass.projectType === 'developer';
+    const updatedClass: ClassGroup = {
       ...targetClass,
       paidAmount: newPaidAmount,
+      ...(isDev ? { devPaidAmount: newPaidAmount } : { aiPaidAmount: newPaidAmount }),
     };
 
     setClasses(prev => prev.map(c => c.id === classId ? updatedClass : c));
@@ -533,12 +539,15 @@ export default function App() {
     // Also update class's paidAmount accordingly
     const targetClass = classes.find(c => c.id === student.classId);
     if (targetClass) {
-      const price = targetClass.pricePerStudent || 5000;
+      const isDev = targetClass.projectType === 'developer';
+      const price = isDev ? 7000 : (targetClass.pricePerStudent || 5000);
       const classStudents = students.map(s => s.id === studentId ? updatedStudent : s).filter(s => s.classId === targetClass.id);
       const paidCount = classStudents.filter(s => s.isPaid).length;
-      const updatedClass = {
+      const newAmount = paidCount * price;
+      const updatedClass: ClassGroup = {
         ...targetClass,
-        paidAmount: paidCount * price,
+        paidAmount: newAmount,
+        ...(isDev ? { devPaidAmount: newAmount } : { aiPaidAmount: newAmount }),
       };
       setClasses(prev => prev.map(c => c.id === targetClass.id ? updatedClass : c));
       await syncSaveClass(updatedClass);
@@ -582,7 +591,9 @@ export default function App() {
 
   // Sessions and Device Management Handlers
   const handleRegisterSession = async (session: Partial<TeacherSession> & { deviceId: string }) => {
-    let sessionToSave: TeacherSession = {
+    if (!session.deviceId) return;
+    const existing = sessionsRef.current.find(s => s.deviceId === session.deviceId);
+    const sessionToSave: TeacherSession = {
       id: session.id || session.deviceId,
       deviceId: session.deviceId,
       teacherName: session.teacherName || '',
@@ -593,28 +604,24 @@ export default function App() {
       os: session.os || '',
       screen: session.screen || '',
       lastActiveAt: session.lastActiveAt || new Date().toISOString(),
-      createdAt: session.createdAt || new Date().toISOString(),
-      isBlocked: session.isBlocked || false,
-      ...(session.blockedReason ? { blockedReason: session.blockedReason } : {}),
+      createdAt: existing ? existing.createdAt : (session.createdAt || new Date().toISOString()),
+      isBlocked: existing ? Boolean(existing.isBlocked) : Boolean(session.isBlocked),
+      ...(existing?.blockedReason
+        ? { blockedReason: existing.blockedReason }
+        : session.blockedReason
+        ? { blockedReason: session.blockedReason }
+        : {}),
     };
 
     setSessions(prev => {
-      const existing = prev.find(s => s.deviceId === session.deviceId);
-      const merged: TeacherSession = {
-        ...sessionToSave,
-        isBlocked: existing ? existing.isBlocked : (session.isBlocked || false),
-        ...(existing?.blockedReason
-          ? { blockedReason: existing.blockedReason }
-          : session.blockedReason
-          ? { blockedReason: session.blockedReason }
-          : {}),
-        createdAt: existing ? existing.createdAt : sessionToSave.createdAt,
-      };
-      sessionToSave = merged;
       const filtered = prev.filter(s => s.deviceId !== session.deviceId);
-      return [merged, ...filtered];
+      return [sessionToSave, ...filtered];
     });
-    await syncSaveSession(sessionToSave);
+    try {
+      await syncSaveSession(sessionToSave);
+    } catch (e) {
+      console.warn('Session sync error:', e);
+    }
   };
 
   const handleToggleBlockDevice = async (deviceId: string, isBlocked: boolean, reason?: string) => {

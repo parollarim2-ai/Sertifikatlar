@@ -13,6 +13,7 @@ import {
   Sparkles,
   ArrowRight
 } from 'lucide-react';
+import { getStudentTrackData } from '../utils/studentLoginHelper';
 
 interface PaymentModalProps {
   classGroup: ClassGroup | null;
@@ -37,11 +38,19 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [selectedPaidIds, setSelectedPaidIds] = useState<Set<string>>(new Set());
   const [studentSearch, setStudentSearch] = useState('');
   const [autoSyncAmount, setAutoSyncAmount] = useState(true);
+  const [statusFilter, setStatusFilter] = useState<'all' | 'paid' | 'unpaid' | 'certified'>('all');
+
+  const track: 'ai' | 'developer' = classGroup?.projectType === 'developer' ? 'developer' : 'ai';
+  const trackPaidAmount = classGroup
+    ? (track === 'developer'
+        ? (classGroup.devPaidAmount ?? (classGroup.id.startsWith('class-dev-') ? classGroup.paidAmount : 0))
+        : (classGroup.aiPaidAmount ?? classGroup.paidAmount))
+    : 0;
 
   // Initialize state when classGroup changes or modal opens
   useEffect(() => {
     if (classGroup) {
-      setPaidInput(classGroup.paidAmount);
+      setPaidInput(trackPaidAmount);
 
       const classStudents = students.filter(s => s.classId === classGroup.id);
       
@@ -53,15 +62,16 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         }
       });
 
-      // If no student has isPaid flag yet but paidAmount > 0:
-      // Auto-mark up to (paidAmount / pricePerStudent) students starting from certified ones
-      if (alreadyPaidIds.size === 0 && classGroup.paidAmount > 0) {
-        const price = classGroup.pricePerStudent || 5000;
-        const countToMark = Math.min(classStudents.length, Math.floor(classGroup.paidAmount / price));
-        // Sort certified first, then pending
+      // If no student has isPaid flag yet but trackPaidAmount > 0:
+      // Auto-mark up to (trackPaidAmount / pricePerStudent) students starting from certified ones
+      if (alreadyPaidIds.size === 0 && trackPaidAmount > 0) {
+        const price = track === 'developer' ? 7000 : (classGroup.pricePerStudent || 5000);
+        const countToMark = Math.min(classStudents.length, Math.floor(trackPaidAmount / price));
         const sorted = [...classStudents].sort((a, b) => {
-          if (a.status === 'certified' && b.status !== 'certified') return -1;
-          if (a.status !== 'certified' && b.status === 'certified') return 1;
+          const aCert = getStudentTrackData(a, track).status === 'certified';
+          const bCert = getStudentTrackData(b, track).status === 'certified';
+          if (aCert && !bCert) return -1;
+          if (!aCert && bCert) return 1;
           return a.fullName.localeCompare(b.fullName);
         });
         for (let i = 0; i < countToMark; i++) {
@@ -71,7 +81,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
       setSelectedPaidIds(alreadyPaidIds);
     }
-  }, [classGroup, students, isOpen]);
+  }, [classGroup, students, isOpen, track, trackPaidAmount]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -86,17 +96,15 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   if (!isOpen || !classGroup) return null;
 
   const classStudents = students.filter(s => s.classId === classGroup.id);
-  const certifiedCount = classStudents.filter(s => s.status === 'certified').length;
-  const pricePerStudent = classGroup.pricePerStudent || 5000;
+  const certifiedCount = classStudents.filter(s => getStudentTrackData(s, track).status === 'certified').length;
+  const pricePerStudent = track === 'developer' ? 7000 : (classGroup.pricePerStudent || 5000);
   
-  // Total cost can be based on all students or certified students
-  const totalCost = classStudents.length * pricePerStudent;
+  // Debt/due is strictly calculated from uploaded certificates ONLY (no premature charges before certificate upload)
   const certifiedCost = certifiedCount * pricePerStudent;
+  const potentialTotalCost = classStudents.length * pricePerStudent;
 
-  const remaining = Math.max(0, totalCost - paidInput);
-  const isFullyPaid = totalCost > 0 && paidInput >= totalCost;
-
-  const [statusFilter, setStatusFilter] = useState<'all' | 'paid' | 'unpaid' | 'certified'>('all');
+  const remaining = Math.max(0, certifiedCost - paidInput);
+  const isFullyPaid = certifiedCost > 0 && paidInput >= certifiedCost;
 
   // Toggle single student paid state
   const handleToggleStudent = (studentId: string) => {
@@ -119,8 +127,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const handleAutoSelectByAmount = () => {
     const countToMark = Math.min(classStudents.length, Math.floor(paidInput / pricePerStudent));
     const sorted = [...classStudents].sort((a, b) => {
-      if (a.status === 'certified' && b.status !== 'certified') return -1;
-      if (a.status !== 'certified' && b.status === 'certified') return 1;
+      const aCert = getStudentTrackData(a, track).status === 'certified';
+      const bCert = getStudentTrackData(b, track).status === 'certified';
+      if (aCert && !bCert) return -1;
+      if (!aCert && bCert) return 1;
       return a.fullName.localeCompare(b.fullName);
     });
     const newSet = new Set<string>();
@@ -141,7 +151,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
   // Select certified only
   const handleSelectCertifiedOnly = () => {
-    const certIds = new Set(classStudents.filter(s => s.status === 'certified').map(s => s.id));
+    const certIds = new Set(classStudents.filter(s => getStudentTrackData(s, track).status === 'certified').map(s => s.id));
     setSelectedPaidIds(certIds);
     if (autoSyncAmount) {
       setPaidInput(certIds.size * pricePerStudent);
@@ -163,7 +173,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
     if (statusFilter === 'paid') return selectedPaidIds.has(s.id);
     if (statusFilter === 'unpaid') return !selectedPaidIds.has(s.id);
-    if (statusFilter === 'certified') return s.status === 'certified';
+    if (statusFilter === 'certified') return getStudentTrackData(s, track).status === 'certified';
     return true;
   });
 
@@ -224,23 +234,31 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             </div>
 
             <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-              <span className="text-[11px] text-slate-500 block mb-0.5">Jami kutilgan:</span>
+              <span className="text-[11px] text-slate-500 block mb-0.5">Sertifikatlar bo'yicha:</span>
               <span className="text-lg font-bold text-slate-900">
-                {totalCost.toLocaleString('uz-UZ')} so'm
+                {certifiedCost.toLocaleString('uz-UZ')} so'm
               </span>
-              <span className="text-[10px] text-slate-400 block">Sinf bo'yicha jami</span>
+              <span className="text-[10px] text-slate-400 block">
+                {certifiedCount > 0 ? "Faqat yuklangan sertifikatlar" : "Hali sertifikat yuklanmagan"}
+              </span>
             </div>
 
             <div className={`p-3 rounded-xl border ${
-              isFullyPaid 
+              certifiedCost === 0
+                ? 'bg-slate-50 border-slate-200 text-slate-700'
+                : isFullyPaid 
                 ? 'bg-emerald-50 border-emerald-300 text-emerald-900' 
                 : 'bg-amber-50 border-amber-300 text-amber-900'
             }`}>
               <span className="text-[11px] font-semibold block mb-0.5 opacity-80">
-                {isFullyPaid ? "Holat:" : "Qoldiq (Qarz):"}
+                {certifiedCost === 0 ? "To'lov holati:" : isFullyPaid ? "Holat:" : "Qoldiq (Qarz):"}
               </span>
               <span className="text-lg font-bold block truncate">
-                {isFullyPaid ? "To'liq to'landi ✅" : `${remaining.toLocaleString('uz-UZ')} so'm`}
+                {certifiedCost === 0
+                  ? "0 so'm"
+                  : isFullyPaid
+                  ? "To'liq to'landi ✅"
+                  : `${remaining.toLocaleString('uz-UZ')} so'm`}
               </span>
               <span className="text-[10px] opacity-75 block">
                 Amalda: {paidInput.toLocaleString('uz-UZ')} so'm
@@ -268,7 +286,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             <div className="relative">
               <input
                 type="number"
-                step="5000"
+                step="1000"
                 min="0"
                 value={paidInput}
                 onChange={e => {
@@ -289,22 +307,22 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setPaidInput(totalCost);
-                    handleSelectAll();
+                    setPaidInput(certifiedCost);
+                    handleSelectCertifiedOnly();
                   }}
                   className="px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-300 hover:bg-emerald-100 transition-colors cursor-pointer"
                 >
-                  Hammasi to'landi ({totalCost.toLocaleString()} so'm)
+                  Sertifikat olganlar to'landi ({certifiedCost.toLocaleString()} so'm)
                 </button>
                 <button
                   type="button"
                   onClick={() => {
-                    setPaidInput(certifiedCost);
-                    handleSelectCertifiedOnly();
+                    setPaidInput(potentialTotalCost);
+                    handleSelectAll();
                   }}
                   className="px-2.5 py-1 text-xs font-semibold rounded-lg bg-blue-50 text-blue-800 border border-blue-200 hover:bg-blue-100 transition-colors cursor-pointer"
                 >
-                  Faqat sertifikat olganlar ({certifiedCost.toLocaleString()} so'm)
+                  Oldindan hammasi ({potentialTotalCost.toLocaleString()} so'm)
                 </button>
                 <button
                   type="button"
@@ -454,7 +472,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               ) : (
                 filteredStudents.map((st, idx) => {
                   const isChecked = selectedPaidIds.has(st.id);
-                  const isCert = st.status === 'certified';
+                  const td = getStudentTrackData(st, track);
+                  const isCert = td.status === 'certified';
 
                   return (
                     <div
@@ -490,7 +509,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                           <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
                             ✅ Sertifikat bor
                           </span>
-                        ) : st.status === 'error' ? (
+                        ) : td.hasError || td.status === 'error' ? (
                           <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
                             ⚠️ Xatolik
                           </span>

@@ -27,7 +27,8 @@ export function checkStudentConflicts(
     assignedEmail?: string;
   },
   existingStudents: Student[],
-  classes: ClassGroup[]
+  classes: ClassGroup[],
+  targetProjectType?: 'ai' | 'developer'
 ): ConflictCheckResult {
   const cleanId = data.id || '';
   const cleanName = data.fullName.trim().toLowerCase();
@@ -35,13 +36,26 @@ export function checkStudentConflicts(
   const cleanCertLink = (data.certificateLink || '').trim();
   const cleanEmail = (data.assignedEmail || '').trim().toLowerCase();
 
-  const getClass = (classId?: string) => classes.find(c => c.id === classId);
+  const classMap = new Map(classes.map(c => [c.id, c]));
+  const getClass = (classId?: string) => (classId ? classMap.get(classId) : undefined);
+
+  const getStudentProject = (s: Student): 'ai' | 'developer' => {
+    const cls = getClass(s.classId);
+    if (cls?.projectType === 'developer') return 'developer';
+    if (cls?.projectType === 'ai') return 'ai';
+    return s.projectType === 'developer' ? 'developer' : 'ai';
+  };
+
+  // Only compare against students in the SAME project track so importing a student from AI -> 5M never triggers false duplicates
+  const scopedStudents = targetProjectType
+    ? existingStudents.filter(s => getStudentProject(s) === targetProjectType)
+    : existingStudents;
 
   // 1. Name conflict check
   let hasNameConflict = false;
   let conflictingStudentByName: Student | undefined;
   if (cleanName.length > 2) {
-    conflictingStudentByName = existingStudents.find(
+    conflictingStudentByName = scopedStudents.find(
       s => s.id !== cleanId && s.fullName.trim().toLowerCase() === cleanName
     );
     if (conflictingStudentByName) {
@@ -49,11 +63,11 @@ export function checkStudentConflicts(
     }
   }
 
-  // 2. Passport conflict check (STRICT)
+  // 2. Passport conflict check
   let hasPassportConflict = false;
   let conflictingStudentByPassport: Student | undefined;
   if (cleanPassport.length > 3) {
-    conflictingStudentByPassport = existingStudents.find(
+    conflictingStudentByPassport = scopedStudents.find(
       s => s.id !== cleanId && s.passportOrId && s.passportOrId.trim().toUpperCase() === cleanPassport
     );
     if (conflictingStudentByPassport) {
@@ -61,11 +75,11 @@ export function checkStudentConflicts(
     }
   }
 
-  // 3. Certificate link conflict check (STRICT)
+  // 3. Certificate link conflict check
   let hasCertificateConflict = false;
   let conflictingStudentByCertificate: Student | undefined;
   if (cleanCertLink.length > 10) {
-    conflictingStudentByCertificate = existingStudents.find(
+    conflictingStudentByCertificate = scopedStudents.find(
       s => s.id !== cleanId && s.certificateLink && s.certificateLink.trim() === cleanCertLink
     );
     if (conflictingStudentByCertificate) {
@@ -73,11 +87,11 @@ export function checkStudentConflicts(
     }
   }
 
-  // 4. Email conflict check (STRICT)
+  // 4. Email conflict check
   let hasEmailConflict = false;
   let conflictingStudentByEmail: Student | undefined;
   if (cleanEmail.length > 4) {
-    conflictingStudentByEmail = existingStudents.find(
+    conflictingStudentByEmail = scopedStudents.find(
       s => s.id !== cleanId && s.assignedEmail && s.assignedEmail.trim().toLowerCase() === cleanEmail
     );
     if (conflictingStudentByEmail) {

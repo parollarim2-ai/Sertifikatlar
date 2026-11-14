@@ -89,6 +89,8 @@ export interface UnifiedItem {
   projectType?: 'ai' | 'developer';
   assignedLogin?: string;
   loginVariantIndex?: number;
+  devRegistered?: boolean;
+  devRegisteredAt?: string;
   classId?: string;
   rawStudent?: Student;
   rawTeacher?: TeacherCertificate;
@@ -179,6 +181,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const handleSelectProject = (proj: 'ai' | 'developer') => {
     setActiveProject(proj);
     setSelectedClassId('all');
+    setRowLimit(80);
+    if (proj === 'ai') {
+      setSelectedStatusFilters(prev => prev.filter(s => s !== 'registered'));
+    }
     try {
       localStorage.setItem('maktab_active_project', proj);
     } catch {}
@@ -219,11 +225,27 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [batchTargetClass, setBatchTargetClass] = useState<ClassGroup | null>(null);
   const [isVoiceAssistantOpen, setIsVoiceAssistantOpen] = useState(false);
 
-  // Multi-select status filter: 'certified' (Tayyor), 'error' (Xatolik), 'pending' (Kutilmoqda)
-  type StatusFilterType = 'certified' | 'error' | 'pending';
+  // Multi-select status filter: 'certified' (Tayyor), 'registered' (Ro'yxatdan o'tganlar), 'error' (Xatolik), 'pending' (Kutilmoqda)
+  type StatusFilterType = 'certified' | 'registered' | 'error' | 'pending';
   const [selectedStatusFilters, setSelectedStatusFilters] = useState<StatusFilterType[]>([]);
   const [isStatusDropdownOpen, setIsStatusDropdownOpen] = useState(false);
   const statusDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Table pagination for crisp instant rendering on large datasets
+  const [rowLimit, setRowLimit] = useState<number>(80);
+
+  // Track which students had their Metrika copied before copying Login (5M Ro'yxatdan o'tganlar workflow)
+  const metrikaCopiedIdsRef = useRef<Set<string>>(new Set());
+  const [metrikaPrimedId, setMetrikaPrimedId] = useState<string | null>(null);
+  const markMetrikaCopied = useCallback((studentId?: string) => {
+    if (!studentId) return;
+    metrikaCopiedIdsRef.current.add(studentId);
+    setMetrikaPrimedId(studentId);
+  }, []);
+
+  useEffect(() => {
+    setRowLimit(80);
+  }, [selectedClassId, activeProject, searchQuery, selectedStatusFilters]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -295,8 +317,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     } catch {}
   };
 
-  // Timer for single click vs double click on passport
+  // Timer for single click vs double click on passport & delayed password copy
   const passportClickTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const delayedPasswordCopyTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     return () => {
@@ -306,10 +329,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       if (quickToastTimerRef.current) {
         clearTimeout(quickToastTimerRef.current);
       }
+      if (delayedPasswordCopyTimerRef.current) {
+        clearTimeout(delayedPasswordCopyTimerRef.current);
+      }
     };
   }, []);
 
-  const handlePassportSingleClick = (st: { passportOrId?: string }) => {
+  const handlePassportSingleClick = (st: { id?: string; passportOrId?: string }) => {
     if (passportClickTimeoutRef.current) {
       clearTimeout(passportClickTimeoutRef.current);
       passportClickTimeoutRef.current = null;
@@ -319,6 +345,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       const digits = extractPassportDigits(raw);
       if (digits) {
         navigator.clipboard.writeText(digits);
+        if (st.id) markMetrikaCopied(st.id);
         showQuickToast(`📋 Pasport raqami nusxalandi: "${digits}"`);
       }
       passportClickTimeoutRef.current = null;
@@ -343,6 +370,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     if (!m.formattedDate && !m.number && !m.series) {
       showQuickToast("⚠️ Metrika yoki tug'ilgan sana kiritilmagan!");
       return;
+    }
+    if (studentId) {
+      markMetrikaCopied(studentId);
     }
 
     try {
@@ -486,7 +516,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       return false;
     }
 
-    const studentClass = classes.find(c => c.id === targetStudent.classId);
+    const studentClass = classMap.get(targetStudent.classId);
     const isDeveloperTrack = targetStudent.projectType === 'developer' || studentClass?.projectType === 'developer' || activeProject === 'developer';
 
     // 2. Strict track-based domain check
@@ -597,7 +627,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     try {
       if (navigator.clipboard && navigator.clipboard.readText) {
         const text = (await navigator.clipboard.readText() || '').trim();
-        if (text && (text.startsWith('http://') || text.startsWith('https://')) && /coursera/i.test(text)) {
+        const studentClass = classMap.get(targetStudent.classId);
+        const isDevTrack = targetStudent.projectType === 'developer' || studentClass?.projectType === 'developer' || activeProject === 'developer';
+        if (
+          text &&
+          (text.startsWith('http://') || text.startsWith('https://')) &&
+          (isDevTrack ? isDeveloperCertificate(text) : isCourseraCertificate(text))
+        ) {
           return await handleValidateAndSaveCertificate(targetStudent, text);
         }
       }
@@ -633,30 +669,118 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [newStudentCertLink, setNewStudentCertLink] = useState('');
   const [newStudentClassId, setNewStudentClassId] = useState(classes[0]?.id || '');
   const [allowDuplicateName, setAllowDuplicateName] = useState(false);
+  const [dismissedNewConflicts, setDismissedNewConflicts] = useState<{ passport: boolean; certificate: boolean }>({
+    passport: false,
+    certificate: false,
+  });
 
   // Class editing modal state
   const [editingClass, setEditingClass] = useState<ClassGroup | null>(null);
 
-  // Real-time conflict checks for single student being added
-  const newStudentConflicts = checkStudentConflicts(
+  // Class lookup map for O(1) project & class resolution
+  const classMap = useMemo(() => new Map(classes.map(c => [c.id, c])), [classes]);
+
+  const newStudentTargetTrack: 'ai' | 'developer' =
+    classMap.get(newStudentClassId)?.projectType === 'developer' ? 'developer' : activeProject;
+
+  // Real-time project-scoped conflict checks for single student being added
+  const newStudentConflicts = useMemo(() => checkStudentConflicts(
     {
       fullName: newStudentName,
       passportOrId: newStudentPassport,
       certificateLink: newStudentCertLink,
     },
     students,
-    classes
-  );
+    classes,
+    newStudentTargetTrack
+  ), [newStudentName, newStudentPassport, newStudentCertLink, students, classes, newStudentTargetTrack]);
 
   // Copy helper for student table (no alert, smooth toast)
-  const handleCopyField = (text: string, label: string) => {
+  const handleCopyField = (text: string, _label: string) => {
     if (!text) return;
     navigator.clipboard.writeText(text);
     showQuickToast(`📋 Nusxalandi: "${text}"`);
   };
 
-  // Class lookup map for project type
-  const classMap = useMemo(() => new Map(classes.map(c => [c.id, c])), [classes]);
+  // Developer mode: Copy student login & automatically transition Metrika-copied student to "Ro'yxatdan o'tganlar"
+  const handleDeveloperLoginCopy = useCallback((st: UnifiedItem) => {
+    if (delayedPasswordCopyTimerRef.current) {
+      clearTimeout(delayedPasswordCopyTimerRef.current);
+      delayedPasswordCopyTimerRef.current = null;
+    }
+
+    let login = st.assignedLogin;
+    const passwordToCopy = st.assignedPassword || 'MaktabPass2026!';
+    const wasMetrikaCopied = metrikaCopiedIdsRef.current.has(st.id);
+    const shouldMarkRegistered = Boolean(wasMetrikaCopied && st.rawStudent && !st.rawStudent.devRegistered && st.status !== 'certified');
+
+    if (!login || shouldMarkRegistered) {
+      if (!login) {
+        login = generateStudentLogin(st.fullName, 0);
+      }
+      if (st.rawStudent && onSaveStudent) {
+        const updated: Student = {
+          ...st.rawStudent,
+          projectType: 'developer',
+          assignedLogin: login,
+          loginVariantIndex: st.rawStudent.loginVariantIndex ?? 0,
+          assignedPassword: passwordToCopy,
+          ...(shouldMarkRegistered
+            ? {
+                devRegistered: true,
+                devRegisteredAt: new Date().toISOString(),
+              }
+            : {}),
+        };
+        onSaveStudent(updated);
+      }
+    }
+
+    if (!login) login = generateStudentLogin(st.fullName, 0);
+    navigator.clipboard.writeText(login).catch(() => {});
+
+    if (shouldMarkRegistered) {
+      metrikaCopiedIdsRef.current.delete(st.id);
+      if (metrikaPrimedId === st.id) setMetrikaPrimedId(null);
+      playChime();
+      showQuickToast(
+        `✅ Login nusxalandi: "${login}" — "Ro'yxatdan o'tganlar"ga o'tdi (2 soniyada parol nusxalanadi)`,
+        2500
+      );
+
+      delayedPasswordCopyTimerRef.current = setTimeout(async () => {
+        delayedPasswordCopyTimerRef.current = null;
+        try {
+          await navigator.clipboard.writeText(passwordToCopy);
+          showQuickToast(`🔑 Parol buferga nusxalandi: "${passwordToCopy}"`, 3000);
+        } catch {
+          try {
+            const ta = document.createElement('textarea');
+            ta.value = passwordToCopy;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            showQuickToast(`🔑 Parol buferga nusxalandi: "${passwordToCopy}"`, 3000);
+          } catch {
+            showQuickToast(`🔑 Parol: "${passwordToCopy}"`, 3000);
+          }
+        }
+      }, 2000);
+    } else {
+      showQuickToast(`📋 Login nusxalandi: "${login}"`);
+    }
+  }, [onSaveStudent, metrikaPrimedId]);
+
+  // Track-isolated paid amount helper
+  const getClassTrackPaid = useCallback((c: ClassGroup, track: 'ai' | 'developer'): number => {
+    if (track === 'developer') {
+      return c.devPaidAmount ?? (c.id.startsWith('class-dev-') ? (c.paidAmount || 0) : 0);
+    }
+    return c.aiPaidAmount ?? (c.paidAmount || 0);
+  }, []);
 
   // Visible classes filtered strictly by activeProject ('ai' vs 'developer')
   const visibleClasses = useMemo(() => {
@@ -708,24 +832,24 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const devPotentialRevenue = devCertifiedCount * 7000;
   const totalPotentialRevenue = aiPotentialRevenue + devPotentialRevenue;
 
-  // Paid revenue breakdown by class projectType
+  // Paid revenue breakdown strictly isolated by track
   const aiPaidRevenue = useMemo(() => {
     return classes
       .filter(c => (c.projectType || 'ai') === 'ai')
-      .reduce((sum, c) => sum + (c.paidAmount || 0), 0);
-  }, [classes]);
+      .reduce((sum, c) => sum + getClassTrackPaid(c, 'ai'), 0);
+  }, [classes, getClassTrackPaid]);
 
   const devPaidRevenue = useMemo(() => {
     return classes
       .filter(c => c.projectType === 'developer')
-      .reduce((sum, c) => sum + (c.paidAmount || 0), 0);
-  }, [classes]);
+      .reduce((sum, c) => sum + getClassTrackPaid(c, 'developer'), 0);
+  }, [classes, getClassTrackPaid]);
 
   const currentProjectPaidRevenue = activeProject === 'developer' ? devPaidRevenue : aiPaidRevenue;
   const currentProjectPotentialRevenue = activeProject === 'developer' ? devPotentialRevenue : aiPotentialRevenue;
   const currentProjectRemainingDebt = Math.max(0, currentProjectPotentialRevenue - currentProjectPaidRevenue);
 
-  const totalPaidRevenue = classes.reduce((sum, c) => sum + (c.paidAmount || 0), 0);
+  const totalPaidRevenue = aiPaidRevenue + devPaidRevenue;
   const totalRemainingDebt = Math.max(0, totalPotentialRevenue - totalPaidRevenue);
   const unusedEmails = emailPool.filter(e => !e.isUsed).length;
   const errorCount = activeProjectStudents.filter(s => {
@@ -852,7 +976,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     // Add students if not explicitly filtering only teachers
     if (selectedClassId !== 'only_teachers') {
       students.forEach(st => {
-        const stClass = classes.find(c => c.id === st.classId);
+        const stClass = classMap.get(st.classId);
         const isDev = stClass?.projectType === 'developer' || st.projectType === 'developer';
 
         // Filter strictly by active project!
@@ -878,6 +1002,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           projectType: effectiveTrack,
           assignedLogin: st.assignedLogin,
           loginVariantIndex: st.loginVariantIndex,
+          devRegistered: Boolean(st.devRegistered),
+          devRegisteredAt: st.devRegisteredAt,
           classId: st.classId,
           rawStudent: st,
         });
@@ -918,58 +1044,67 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
 
     return list;
-  }, [students, teacherCertificates, classes, selectedClassId, searchQuery, activeProject]);
+  }, [students, teacherCertificates, classMap, selectedClassId, searchQuery, activeProject]);
 
   // Current selected class group and whether it is in developer mode
-  const selectedClassGroup = useMemo(() => classes.find(c => c.id === selectedClassId), [classes, selectedClassId]);
+  const selectedClassGroup = useMemo(() => classMap.get(selectedClassId), [classMap, selectedClassId]);
   const isCurrentViewDeveloper = activeProject === 'developer';
+  const isRegisteredFilterView =
+    isCurrentViewDeveloper &&
+    selectedStatusFilters.includes('registered') &&
+    !selectedStatusFilters.includes('pending');
 
-  // Status toifasini aniqlash: 'certified' (Tayyor) | 'error' (Xatolik) | 'pending' (Kutilmoqda)
-  const getItemStatusCategory = (item: UnifiedItem): StatusFilterType => {
+  // Status toifasini aniqlash: 'certified' | 'registered' | 'error' | 'pending'
+  const getItemStatusCategory = useCallback((item: UnifiedItem): StatusFilterType => {
     if (item.hasError || item.status === 'error') return 'error';
     if (item.status === 'certified') return 'certified';
+    if (activeProject === 'developer' && item.devRegistered) return 'registered';
     return 'pending';
-  };
+  }, [activeProject]);
 
   // Statuslar bo'yicha aniq hisoblagich
   const statusCounts = useMemo(() => {
     let cert = 0;
+    let reg = 0;
     let err = 0;
     let pend = 0;
     unifiedList.forEach(item => {
       const cat = getItemStatusCategory(item);
       if (cat === 'certified') cert++;
+      else if (cat === 'registered') reg++;
       else if (cat === 'error') err++;
       else pend++;
     });
-    return { certified: cert, error: err, pending: pend, total: unifiedList.length };
-  }, [unifiedList]);
+    return { certified: cert, registered: reg, error: err, pending: pend, total: unifiedList.length };
+  }, [unifiedList, getItemStatusCategory]);
 
   // Ko'p tanlovli (multi-select) holat filtrlash va saralash mantiqi
+  const allStatusKeys: StatusFilterType[] = useMemo(
+    () => (activeProject === 'developer' ? ['certified', 'registered', 'error', 'pending'] : ['certified', 'error', 'pending']),
+    [activeProject]
+  );
+
   const filteredStudents = useMemo(() => {
     const list = unifiedList;
 
-    // 1. Agar birontasi ham tanlanmagan bo'lsa (default):
-    // Barcha o'quvchilar chiqadi (standart aralash tartibda)
     if (selectedStatusFilters.length === 0) {
       return list;
     }
 
-    // 2. Agar bir vaqtning o'zida barcha 3 tasi tanlansa ('certified', 'error', 'pending'):
-    // Hamma o'quvchilar chiqadi, lekin aniq KATEGORIYALANGAN tartibda:
-    // 1-o'rinda: Tayyor bo'lganlar ('certified')
-    // 2-o'rinda: Xatolik bo'lganlar ('error')
-    // 3-o'rinda: Kutilayotganlar ('pending')
-    if (selectedStatusFilters.length === 3) {
+    if (selectedStatusFilters.length === allStatusKeys.length) {
       const certList = list.filter(item => getItemStatusCategory(item) === 'certified');
+      const regList = list.filter(item => getItemStatusCategory(item) === 'registered');
       const errList = list.filter(item => getItemStatusCategory(item) === 'error');
       const pendList = list.filter(item => getItemStatusCategory(item) === 'pending');
-      return [...certList, ...errList, ...pendList];
+      return [...certList, ...regList, ...errList, ...pendList];
     }
 
-    // 3. Agar 1 yoki 2 tasi tanlansa: faqat tanlangan holatlarga to'g'ri keladiganlar chiqadi
     return list.filter(item => selectedStatusFilters.includes(getItemStatusCategory(item)));
-  }, [unifiedList, selectedStatusFilters]);
+  }, [unifiedList, selectedStatusFilters, allStatusKeys.length, getItemStatusCategory]);
+
+  const displayedStudents = useMemo(() => {
+    return filteredStudents.slice(0, rowLimit);
+  }, [filteredStudents, rowLimit]);
 
   // Alt + V: Fast Paste Certificate to the next pending student in active list
   const handleAltVPasteCertificate = useCallback(async () => {
@@ -1077,13 +1212,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     e.preventDefault();
     if (!newStudentName.trim() || !newStudentClassId) return;
 
-    if (newStudentConflicts.hasPassportConflict) {
-      showQuickToast("❌ Bu pasport seriyasi boshqa o'quvchiga biriktirilgan!");
+    if (newStudentConflicts.hasPassportConflict && !dismissedNewConflicts.passport) {
+      showQuickToast("⚠️ Pasport takrorlanishi ogohlantirildi. Davom etish uchun ruxsat bering!");
       return;
     }
 
-    if (newStudentConflicts.hasCertificateConflict) {
-      showQuickToast("❌ Bu sertifikat havolasi boshqa o'quvchiga biriktirilgan!");
+    if (newStudentConflicts.hasCertificateConflict && !dismissedNewConflicts.certificate) {
+      showQuickToast("⚠️ Sertifikat havolasi takrorlanishi ogohlantirildi. Davom etish uchun ruxsat bering!");
       return;
     }
 
@@ -1092,7 +1227,42 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       return;
     }
 
-    // Allocate truly unused, unassigned email
+    const isDevTarget = newStudentTargetTrack === 'developer';
+    const newStudentId = `st-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    if (isDevTarget) {
+      const login = generateStudentLogin(newStudentName.trim(), 0);
+      const certUrl = newStudentCertLink.trim() || undefined;
+      const newStudent: Student = {
+        id: newStudentId,
+        fullName: newStudentName.trim(),
+        birthDate: newStudentBirthDate.trim() || undefined,
+        passportOrId: newStudentPassport.trim().toUpperCase() || undefined,
+        certificateLink: certUrl,
+        devCertificateLink: certUrl,
+        classId: newStudentClassId,
+        projectType: 'developer',
+        assignedLogin: login,
+        loginVariantIndex: 0,
+        assignedPassword: 'MaktabPass2026!',
+        status: certUrl ? 'certified' : 'pending',
+        devStatus: certUrl ? 'certified' : 'pending',
+        ...(certUrl ? { certifiedAt: new Date().toISOString(), devCertifiedAt: new Date().toISOString() } : {}),
+        createdAt: new Date().toISOString(),
+      };
+      onAddSingleStudent(newStudent);
+      setIsAddingStudent(false);
+      setNewStudentName('');
+      setNewStudentBirthDate('');
+      setNewStudentPassport('');
+      setNewStudentCertLink('');
+      setAllowDuplicateName(false);
+      setDismissedNewConflicts({ passport: false, certificate: false });
+      showQuickToast(`✅ O'quvchi qo'shildi! Login: ${login}`);
+      return;
+    }
+
+    // AI Track: Allocate truly unused, unassigned email
     const assignedEmailsSet = new Set<string>();
     students.forEach(s => {
       if (s.assignedEmail && s.assignedEmail.trim()) {
@@ -1109,17 +1279,21 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       !e.isUsed && !assignedEmailsSet.has(e.email.trim().toLowerCase())
     );
 
-    const newStudentId = `st-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const certUrl = newStudentCertLink.trim() || undefined;
     const newStudent: Student = {
       id: newStudentId,
       fullName: newStudentName.trim(),
       birthDate: newStudentBirthDate.trim() || undefined,
       passportOrId: newStudentPassport.trim().toUpperCase() || undefined,
-      certificateLink: newStudentCertLink.trim() || undefined,
+      certificateLink: certUrl,
+      aiCertificateLink: certUrl,
       classId: newStudentClassId,
+      projectType: 'ai',
       assignedEmail: freeEmail ? freeEmail.email : undefined,
       assignedPassword: freeEmail ? (freeEmail.password || 'MaktabPass2026!') : undefined,
-      status: newStudentCertLink.trim() ? 'certified' : 'pending',
+      status: certUrl ? 'certified' : 'pending',
+      aiStatus: certUrl ? 'certified' : 'pending',
+      ...(certUrl ? { certifiedAt: new Date().toISOString(), aiCertifiedAt: new Date().toISOString() } : {}),
       createdAt: new Date().toISOString(),
     };
 
@@ -1139,6 +1313,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setNewStudentPassport('');
     setNewStudentCertLink('');
     setAllowDuplicateName(false);
+    setDismissedNewConflicts({ passport: false, certificate: false });
     showQuickToast(
       freeEmail 
         ? `✅ O'quvchi qo'shildi! Noyob email: ${freeEmail.email}` 
@@ -1149,9 +1324,27 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const handleSaveClassEdit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingClass) return;
-    onSaveClass(editingClass);
 
+    const prevClass = classMap.get(editingClass.id);
+    const prevTrack: 'ai' | 'developer' = prevClass?.projectType === 'developer' ? 'developer' : 'ai';
     const targetTrack: 'ai' | 'developer' = editingClass.projectType === 'developer' ? 'developer' : 'ai';
+    const preservedAiPaid = prevTrack === 'ai'
+      ? (prevClass?.aiPaidAmount ?? prevClass?.paidAmount ?? 0)
+      : (editingClass.aiPaidAmount ?? 0);
+    const preservedDevPaid = prevTrack === 'developer'
+      ? (prevClass?.devPaidAmount ?? prevClass?.paidAmount ?? 0)
+      : (editingClass.devPaidAmount ?? 0);
+
+    const updatedClassToSave: ClassGroup = {
+      ...editingClass,
+      pricePerStudent: targetTrack === 'developer' ? 7000 : 5000,
+      aiPaidAmount: preservedAiPaid,
+      devPaidAmount: preservedDevPaid,
+      paidAmount: targetTrack === 'developer' ? preservedDevPaid : preservedAiPaid,
+    };
+
+    onSaveClass(updatedClassToSave);
+
     const classStudents = students.filter(s => s.classId === editingClass.id);
 
     // Synchronize all students in this class cleanly to the target track without data loss
@@ -1328,6 +1521,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             <button
               onClick={() => {
                 setAllowDuplicateName(false);
+                setDismissedNewConflicts({ passport: false, certificate: false });
+                const defaultCls =
+                  (selectedClassId !== 'all' && selectedClassId !== 'all_with_teachers' && selectedClassId !== 'only_teachers'
+                    ? visibleClasses.find(c => c.id === selectedClassId)?.id
+                    : undefined) ||
+                  visibleClasses[0]?.id ||
+                  classes[0]?.id ||
+                  '';
+                setNewStudentClassId(defaultCls);
                 setIsAddingStudent(true);
               }}
               className="px-3.5 py-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-semibold rounded-xl border border-emerald-300 flex items-center gap-2 transition-colors cursor-pointer"
@@ -1572,7 +1774,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 </select>
               </div>
 
-              {/* Holat filtri: Yangi ixcham tugma & Dropdown panel (Tayyor / Xatolik / Kutilmoqda) */}
+              {/* Holat filtri: Tayyor / Ro'yxatdan o'tganlar (5M) / Xatolik / Kutilmoqda */}
               <div className="relative" ref={statusDropdownRef}>
                 <button
                   type="button"
@@ -1589,10 +1791,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   <span className="font-bold">
                     {selectedStatusFilters.length === 0
                       ? 'Barchasi'
-                      : selectedStatusFilters.length === 3
-                      ? 'Kategoriyalangan (3 ta)'
+                      : selectedStatusFilters.length === allStatusKeys.length
+                      ? `Kategoriyalangan (${allStatusKeys.length} ta)`
                       : selectedStatusFilters
-                          .map(s => (s === 'certified' ? 'Tayyor' : s === 'error' ? 'Xatolik' : 'Kutilmoqda'))
+                          .map(s =>
+                            s === 'certified'
+                              ? 'Tayyor'
+                              : s === 'registered'
+                              ? "Ro'yxatdan o'tganlar"
+                              : s === 'error'
+                              ? 'Xatolik'
+                              : 'Kutilmoqda'
+                          )
                           .join(' + ')}
                   </span>
                   {selectedStatusFilters.length > 0 && (
@@ -1605,7 +1815,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
                 {/* Dropdown panel */}
                 {isStatusDropdownOpen && (
-                  <div className="absolute right-0 top-full mt-2 w-72 z-50 bg-white border border-slate-200 rounded-2xl shadow-2xl p-3 space-y-2.5 animate-scale-up">
+                  <div className="absolute right-0 top-full mt-2 w-76 z-50 bg-white border border-slate-200 rounded-2xl shadow-2xl p-3 space-y-2.5 animate-scale-up">
                     <div className="flex items-center justify-between pb-1.5 border-b border-slate-100 px-1">
                       <span className="text-[11px] font-bold text-slate-800 uppercase tracking-wider">
                         Holat Bo'yicha Tanlash
@@ -1648,7 +1858,35 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         </span>
                       </div>
 
-                      {/* Variant 2: Xatolik */}
+                      {/* Variant 2: Ro'yxatdan o'tganlar (Only in Developer 5M track) */}
+                      {activeProject === 'developer' && (
+                        <div
+                          onClick={() => toggleStatusFilter('registered')}
+                          className={`flex items-center justify-between p-2 rounded-xl text-xs cursor-pointer select-none transition-colors border ${
+                            selectedStatusFilters.includes('registered')
+                              ? 'bg-indigo-50 text-indigo-950 font-bold border-indigo-300 ring-1 ring-indigo-200'
+                              : 'hover:bg-slate-50 text-slate-700 border-transparent'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={selectedStatusFilters.includes('registered')}
+                              onChange={() => {}}
+                              className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                            />
+                            <span className="flex items-center gap-1.5">
+                              <span className="w-2.5 h-2.5 rounded-full bg-indigo-500"></span>
+                              <span>Ro'yxatdan o'tganlar</span>
+                            </span>
+                          </div>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">
+                            {statusCounts.registered} ta
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Variant 3: Xatolik */}
                       <div
                         onClick={() => toggleStatusFilter('error')}
                         className={`flex items-center justify-between p-2 rounded-xl text-xs cursor-pointer select-none transition-colors border ${
@@ -1674,7 +1912,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         </span>
                       </div>
 
-                      {/* Variant 3: Kutilmoqda */}
+                      {/* Variant 4: Kutilmoqda */}
                       <div
                         onClick={() => toggleStatusFilter('pending')}
                         className={`flex items-center justify-between p-2 rounded-xl text-xs cursor-pointer select-none transition-colors border ${
@@ -1706,10 +1944,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       <button
                         type="button"
                         onClick={() => {
-                          setSelectedStatusFilters(['certified', 'error', 'pending']);
+                          setSelectedStatusFilters(allStatusKeys);
                         }}
                         className="text-[11px] font-bold text-blue-700 hover:text-blue-900 hover:underline cursor-pointer"
-                        title="Uchalasini tanlab 1. Tayyor, 2. Xatolik, 3. Kutilmoqda tartibida chiqarish"
                       >
                         Barchasini tanlash (Kategoriyalash)
                       </button>
@@ -1721,21 +1958,73 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         Yopish
                       </button>
                     </div>
-
-                    {/* Explanatory notes */}
-                    {selectedStatusFilters.length === 3 ? (
-                      <div className="p-2 rounded-xl bg-blue-50 border border-blue-200 text-[10px] text-blue-950 leading-relaxed font-medium">
-                        ✨ <strong>Kategoriyalangan tartib faol:</strong> O'quvchilar aniq tartib bilan: birinchi <strong>Tayyor</strong>, keyin <strong>Xatolik</strong>, so'ngra <strong>Kutilayotganlar</strong> bo'lib guruhlanadi.
-                      </div>
-                    ) : selectedStatusFilters.length === 0 ? (
-                      <div className="p-2 rounded-xl bg-slate-50 border border-slate-200 text-[10px] text-slate-600 leading-relaxed">
-                        ℹ️ Hech biri tanlanmaganda: Barcha o'quvchilar odatiy (aralash) tartibda chiqadi.
-                      </div>
-                    ) : null}
                   </div>
                 )}
               </div>
             </div>
+          </div>
+
+          {/* Quick Status Filter Tabs above table (1-click switching including Ro'yxatdan o'tganlar) */}
+          <div className="flex flex-wrap items-center gap-1.5 px-1">
+            <button
+              type="button"
+              onClick={() => setSelectedStatusFilters([])}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+                selectedStatusFilters.length === 0
+                  ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
+                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:text-slate-900'
+              }`}
+            >
+              Barchasi ({statusCounts.total})
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedStatusFilters(['pending'])}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+                selectedStatusFilters.length === 1 && selectedStatusFilters[0] === 'pending'
+                  ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
+                  : 'bg-white text-amber-800 border-amber-200 hover:bg-amber-50'
+              }`}
+            >
+              Kutilmoqda ({statusCounts.pending})
+            </button>
+            {activeProject === 'developer' && (
+              <button
+                type="button"
+                onClick={() => setSelectedStatusFilters(['registered'])}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+                  selectedStatusFilters.length === 1 && selectedStatusFilters[0] === 'registered'
+                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                    : 'bg-white text-indigo-800 border-indigo-200 hover:bg-indigo-50'
+                }`}
+              >
+                Ro'yxatdan o'tganlar ({statusCounts.registered})
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setSelectedStatusFilters(['certified'])}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+                selectedStatusFilters.length === 1 && selectedStatusFilters[0] === 'certified'
+                  ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                  : 'bg-white text-emerald-800 border-emerald-200 hover:bg-emerald-50'
+              }`}
+            >
+              Tayyor ({statusCounts.certified})
+            </button>
+            {statusCounts.error > 0 && (
+              <button
+                type="button"
+                onClick={() => setSelectedStatusFilters(['error'])}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+                  selectedStatusFilters.length === 1 && selectedStatusFilters[0] === 'error'
+                    ? 'bg-rose-600 text-white border-rose-600 shadow-xs'
+                    : 'bg-white text-rose-800 border-rose-200 hover:bg-rose-50'
+                }`}
+              >
+                Xatolik ({statusCounts.error})
+              </button>
+            )}
           </div>
 
           {/* Students Table in High Contrast Clean White Style */}
@@ -1744,7 +2033,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <h3 className="font-bold text-slate-900 text-sm">O'quvchilar Ro'yxati</h3>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-900 border border-emerald-300 text-[11px] font-bold shadow-2xs" title="Alt+V bosing: Buferdagi Coursera sertifikatini ro'yxatdagi navbatdagi o'quvchiga avtomatik biriktiradi">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-900 border border-emerald-300 text-[11px] font-bold shadow-2xs" title="Alt+V bosing: Buferdagi sertifikatni ro'yxatdagi navbatdagi o'quvchiga avtomatik biriktiradi">
                     <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
                     <span>Tezkor sertifikat qo'yish:</span>
                     <kbd className="px-1.5 py-0.2 bg-white rounded border border-emerald-400 font-mono text-xs font-black text-emerald-900 shadow-2xs">Alt + V</kbd>
@@ -1755,15 +2044,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                {selectedStatusFilters.length === 3 && (
+                {selectedStatusFilters.length === allStatusKeys.length && (
                   <span className="text-[10px] sm:text-[11px] px-2.5 py-1 rounded-lg bg-blue-100 text-blue-900 font-bold border border-blue-200 flex items-center gap-1.5 shadow-2xs">
                     <CheckCircle2 className="w-3.5 h-3.5 text-blue-700" />
-                    <span>Tartib: 1. Tayyor ➔ 2. Xatolik ➔ 3. Kutilmoqda</span>
+                    <span>
+                      {activeProject === 'developer'
+                        ? "Tartib: Tayyor ➔ Ro'yxatdan o'tgan ➔ Xatolik ➔ Kutilmoqda"
+                        : "Tartib: 1. Tayyor ➔ 2. Xatolik ➔ 3. Kutilmoqda"}
+                    </span>
                   </span>
                 )}
-                {selectedStatusFilters.length > 0 && selectedStatusFilters.length < 3 && (
+                {selectedStatusFilters.length > 0 && selectedStatusFilters.length < allStatusKeys.length && (
                   <span className="text-[10px] sm:text-[11px] px-2 py-0.5 rounded-lg bg-slate-200 text-slate-800 font-semibold border border-slate-300">
-                    Holat: {selectedStatusFilters.map(s => (s === 'certified' ? 'Tayyor' : s === 'error' ? 'Xatolik' : 'Kutilmoqda')).join(', ')}
+                    Holat: {selectedStatusFilters.map(s => (s === 'certified' ? 'Tayyor' : s === 'registered' ? "Ro'yxatdan o'tgan" : s === 'error' ? 'Xatolik' : 'Kutilmoqda')).join(', ')}
                   </span>
                 )}
                 <span className="text-xs text-slate-700 font-mono font-bold bg-white px-2.5 py-1 rounded-lg border border-slate-200 shadow-2xs">
@@ -1780,7 +2073,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     <th className="py-3 px-3">O'quvchi F.I.SH</th>
                     <th className="py-3 px-3">Sinf</th>
                     <th className="py-3 px-3">
-                      {isCurrentViewDeveloper ? "Metrika / Pasport (Sana • Raqam • Seriya)" : "Biriktirilgan Pochta"}
+                      {isRegisteredFilterView
+                        ? "O'quvchi Logini (omp.aistudy.uz)"
+                        : isCurrentViewDeveloper
+                        ? "Metrika / Pasport (Sana • Raqam • Seriya)"
+                        : "Biriktirilgan Pochta"}
                     </th>
                     <th className="py-3 px-3">Holat</th>
                     <th className="py-3 px-3">Sertifikat</th>
@@ -1788,23 +2085,25 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-mono">
-                  {filteredStudents.length === 0 ? (
+                  {displayedStudents.length === 0 ? (
                     <tr>
                       <td colSpan={7} className="py-12 text-center text-slate-400 font-sans">
                         O'quvchilar topilmadi.
                       </td>
                     </tr>
                   ) : (
-                    filteredStudents.map((st, idx) => {
+                    displayedStudents.map((st, idx) => {
                       const isCertified = st.status === 'certified';
                       const isError = st.hasError || st.status === 'error';
-                      const isDeveloperStudent = st.projectType === 'developer' || (!st.isTeacher && selectedClassGroup?.projectType === 'developer');
+                      const isDeveloperStudent = st.projectType === 'developer';
+                      const isRegistered = isDeveloperStudent && Boolean(st.devRegistered) && !isCertified && !isError;
+                      const devLoginText = st.assignedLogin || (isDeveloperStudent ? generateStudentLogin(st.fullName, 0) : '');
 
                       return (
                         <tr
                           key={st.id}
                           className={`hover:bg-slate-50/80 transition-colors select-none ${
-                            isError ? 'bg-rose-50/40' : st.isTeacher ? 'bg-purple-50/25' : isDeveloperStudent ? 'hover:bg-purple-50/30' : ''
+                            isError ? 'bg-rose-50/40' : st.isTeacher ? 'bg-purple-50/25' : isRegistered ? 'bg-indigo-50/25' : isDeveloperStudent ? 'hover:bg-purple-50/30' : ''
                           }`}
                           onDoubleClick={() => {
                             if (st.isTeacher) {
@@ -1824,24 +2123,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   if (isDeveloperStudent) {
-                                    let login = st.assignedLogin;
-                                    if (!login) {
-                                      login = generateStudentLogin(st.fullName, 0);
-                                      if (st.rawStudent) {
-                                        const updated: Student = {
-                                          ...st.rawStudent,
-                                          projectType: 'developer',
-                                          assignedLogin: login,
-                                          loginVariantIndex: 0,
-                                          assignedPassword: st.rawStudent.assignedPassword || 'MaktabPass2026!'
-                                        };
-                                        if (onSaveStudent) {
-                                          onSaveStudent(updated);
-                                        }
-                                      }
-                                    }
-                                    navigator.clipboard.writeText(login);
-                                    showQuickToast(`📋 Login nusxalandi: "${login}"`);
+                                    handleDeveloperLoginCopy(st);
                                   } else {
                                     handleCopyField(st.fullName, st.isTeacher ? "Ustoz F.I.SH" : "O'quvchi F.I.SH");
                                   }
@@ -1855,7 +2137,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                   }
                                 }}
                                 className="cursor-pointer hover:text-blue-700 hover:underline active:opacity-70 transition-all rounded px-1 -mx-1"
-                                title={isDeveloperStudent ? "1 marta bosing - loginni nusxalash, 2 marta - tahrirlash" : "1 marta bosing - F.I.SH nusxalash"}
+                                title={isDeveloperStudent ? "1 marta bosing - loginni nusxalash (metrikadan keyin Ro'yxatdan o'tganlarga o'tadi), 2 marta - tahrirlash" : "1 marta bosing - F.I.SH nusxalash"}
                               >
                                 {st.fullName}
                               </span>
@@ -1876,13 +2158,34 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                               )}
                             </div>
 
-                            {/* Under name: if Developer student, show login badge; if AI student, show small metrika */}
+                            {/* Under name: if Developer student, show clickable login badge (hidden when column 4 already shows Login); if AI student, show small metrika */}
                             {isDeveloperStudent ? (
-                              <div className="text-[11px] text-purple-700 font-mono mt-0.5 font-bold flex items-center gap-1.5">
-                                <span className="bg-purple-100 text-purple-900 px-1.5 py-0.5 rounded border border-purple-200">
-                                  login: {st.assignedLogin || generateStudentLogin(st.fullName, 0)}
-                                </span>
-                              </div>
+                              !isRegisteredFilterView ? (
+                                <div className="text-[11px] text-purple-700 font-mono mt-0.5 font-bold flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeveloperLoginCopy(st);
+                                    }}
+                                    className={`px-1.5 py-0.5 rounded border flex items-center gap-1 cursor-pointer transition-all hover:scale-[1.02] active:scale-95 ${
+                                      metrikaPrimedId === st.id
+                                        ? 'bg-indigo-600 text-white border-indigo-700 shadow-xs animate-pulse'
+                                        : 'bg-purple-100 hover:bg-purple-200 text-purple-900 border-purple-200'
+                                    }`}
+                                    title="Loginni nusxalash (metrikadan keyin bossangiz Ro'yxatdan o'tganlarga o'tadi)"
+                                  >
+                                    <span>login: {devLoginText}</span>
+                                    <Copy className="w-2.5 h-2.5" />
+                                  </button>
+                                </div>
+                              ) : (
+                                st.passportOrId && (
+                                  <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                                    {st.passportOrId}{st.birthDate ? ` • ${st.birthDate}` : ''}
+                                  </div>
+                                )
+                              )
                             ) : (
                               <div className="text-[11px] text-slate-500 font-mono mt-0.5 font-normal flex items-center gap-2">
                                 {st.passportOrId ? (
@@ -1938,9 +2241,37 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                             )}
                           </td>
 
-                          {/* Email or Prominent Metrika in Developer Mode */}
+                          {/* Column 4: Login in Ro'yxatdan o'tganlar view OR Prominent Metrika in Developer Mode OR Email in AI mode */}
                           <td className="py-3 px-3">
-                            {isDeveloperStudent ? (
+                            {isDeveloperStudent && isRegisteredFilterView ? (
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeveloperLoginCopy(st);
+                                  }}
+                                  className="px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-950 border border-indigo-200 text-xs font-mono font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs active:scale-95"
+                                  title="Loginni nusxalash"
+                                >
+                                  <KeyRound className="w-3 h-3 text-indigo-600" />
+                                  <span>{devLoginText}</span>
+                                  <Copy className="w-2.5 h-2.5 text-indigo-500" />
+                                </button>
+                                <span
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const pwd = st.assignedPassword || 'MaktabPass2026!';
+                                    navigator.clipboard.writeText(pwd);
+                                    showQuickToast(`🔑 Parol nusxalandi: "${pwd}"`);
+                                  }}
+                                  className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-[11px] font-mono cursor-pointer transition-colors"
+                                  title="Parolni nusxalash"
+                                >
+                                  {st.assignedPassword || 'MaktabPass2026!'}
+                                </span>
+                              </div>
+                            ) : isDeveloperStudent ? (
                               st.passportOrId || st.birthDate ? (
                                 (() => {
                                   const m = parseMetrikaComponents(st.birthDate, st.passportOrId);
@@ -1953,6 +2284,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                           onClick={(e) => {
                                             e.stopPropagation();
                                             navigator.clipboard.writeText(m.formattedDate);
+                                            markMetrikaCopied(st.id);
                                             showQuickToast(`📅 Tug'ilgan sana nusxalandi: "${m.formattedDate}"`);
                                           }}
                                           className="px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-950 border border-indigo-200 text-xs font-mono font-bold flex items-center gap-1 transition-all cursor-pointer shadow-2xs hover:scale-105 active:scale-95"
@@ -1971,6 +2303,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                           onClick={(e) => {
                                             e.stopPropagation();
                                             navigator.clipboard.writeText(m.number);
+                                            markMetrikaCopied(st.id);
                                             showQuickToast(`🔢 Raqam nusxalandi: "${m.number}"`);
                                           }}
                                           className="px-2 py-1 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-950 border border-purple-200 text-xs font-mono font-bold flex items-center gap-1 transition-all cursor-pointer shadow-2xs hover:scale-105 active:scale-95"
@@ -1989,6 +2322,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                           onClick={(e) => {
                                             e.stopPropagation();
                                             navigator.clipboard.writeText(m.series);
+                                            markMetrikaCopied(st.id);
                                             showQuickToast(`🔤 Seriya nusxalandi: "${m.series}"`);
                                           }}
                                           className="px-2 py-1 rounded-lg bg-pink-50 hover:bg-pink-100 text-pink-950 border border-pink-200 text-xs font-mono font-bold flex items-center gap-1 transition-all cursor-pointer shadow-2xs hover:scale-105 active:scale-95"
@@ -2024,6 +2358,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                         onClick={(e) => {
                                           e.stopPropagation();
                                           navigator.clipboard.writeText(m.combined);
+                                          markMetrikaCopied(st.id);
                                           showQuickToast(`📋 Barchasi nusxalandi: "${m.combined}"`);
                                         }}
                                         className="px-1.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-semibold flex items-center gap-0.5 transition-all cursor-pointer"
@@ -2077,6 +2412,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                               <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200">
                                 <CheckCircle className="w-3 h-3 text-emerald-600" /> Tayyor
                               </span>
+                            ) : isRegistered ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-50 text-indigo-800 border border-indigo-200">
+                                <CheckCircle2 className="w-3 h-3 text-indigo-600" /> Ro'yxatdan o'tgan
+                              </span>
                             ) : (
                               <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-600 border border-slate-200">
                                 <Clock className="w-3 h-3 text-slate-400" /> Kutilmoqda
@@ -2124,7 +2463,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                   }
                                 }}
                                 className="px-2.5 py-1 text-[11px] font-sans font-bold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white shadow-2xs flex items-center gap-1.5 transition-all cursor-pointer active:scale-95"
-                                title="Buferdagi Coursera sertifikatini ushbu o'quvchiga darhol biriktirish (Alt+V)"
+                                title="Buferdagi sertifikatni ushbu o'quvchiga darhol biriktirish (Alt+V)"
                               >
                                 <Clipboard className="w-3.5 h-3.5" />
                                 <span>Qo'yish</span>
@@ -2185,6 +2524,30 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 </tbody>
               </table>
             </div>
+
+            {filteredStudents.length > rowLimit && (
+              <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="text-slate-600 font-medium">
+                  Ko'rsatilmoqda: <strong>{displayedStudents.length}</strong> / <strong>{filteredStudents.length}</strong> nafar o'quvchi
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRowLimit(prev => prev + 80)}
+                    className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-xl font-bold cursor-pointer transition-colors"
+                  >
+                    +80 ko'proq ko'rsatish
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRowLimit(filteredStudents.length)}
+                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold cursor-pointer transition-colors"
+                  >
+                    Hammasini ko'rsatish ({filteredStudents.length})
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2204,38 +2567,54 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         />
       )}
 
-      {/* TAB 2: Finance & Payments Matrix */}
+      {/* TAB 2: Finance & Payments Matrix (Strictly Track-Isolated) */}
       {activeTab === 'finance' && (
         <div className="space-y-5">
-          {/* Executive Grand Total Summary */}
+          {/* Track-Scoped Summary */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
             <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs">
               <span className="text-xs font-medium text-slate-500 block mb-1">
-                Sinflar (O'quvchilar) Tushumi
+                {activeProject === 'developer' ? "5M AI Yetakchilari Sinflar Tushumi" : "1M Promter Sinflar Tushumi"}
               </span>
               <div className="text-xl font-bold text-slate-900">
-                {totalPaidRevenue.toLocaleString()} <span className="text-xs font-normal text-slate-500">so'm</span>
+                {currentProjectPaidRevenue.toLocaleString()} <span className="text-xs font-normal text-slate-500">so'm</span>
               </div>
-              <div className="text-xs text-amber-800 font-semibold mt-1">
-                Qarz: {totalRemainingDebt.toLocaleString()} so'm
+              <div className={`text-xs font-semibold mt-1 ${currentProjectRemainingDebt > 0 ? 'text-amber-800' : 'text-emerald-700'}`}>
+                {currentProjectRemainingDebt > 0
+                  ? `Qarz: ${currentProjectRemainingDebt.toLocaleString()} so'm`
+                  : "Qarz yo'q"}
               </div>
             </div>
 
-            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs">
-              <span className="text-xs font-medium text-purple-700 block mb-1">
-                Ustozlar Tushumi ({teacherCertificates.length} nafar)
-              </span>
-              <div className="text-xl font-bold text-purple-900">
-                {teachersPaid.toLocaleString()} <span className="text-xs font-normal text-purple-600">so'm</span>
+            {activeProject === 'ai' ? (
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs">
+                <span className="text-xs font-medium text-purple-700 block mb-1">
+                  Ustozlar Tushumi ({teacherCertificates.length} nafar)
+                </span>
+                <div className="text-xl font-bold text-purple-900">
+                  {teachersPaid.toLocaleString()} <span className="text-xs font-normal text-purple-600">so'm</span>
+                </div>
+                <div className={`text-xs font-semibold mt-1 ${teachersDebt > 0 ? 'text-rose-600' : 'text-emerald-700'}`}>
+                  {teachersDebt > 0 ? `Qarz: ${teachersDebt.toLocaleString()} so'm` : "Qarz yo'q (100% to'langan)"}
+                </div>
               </div>
-              <div className={`text-xs font-semibold mt-1 ${teachersDebt > 0 ? 'text-rose-600' : 'text-emerald-700'}`}>
-                {teachersDebt > 0 ? `Qarz: ${teachersDebt.toLocaleString()} so'm` : "Qarz yo'q (100% to'langan)"}
+            ) : (
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs">
+                <span className="text-xs font-medium text-purple-700 block mb-1">
+                  5M AI Yetakchilari Sertifikatlar
+                </span>
+                <div className="text-xl font-bold text-purple-900">
+                  {devCertifiedCount} <span className="text-xs font-normal text-purple-600">ta tayyor</span>
+                </div>
+                <div className="text-xs text-slate-600 font-semibold mt-1">
+                  Hisoblangan jami: {devPotentialRevenue.toLocaleString()} so'm (7 000x)
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="bg-emerald-50/80 border border-emerald-200 rounded-2xl p-4 shadow-xs">
               <span className="text-xs font-medium text-emerald-800 block mb-1">
-                Umumiy Jami Tushum (Maktab bo'yicha)
+                {activeProject === 'developer' ? "5M Loyiha Jami Tushum" : "Umumiy Jami Tushum (1M Loyiha)"}
               </span>
               <div className="text-xl font-bold text-emerald-900">
                 {grandTotalPaidRevenue.toLocaleString()} <span className="text-xs font-normal text-emerald-700">so'm</span>
@@ -2246,13 +2625,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             </div>
           </div>
 
-          {/* Classes Table */}
+          {/* Classes Table (Strictly filtered to visibleClasses of activeProject) */}
           <div className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-xs">
             <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
               <div>
-                <h3 className="font-bold text-slate-900 text-sm sm:text-base">Sinflar Bo'yicha To'lovlar Hisob-Kitobi</h3>
+                <h3 className="font-bold text-slate-900 text-sm sm:text-base">
+                  {activeProject === 'developer'
+                    ? "5M AI Yetakchilari — Sinflar Bo'yicha To'lovlar"
+                    : "Bir Million Promter — Sinflar Bo'yicha To'lovlar"}
+                </h3>
                 <p className="text-xs text-slate-500">
-                  Har bir tayyor sertifikat uchun xizmat narxi: <b>5 000 so'm</b>. Qator ustiga bosib to'langan summani yangilang.
+                  Har bir tayyor sertifikat uchun xizmat narxi: <b>{activeProject === 'developer' ? "7 000 so'm" : "5 000 so'm"}</b>. Qator ustiga bosib to'langan summani yangilang.
                 </p>
               </div>
             </div>
@@ -2265,181 +2648,81 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     <th className="py-3.5 px-3">Sinf Rahbari</th>
                     <th className="py-3.5 px-3">O'quvchilar</th>
                     <th className="py-3.5 px-3">Sertifikat Olgan</th>
-                    <th className="py-3.5 px-3">Hisoblangan (5 000x)</th>
+                    <th className="py-3.5 px-3">Hisoblangan ({activeProject === 'developer' ? '7 000x' : '5 000x'})</th>
                     <th className="py-3.5 px-3">To'langan Summa</th>
                     <th className="py-3.5 px-3">Qolgan Qarz</th>
                     <th className="py-3.5 pr-5 pl-3 text-right">Amal</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-mono">
-                  {classes.map(c => {
-                    const cStudents = students.filter(s => s.classId === c.id);
-                    const cCertified = cStudents.filter(s => s.status === 'certified').length;
-                    const cTotalCost = cCertified * 5000;
-                    const cDebt = Math.max(0, cTotalCost - c.paidAmount);
-                    const isPaid = cTotalCost > 0 && c.paidAmount >= cTotalCost;
-
-                    return (
-                      <tr 
-                        key={c.id} 
-                        className="hover:bg-slate-50 transition-colors cursor-pointer"
-                        onClick={() => onOpenPaymentModal(c)}
-                      >
-                        <td className="py-3.5 pl-5 pr-3 font-bold text-slate-900">
-                          <div className="flex flex-col items-start gap-1">
-                            {c.isExternalSchool && (
-                              <span 
-                                className="px-1.5 py-0.5 rounded text-[10px] font-extrabold uppercase bg-rose-100 text-rose-800 border border-rose-300 tracking-wider shadow-2xs"
-                                title={`Boshqa maktab: ${c.schoolName || 'Boshqa maktab'}`}
-                              >
-                                bm {c.schoolName ? `• ${c.schoolName}` : ''}
-                              </span>
-                            )}
-                            <span className="px-2.5 py-1 rounded bg-slate-100 border border-slate-200 text-xs">
-                              {c.name}
-                            </span>
-                          </div>
-                        </td>
-                        <td className="py-3.5 px-3 font-sans font-medium text-slate-900">{c.teacherName}</td>
-                        <td className="py-3.5 px-3">{cStudents.length} nafar</td>
-                        <td className="py-3.5 px-3 text-emerald-800 font-bold">{cCertified} nafar</td>
-                        <td className="py-3.5 px-3 font-semibold">{cTotalCost.toLocaleString('uz-UZ')} so'm</td>
-                        <td className="py-3.5 px-3 text-emerald-800 font-semibold">{c.paidAmount.toLocaleString('uz-UZ')} so'm</td>
-                        <td className="py-3.5 px-3">
-                          {isPaid ? (
-                            <span className="inline-flex items-center gap-1 text-emerald-800 font-sans font-bold text-[11px] bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                              <CheckCircle2 className="w-3.5 h-3.5" /> To'liq to'langan
-                            </span>
-                          ) : (
-                            <span className="text-amber-800 font-bold">
-                              {cDebt.toLocaleString('uz-UZ')} so'm
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-3.5 pr-5 pl-3 text-right">
-                          <button
-                            type="button"
-                            onClick={e => {
-                              e.stopPropagation();
-                              onOpenPaymentModal(c);
-                            }}
-                            className="px-3 py-1 bg-white hover:bg-slate-100 text-slate-800 text-xs font-sans font-semibold rounded-lg border border-slate-200 transition-colors cursor-pointer"
-                          >
-                            To'lov kiritish
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Teachers Financial Table */}
-          <div className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-xs">
-            <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-purple-50 text-purple-700 flex items-center justify-center">
-                  <GraduationCap className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="font-bold text-slate-900 text-sm sm:text-base">
-                    Ustozlar Bo'yicha To'lovlar va Qarzdorlik Hisoboti
-                  </h3>
-                  <p className="text-xs text-slate-500">
-                    O'qituvchilarning Coursera sertifikatlari uchun to'lov holati va qarzlari.
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => setActiveTab('teachers')}
-                className="px-3 py-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded-xl text-xs font-bold transition-colors cursor-pointer"
-              >
-                Ustozlar bo'limiga o'tish →
-              </button>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs text-slate-700">
-                <thead className="bg-slate-100/75 text-slate-600 uppercase text-[11px] font-bold tracking-wider border-b border-slate-200">
-                  <tr>
-                    <th className="py-3.5 pl-5 pr-3">Ustoz F.I.SH</th>
-                    <th className="py-3.5 px-3">Fani</th>
-                    <th className="py-3.5 px-3">Sertifikat</th>
-                    <th className="py-3.5 px-3">Narxi</th>
-                    <th className="py-3.5 px-3">To'langan Summa</th>
-                    <th className="py-3.5 px-3">Qarzdorlik</th>
-                    <th className="py-3.5 pr-5 pl-3 text-right">To'lov Holati</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 font-mono">
-                  {teacherCertificates.length === 0 ? (
+                  {visibleClasses.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="py-8 text-center text-slate-400 font-sans">
-                        Hozircha ustozlar kiritilmagan. "Ustozlar" bo'limi orqali yangi ustozlarni kiritishingiz mumkin.
+                      <td colSpan={8} className="py-10 text-center text-slate-400 font-sans">
+                        Ushbu loyihada hozircha sinflar mavjud emas.
                       </td>
                     </tr>
                   ) : (
-                    teacherCertificates.map(t => {
-                      const debt = (t.price || 5000) - (t.paidAmount || 0);
-                      const isPaid = debt <= 0;
+                    visibleClasses.map(c => {
+                      const cStudents = students.filter(s => s.classId === c.id);
+                      const cCertified = cStudents.filter(s => getStudentTrackData(s, activeProject).status === 'certified').length;
+                      const cUnitPrice = activeProject === 'developer' ? 7000 : (c.pricePerStudent || 5000);
+                      const cTotalCost = cCertified * cUnitPrice;
+                      const cPaid = getClassTrackPaid(c, activeProject);
+                      const cDebt = Math.max(0, cTotalCost - cPaid);
+                      const isPaid = cTotalCost > 0 && cPaid >= cTotalCost;
 
                       return (
-                        <tr key={t.id} className="hover:bg-slate-50 transition-colors">
-                          <td className="py-3.5 pl-5 pr-3 font-bold text-slate-900 font-sans">
-                            {t.fullName}
+                        <tr
+                          key={c.id}
+                          className="hover:bg-slate-50 transition-colors cursor-pointer"
+                          onClick={() => onOpenPaymentModal(c)}
+                        >
+                          <td className="py-3.5 pl-5 pr-3 font-bold text-slate-900">
+                            <div className="flex flex-col items-start gap-1">
+                              {c.isExternalSchool && (
+                                <span
+                                  className="px-1.5 py-0.5 rounded text-[10px] font-extrabold uppercase bg-rose-100 text-rose-800 border border-rose-300 tracking-wider shadow-2xs"
+                                  title={`Boshqa maktab: ${c.schoolName || 'Boshqa maktab'}`}
+                                >
+                                  bm {c.schoolName ? `• ${c.schoolName}` : ''}
+                                </span>
+                              )}
+                              <span className="px-2.5 py-1 rounded bg-slate-100 border border-slate-200 text-xs">
+                                {c.name}
+                              </span>
+                            </div>
                           </td>
-                          <td className="py-3.5 px-3 font-sans text-purple-700 font-semibold">
-                            {t.subject || '—'}
-                          </td>
-                          <td className="py-3.5 px-3 font-sans">
-                            {t.status === 'certified' ? (
-                              <span className="text-emerald-700 font-bold">✓ Tayyor</span>
-                            ) : t.status === 'error' ? (
-                              <span className="text-rose-700 font-bold">✕ Xato</span>
-                            ) : (
-                              <span className="text-amber-700 font-medium">⏳ Kutilmoqda</span>
-                            )}
-                          </td>
-                          <td className="py-3.5 px-3 font-semibold">
-                            {(t.price || 5000).toLocaleString()} so'm
-                          </td>
-                          <td className="py-3.5 px-3 text-emerald-800 font-semibold">
-                            {(t.paidAmount || 0).toLocaleString()} so'm
-                          </td>
+                          <td className="py-3.5 px-3 font-sans font-medium text-slate-900">{c.teacherName}</td>
+                          <td className="py-3.5 px-3">{cStudents.length} nafar</td>
+                          <td className="py-3.5 px-3 text-emerald-800 font-bold">{cCertified} nafar</td>
+                          <td className="py-3.5 px-3 font-semibold">{cTotalCost.toLocaleString('uz-UZ')} so'm</td>
+                          <td className="py-3.5 px-3 text-emerald-800 font-semibold">{cPaid.toLocaleString('uz-UZ')} so'm</td>
                           <td className="py-3.5 px-3">
-                            {isPaid ? (
-                              <span className="text-emerald-700 font-sans font-bold text-[11px]">
-                                Qarz yo'q
-                              </span>
-                            ) : (
-                              <span className="text-rose-700 font-bold">
-                                {debt.toLocaleString()} so'm
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-3.5 pr-5 pl-3 text-right">
                             {isPaid ? (
                               <span className="inline-flex items-center gap-1 text-emerald-800 font-sans font-bold text-[11px] bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
                                 <CheckCircle2 className="w-3.5 h-3.5" /> To'liq to'langan
                               </span>
+                            ) : cCertified === 0 && cPaid === 0 ? (
+                              <span className="text-slate-400 font-sans text-[11px]">
+                                0 so'm (sertifikat yo'q)
+                              </span>
                             ) : (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  onUpdateTeacher({
-                                    ...t,
-                                    paidAmount: t.price || 5000,
-                                    paymentStatus: 'paid'
-                                  });
-                                  showQuickToast(`✅ ${t.fullName} uchun to'lov to'liq belgilandi`);
-                                }}
-                                className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-sans font-bold rounded-lg transition-colors cursor-pointer"
-                              >
-                                To'liq to'landi
-                              </button>
+                              <span className="text-amber-800 font-bold">
+                                {cDebt.toLocaleString('uz-UZ')} so'm
+                              </span>
                             )}
+                          </td>
+                          <td className="py-3.5 pr-5 pl-3 text-right">
+                            <button
+                              type="button"
+                              onClick={e => {
+                                e.stopPropagation();
+                                onOpenPaymentModal(c);
+                              }}
+                              className="px-3 py-1 bg-white hover:bg-slate-100 text-slate-800 text-xs font-sans font-semibold rounded-lg border border-slate-200 transition-colors cursor-pointer"
+                            >
+                              To'lov kiritish
+                            </button>
                           </td>
                         </tr>
                       );
@@ -2449,6 +2732,122 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               </table>
             </div>
           </div>
+
+          {/* Teachers Financial Table (Only in AI mode) */}
+          {activeProject === 'ai' && (
+            <div className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-xs">
+              <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-purple-50 text-purple-700 flex items-center justify-center">
+                    <GraduationCap className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-900 text-sm sm:text-base">
+                      Ustozlar Bo'yicha To'lovlar va Qarzdorlik Hisoboti
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      O'qituvchilarning Coursera sertifikatlari uchun to'lov holati va qarzlari.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setActiveTab('teachers')}
+                  className="px-3 py-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                >
+                  Ustozlar bo'limiga o'tish →
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs text-slate-700">
+                  <thead className="bg-slate-100/75 text-slate-600 uppercase text-[11px] font-bold tracking-wider border-b border-slate-200">
+                    <tr>
+                      <th className="py-3.5 pl-5 pr-3">Ustoz F.I.SH</th>
+                      <th className="py-3.5 px-3">Fani</th>
+                      <th className="py-3.5 px-3">Sertifikat</th>
+                      <th className="py-3.5 px-3">Narxi</th>
+                      <th className="py-3.5 px-3">To'langan Summa</th>
+                      <th className="py-3.5 px-3">Qarzdorlik</th>
+                      <th className="py-3.5 pr-5 pl-3 text-right">To'lov Holati</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-mono">
+                    {teacherCertificates.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="py-8 text-center text-slate-400 font-sans">
+                          Hozircha ustozlar kiritilmagan. "Ustozlar" bo'limi orqali yangi ustozlarni kiritishingiz mumkin.
+                        </td>
+                      </tr>
+                    ) : (
+                      teacherCertificates.map(t => {
+                        const debt = (t.price || 5000) - (t.paidAmount || 0);
+                        const isPaid = debt <= 0;
+
+                        return (
+                          <tr key={t.id} className="hover:bg-slate-50 transition-colors">
+                            <td className="py-3.5 pl-5 pr-3 font-bold text-slate-900 font-sans">
+                              {t.fullName}
+                            </td>
+                            <td className="py-3.5 px-3 font-sans text-purple-700 font-semibold">
+                              {t.subject || '—'}
+                            </td>
+                            <td className="py-3.5 px-3 font-sans">
+                              {t.status === 'certified' ? (
+                                <span className="text-emerald-700 font-bold">✓ Tayyor</span>
+                              ) : t.status === 'error' ? (
+                                <span className="text-rose-700 font-bold">✕ Xato</span>
+                              ) : (
+                                <span className="text-amber-700 font-medium">⏳ Kutilmoqda</span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-3 font-semibold">
+                              {(t.price || 5000).toLocaleString()} so'm
+                            </td>
+                            <td className="py-3.5 px-3 text-emerald-800 font-semibold">
+                              {(t.paidAmount || 0).toLocaleString()} so'm
+                            </td>
+                            <td className="py-3.5 px-3">
+                              {isPaid ? (
+                                <span className="text-emerald-700 font-sans font-bold text-[11px]">
+                                  Qarz yo'q
+                                </span>
+                              ) : (
+                                <span className="text-rose-700 font-bold">
+                                  {debt.toLocaleString()} so'm
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3.5 pr-5 pl-3 text-right">
+                              {isPaid ? (
+                                <span className="inline-flex items-center gap-1 text-emerald-800 font-sans font-bold text-[11px] bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                                  <CheckCircle2 className="w-3.5 h-3.5" /> To'liq to'langan
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    onUpdateTeacher({
+                                      ...t,
+                                      paidAmount: t.price || 5000,
+                                      paymentStatus: 'paid'
+                                    });
+                                    showQuickToast(`✅ ${t.fullName} uchun to'lov to'liq belgilandi`);
+                                  }}
+                                  className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-sans font-bold rounded-lg transition-colors cursor-pointer"
+                                >
+                                  To'liq to'landi
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -2595,15 +2994,24 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               </button>
             </div>
 
-            {/* CONFLICT NOTICES WITH COMPLETE STUDENT DETAILS */}
-            {newStudentConflicts.hasPassportConflict && newStudentConflicts.conflictingStudentByPassport && (
+            {/* CONFLICT NOTICES WITH COMPLETE STUDENT DETAILS (Dismissible & Project-Scoped) */}
+            {newStudentConflicts.hasPassportConflict && !dismissedNewConflicts.passport && newStudentConflicts.conflictingStudentByPassport && (
               <div className="mb-4 p-4 bg-rose-50 border-2 border-rose-300 rounded-xl text-xs text-rose-950 space-y-2 animate-scale-up">
-                <div className="flex items-center gap-2 font-bold text-rose-800">
-                  <AlertOctagon className="w-4 h-4 text-rose-600 flex-shrink-0" />
-                  <span className="text-sm">Pasport / ID seriyasi takrorlandi!</span>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 font-bold text-rose-800">
+                    <AlertOctagon className="w-4 h-4 text-rose-600 flex-shrink-0" />
+                    <span className="text-sm">Pasport / ID seriyasi takrorlandi!</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDismissedNewConflicts(p => ({ ...p, passport: true }))}
+                    className="px-2 py-1 text-[11px] font-bold bg-white hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-lg cursor-pointer"
+                  >
+                    Yopish / Ruxsat
+                  </button>
                 </div>
                 <p className="leading-relaxed text-[11px] text-rose-900">
-                  Ushbu pasport seriyasi (<strong>{newStudentPassport}</strong>) avvaldan tizimdagi o'quvchiga biriktirilgan. Pasport seriyasi takrorlanishi qat'iy taqiqlanadi:
+                  Ushbu pasport seriyasi (<strong>{newStudentPassport}</strong>) joriy yo'nalishda avvaldan kiritilgan:
                 </p>
                 <div className="bg-white/90 rounded-lg p-3 border border-rose-200 space-y-1.5 font-mono text-[11px] text-slate-800">
                   <div className="flex justify-between items-center border-b border-slate-100 pb-1 font-sans">
@@ -2624,26 +3032,27 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     <span className="text-slate-500 font-sans font-medium">Pasport / ID:</span>
                     <span className="font-bold text-slate-900">{newStudentConflicts.conflictingStudentByPassport.passportOrId}</span>
                   </div>
-                  <div className="flex justify-between items-center border-b border-slate-100 pb-1">
-                    <span className="text-slate-500 font-sans font-medium">Email:</span>
-                    <span className="text-blue-700 font-semibold">{newStudentConflicts.conflictingStudentByPassport.assignedEmail || 'Mavjud emas'}</span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-500 font-sans font-medium">Sertifikat holati:</span>
-                    <span>{newStudentConflicts.conflictingStudentByPassport.certificateLink ? '✅ Tayyor' : '⏳ Kutilmoqda'}</span>
-                  </div>
                 </div>
               </div>
             )}
 
-            {newStudentConflicts.hasCertificateConflict && newStudentConflicts.conflictingStudentByCertificate && (
+            {newStudentConflicts.hasCertificateConflict && !dismissedNewConflicts.certificate && newStudentConflicts.conflictingStudentByCertificate && (
               <div className="mb-4 p-4 bg-rose-50 border-2 border-rose-300 rounded-xl text-xs text-rose-950 space-y-2 animate-scale-up">
-                <div className="flex items-center gap-2 font-bold text-rose-800">
-                  <AlertOctagon className="w-4 h-4 text-rose-600 flex-shrink-0" />
-                  <span className="text-sm">Sertifikat havolasi takrorlandi!</span>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 font-bold text-rose-800">
+                    <AlertOctagon className="w-4 h-4 text-rose-600 flex-shrink-0" />
+                    <span className="text-sm">Sertifikat havolasi takrorlandi!</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDismissedNewConflicts(p => ({ ...p, certificate: true }))}
+                    className="px-2 py-1 text-[11px] font-bold bg-white hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-lg cursor-pointer"
+                  >
+                    Yopish / Ruxsat
+                  </button>
                 </div>
                 <p className="leading-relaxed text-[11px] text-rose-900">
-                  Ushbu sertifikat havolasi avvaldan tizimdagi o'quvchiga biriktirilgan. Takrorlash qat'iy taqiqlanadi:
+                  Ushbu sertifikat havolasi avvaldan joriy yo'nalishdagi o'quvchiga biriktirilgan:
                 </p>
                 <div className="bg-white/90 rounded-lg p-3 border border-rose-200 space-y-1.5 font-mono text-[11px] text-slate-800">
                   <div className="flex justify-between items-center border-b border-slate-100 pb-1 font-sans">
@@ -2734,7 +3143,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   onChange={e => setNewStudentClassId(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-slate-900 text-sm focus:outline-none focus:bg-white focus:border-blue-700"
                 >
-                  {classes.map(c => (
+                  {(visibleClasses.length > 0 ? visibleClasses : classes).map(c => (
                     <option key={c.id} value={c.id}>
                       {c.name} sinfi ({c.teacherName})
                     </option>
@@ -2770,19 +3179,28 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 <label className="text-xs font-semibold text-slate-700 block mb-1">Sertifikat havolasi (ixtiyoriy):</label>
                 <input
                   type="url"
-                  placeholder="https://coursera.org/verify/..."
+                  placeholder={newStudentTargetTrack === 'developer' ? "https://omp.aistudy.uz/certificate?id=..." : "https://coursera.org/verify/..."}
                   value={newStudentCertLink}
                   onChange={e => setNewStudentCertLink(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-slate-900 text-xs focus:outline-none focus:bg-white focus:border-blue-700"
                 />
               </div>
 
-              <div className="p-2.5 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-900 flex items-center gap-2">
-                <Mail className="w-4 h-4 text-blue-600 flex-shrink-0" />
-                <span>
-                  O'quvchiga zaxiradagi bo'sh Coursera emaillaridan <strong>noyob yangi email</strong> avtomatik biriktiriladi.
-                </span>
-              </div>
+              {newStudentTargetTrack === 'developer' ? (
+                <div className="p-2.5 bg-purple-50 border border-purple-200 rounded-xl text-xs text-purple-900 flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-purple-600 flex-shrink-0" />
+                  <span>
+                    O'quvchiga <strong>familya_ism</strong> formatida avtomatik login yaratiladi (Gmail sarflanmaydi).
+                  </span>
+                </div>
+              ) : (
+                <div className="p-2.5 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-900 flex items-center gap-2">
+                  <Mail className="w-4 h-4 text-blue-600 flex-shrink-0" />
+                  <span>
+                    O'quvchiga zaxiradagi bo'sh Coursera emaillaridan <strong>noyob yangi email</strong> avtomatik biriktiriladi.
+                  </span>
+                </div>
+              )}
 
               <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-200">
                 <button
@@ -2794,7 +3212,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={newStudentConflicts.hasPassportConflict || newStudentConflicts.hasCertificateConflict || (newStudentConflicts.hasNameConflict && !allowDuplicateName)}
+                  disabled={
+                    (newStudentConflicts.hasPassportConflict && !dismissedNewConflicts.passport) ||
+                    (newStudentConflicts.hasCertificateConflict && !dismissedNewConflicts.certificate) ||
+                    (newStudentConflicts.hasNameConflict && !allowDuplicateName)
+                  }
                   className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-blue-700 hover:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed text-white transition-colors cursor-pointer"
                 >
                   Qo'shish

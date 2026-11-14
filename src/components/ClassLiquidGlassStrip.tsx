@@ -16,6 +16,7 @@ import {
   Settings
 } from 'lucide-react';
 import { useUnifiedGlass } from '../context/UnifiedGlassContext';
+import { getStudentTrackData } from '../utils/studentLoginHelper';
 
 interface ClassLiquidGlassStripProps {
   classes: ClassGroup[];
@@ -72,62 +73,30 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
 
   const stripRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
-  const lensRef = useRef<HTMLDivElement>(null);
   const spotRef = useRef<HTMLDivElement>(null);
   const segRef = useRef<HTMLDivElement>(null);
   const segPillRef = useRef<HTMLElement>(null);
-  const svgDefsRef = useRef<SVGDefsElement>(null);
   const tileRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const pillTargetRef = useRef({ left: 0, width: 76 });
 
-  const sleepTimerRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Springs & interactive state with smooth critical damping (no backward jitter)
-  const springsRef = useRef({
-    lx: new Spring(0, 240, 28),
-    ly: new Spring(0, 240, 28),
-    ls: new Spring(1, 230, 24),
-    pl: new Spring(0, 300, 22),
-    pr: new Spring(0, 300, 22),
-    tilePhysics: [] as { tx: number; ty: number; rx: number; ry: number; sc: Spring }[],
-    spotX: 0,
-    spotY: 0,
-    ptr: null as [number, number] | null,
-    mouse: [window.innerWidth / 2, window.innerHeight / 2] as [number, number],
-    pressed: -1,
-    drag: 0,
-    moved: 0,
-    downSel: -1,
-    lw: 100,
-    lh: 86,
-  });
-
-  // 5-second idle auto-sleep mode for lens
   const wakeUpLens = useCallback(() => {
-    springsRef.current.ls.t = 1;
-    if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
-    sleepTimerRef.current = setTimeout(() => {
-      // 5 seconds without interaction -> smooth sleep mode
-      springsRef.current.ls.t = 0;
-    }, 5000);
+    // Lightweight visual wake hook (no background animation loop)
   }, []);
 
-  useEffect(() => {
-    wakeUpLens();
-    return () => {
-      if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
-    };
-  }, [wakeUpLens]);
-
-  // Numbers and data calculation
+  // Numbers and data calculation (strictly track-isolated)
   const classData = useMemo(() => {
     return classes.map((c, i) => {
+      const track: 'ai' | 'developer' = c.projectType === 'developer' ? 'developer' : 'ai';
       const cStudents = students.filter(s => s.classId === c.id);
       const total = cStudents.length;
-      const certified = cStudents.filter(s => s.status === 'certified').length;
+      const certified = cStudents.filter(s => getStudentTrackData(s, track).status === 'certified').length;
       const percent = total > 0 ? Math.round((certified / total) * 100) : 0;
-      const price = c.pricePerStudent || (c.projectType === 'developer' ? 7000 : 5000);
+      const price = track === 'developer' ? 7000 : (c.pricePerStudent || 5000);
       const totalCost = certified * price;
-      const debt = Math.max(0, totalCost - (c.paidAmount || 0));
+      const paid = track === 'developer'
+        ? (c.devPaidAmount ?? (c.id.startsWith('class-dev-') ? (c.paidAmount || 0) : 0))
+        : (c.aiPaidAmount ?? (c.paidAmount || 0));
+      const debt = Math.max(0, totalCost - paid);
       return {
         raw: c,
         index: i,
@@ -142,43 +111,11 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
     });
   }, [classes, students]);
 
-  // Overall statistics
-  const totalStudentsCount = useMemo(() => students.length, [students]);
-  const totalCertifiedCount = useMemo(() => students.filter(s => s.status === 'certified').length, [students]);
+  // Overall statistics (strictly scoped to current classes list)
+  const totalStudentsCount = useMemo(() => classData.reduce((sum, c) => sum + c.total, 0), [classData]);
+  const totalCertifiedCount = useMemo(() => classData.reduce((sum, c) => sum + c.certified, 0), [classData]);
   const debtClassesCount = useMemo(() => classData.filter(c => c.debt > 0).length, [classData]);
   const lowCompletionCount = useMemo(() => classData.filter(c => c.total > 0 && c.percent < 50).length, [classData]);
-
-  // Initialize tile physics when class count changes
-  useEffect(() => {
-    springsRef.current.tilePhysics = classData.map(() => ({
-      tx: 0,
-      ty: 0,
-      rx: 0,
-      ry: 0,
-      sc: new Spring(1, 320, 15),
-    }));
-  }, [classData.length]);
-
-  // Number counting effect for live summary
-  const [s1Count, setS1Count] = useState(0);
-  const [s2Count, setS2Count] = useState(0);
-  const [s3Count, setS3Count] = useState(0);
-
-  useEffect(() => {
-    const t0 = performance.now();
-    const duration = 900;
-    let animId: number;
-    const animate = (t: number) => {
-      const k = Math.min(1, (t - t0) / duration);
-      const ease = 1 - Math.pow(1 - k, 3);
-      setS1Count(Math.round(totalStudentsCount * ease));
-      setS2Count(Math.round(totalCertifiedCount * ease));
-      setS3Count(Math.round(debtClassesCount * ease));
-      if (k < 1) animId = requestAnimationFrame(animate);
-    };
-    animId = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(animId);
-  }, [totalStudentsCount, totalCertifiedCount, debtClassesCount]);
 
   // Filtered class tiles
   const filteredClassIds = useMemo(() => {
@@ -229,84 +166,6 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
     setTimeout(() => ripple.remove(), 700);
   };
 
-  // True physical refraction filter generator (SVG Displacement + RGB Chromatic Aberration)
-  const applyRefractionFilter = useCallback(() => {
-    const lens = lensRef.current;
-    const defs = svgDefsRef.current;
-    if (!lens || !defs) return;
-
-    const w = lens.offsetWidth;
-    const h = lens.offsetHeight;
-    if (w <= 0 || h <= 0) return;
-
-    const bz = 24, sc = 44, ab = 7, r = Math.min(w, h) / 2;
-    const c = document.createElement('canvas');
-    c.width = w;
-    c.height = h;
-    const ctx = c.getContext('2d');
-    if (!ctx) return;
-    const im = ctx.createImageData(w, h);
-    const d = im.data;
-
-    for (let j = 0; j < h; j++) {
-      for (let i = 0; i < w; i++) {
-        const px = i + 0.5 - w / 2;
-        const py = j + 0.5 - h / 2;
-        const qx = Math.abs(px) - (w / 2 - r);
-        const qy = Math.abs(py) - (h / 2 - r);
-        const mx = Math.max(qx, 0);
-        const my = Math.max(qy, 0);
-        const l = Math.hypot(mx, my);
-        const dist = l + Math.min(Math.max(qx, qy), 0) - r;
-        let nx = 0, ny = 0;
-        if (l > 0) {
-          nx = (mx / l) * Math.sign(px);
-          ny = (my / l) * Math.sign(py);
-        } else if (qx > qy) {
-          nx = Math.sign(px);
-        } else {
-          ny = Math.sign(py);
-        }
-        const t = Math.max(0, 1 + dist / bz);
-        const s = t * t;
-        const k = (j * w + i) * 4;
-        d[k] = 128 - nx * s * 127;
-        d[k + 1] = 128 - ny * s * 127;
-        d[k + 2] = 128;
-        d[k + 3] = 255;
-      }
-    }
-    ctx.putImageData(im, 0, 0);
-
-    const filterId = 'lf-lens-actual';
-    const existing = document.getElementById(filterId);
-    if (existing) existing.remove();
-
-    const M = [
-      '1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0',
-      '0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 1 0',
-      '0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 1 0',
-    ];
-
-    defs.insertAdjacentHTML(
-      'beforeend',
-      `<filter id="${filterId}" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" x="0" y="0" width="${w}" height="${h}">
-        <feImage href="${c.toDataURL()}" x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="none" result="m"/>
-        ${M.map(
-          (m, k) => `
-          <feDisplacementMap in="SourceGraphic" in2="m" scale="${sc + k * ab}" xChannelSelector="R" yChannelSelector="G"/>
-          <feColorMatrix values="${m}" result="c${k}"/>`
-        ).join('')}
-        <feBlend in="c0" in2="c1" mode="screen" result="rg"/>
-        <feBlend in="rg" in2="c2" mode="screen"/>
-        <feGaussianBlur stdDeviation="1.1"/>
-      </filter>`
-    );
-
-    lens.style.backdropFilter = `url(#${filterId}) saturate(1.6) brightness(1.06)`;
-    (lens.style as any).webkitBackdropFilter = `url(#${filterId}) saturate(1.6) brightness(1.06)`;
-  }, []);
-
   // Tile Selection logic: clicking selects class, sets persistent selection, opens compact details
   const handleSelectTile = useCallback((index: number, e?: React.MouseEvent) => {
     wakeUpLens();
@@ -315,20 +174,15 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
     if (!target) return;
 
     if (activeTileIndex === index && selectedClassId === target.id) {
-      // Toggle details visibility, but DO NOT unselect class!
       setShowClassDetails(prev => !prev);
     } else {
-      // Select new class and show details
       setActiveTileIndex(index);
       setShowClassDetails(true);
-      springsRef.current.ls.t = 1;
 
       const tileEl = tileRefs.current[index];
       if (tileEl) {
         const cx = tileEl.offsetLeft + tileEl.offsetWidth / 2;
         const cy = tileEl.offsetTop + tileEl.offsetHeight / 2;
-        springsRef.current.lx.t = cx;
-        springsRef.current.ly.t = cy;
         triggerSonarPing(cx, cy);
       }
 
@@ -337,26 +191,15 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
     }
   }, [classData, activeTileIndex, selectedClassId, onSelectClass, triggerJumpTo, wakeUpLens]);
 
-  // Sync with outer selectedClassId (prevents rubber-banding and oscillation during drag)
+  // Sync with outer selectedClassId
   useEffect(() => {
-    if (springsRef.current.drag) return;
-
     if (selectedClassId === 'all' || selectedClassId === 'all_with_teachers' || selectedClassId === 'only_teachers') {
       setActiveTileIndex(-1);
-      springsRef.current.ls.t = 0;
     } else {
       const idx = classData.findIndex(c => c.id === selectedClassId);
       if (idx >= 0) {
         setActiveTileIndex(idx);
-        springsRef.current.ls.t = 1;
-        const tileEl = tileRefs.current[idx];
-        if (tileEl) {
-          const cx = tileEl.offsetLeft + tileEl.offsetWidth / 2;
-          const cy = tileEl.offsetTop + tileEl.offsetHeight / 2;
-          springsRef.current.lx.t = cx;
-          springsRef.current.ly.t = cy;
-          triggerJumpTo(`class-${classData[idx].id}`);
-        }
+        triggerJumpTo(`class-${classData[idx].id}`);
       }
     }
   }, [selectedClassId, classData, triggerJumpTo]);
@@ -365,168 +208,34 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
   const handleResetToAll = () => {
     setActiveTileIndex(-1);
     setShowClassDetails(false);
-    springsRef.current.ls.t = 0;
     onSelectClass('all');
   };
 
-  // Update lens size and generate SVG refraction filter
-  useEffect(() => {
-    const handleLayout = () => {
-      const firstTile = tileRefs.current[0];
-      if (firstTile && lensRef.current) {
-        const lw = firstTile.offsetWidth + 14;
-        const lh = firstTile.offsetHeight + 14;
-        springsRef.current.lw = lw;
-        springsRef.current.lh = lh;
-        lensRef.current.style.width = `${lw}px`;
-        lensRef.current.style.height = `${lh}px`;
-        applyRefractionFilter();
-      }
-    };
-
-    handleLayout();
-    const timer = setTimeout(handleLayout, 150);
-    window.addEventListener('resize', handleLayout);
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener('resize', handleLayout);
-    };
-  }, [applyRefractionFilter, classData.length]);
-
-  // Fluid Segment Pill update
-  const updateSegmentPill = useCallback((btnEl: HTMLButtonElement | null, immediate = false) => {
+  // Fluid Segment Pill update (pure CSS transition — zero rAF loop)
+  const updateSegmentPill = useCallback((btnEl: HTMLButtonElement | null) => {
     if (!btnEl || !segPillRef.current) return;
     const l = btnEl.offsetLeft;
-    const r = l + btnEl.offsetWidth;
-    const isMovingRight = l > springsRef.current.pl.t;
-    springsRef.current.pl.k = isMovingRight ? 150 : 340;
-    springsRef.current.pr.k = isMovingRight ? 340 : 150;
-    springsRef.current.pl.c = isMovingRight ? 15 : 24;
-    springsRef.current.pr.c = isMovingRight ? 24 : 15;
-    springsRef.current.pl.t = l;
-    springsRef.current.pr.t = r;
-    if (immediate) {
-      springsRef.current.pl.x = l;
-      springsRef.current.pr.x = r;
-      springsRef.current.pl.v = 0;
-      springsRef.current.pr.v = 0;
+    const w = btnEl.offsetWidth;
+    pillTargetRef.current = { left: l, width: w };
+    segPillRef.current.style.left = `${l}px`;
+    segPillRef.current.style.width = `${w}px`;
+  }, []);
+
+  useEffect(() => {
+    if (!segRef.current || !segPillRef.current) return;
+    const activeBtn = segRef.current.querySelector('button.on') as HTMLButtonElement | null;
+    const firstBtn = segRef.current.querySelector('button') as HTMLButtonElement | null;
+    const targetBtn = activeBtn || firstBtn;
+    if (targetBtn) {
+      segPillRef.current.style.left = `${targetBtn.offsetLeft}px`;
+      segPillRef.current.style.width = `${targetBtn.offsetWidth}px`;
     }
-  }, []);
-
-  // Track global pointer for conic rim light & spotlight
-  useEffect(() => {
-    const handlePointerMove = (e: PointerEvent) => {
-      springsRef.current.mouse = [e.clientX, e.clientY];
-    };
-    window.addEventListener('pointermove', handlePointerMove);
-    return () => window.removeEventListener('pointermove', handlePointerMove);
-  }, []);
-
-  // Main animation physics loop
-  useEffect(() => {
-    let animId: number;
-    let lastTime = performance.now();
-
-    const loop = (now: number) => {
-      const dt = Math.min((now - lastTime) / 1000, 0.033);
-      lastTime = now;
-
-      const { lx, ly, ls, pl, pr, lw, lh, mouse, ptr, tilePhysics, pressed } = springsRef.current;
-      lx.step(dt);
-      ly.step(dt);
-      ls.step(dt);
-      pl.step(dt);
-      pr.step(dt);
-
-      // 1. Refractive Lens playful jelly squash & stretch (no velocity angle rotation flip!)
-      if (lensRef.current) {
-        const stretchX = 1 + Math.min(Math.abs(lx.v) / 1400, 0.38);
-        const stretchY = 1 / Math.sqrt(stretchX);
-        const scaleVal = Math.max(ls.x, 0);
-
-        lensRef.current.style.transform = `translate(${lx.x - lw / 2}px, ${ly.x - lh / 2}px) scale(${stretchX * scaleVal}, ${stretchY * scaleVal})`;
-        lensRef.current.style.opacity = scaleVal > 0.01 ? `${Math.min(1, scaleVal)}` : '0';
-
-        // Conic rim angle turning toward cursor
-        const lr = lensRef.current.getBoundingClientRect();
-        const rimAngle = Math.atan2(mouse[1] - (lr.top + lr.height / 2), mouse[0] - (lr.left + lr.width / 2)) * (180 / Math.PI) + 90;
-        lensRef.current.style.setProperty('--a', `${rimAngle}deg`);
-      }
-
-      // 2. Segmented Pill position
-      if (segPillRef.current) {
-        segPillRef.current.style.left = `${pl.x}px`;
-        segPillRef.current.style.width = `${Math.max(20, pr.x - pl.x)}px`;
-      }
-
-      // 3. Spotlight under glass
-      if (spotRef.current && gridRef.current) {
-        if (ptr) {
-          const gr = gridRef.current.getBoundingClientRect();
-          springsRef.current.spotX += (ptr[0] - gr.left - springsRef.current.spotX) * 0.15;
-          springsRef.current.spotY += (ptr[1] - gr.top - springsRef.current.spotY) * 0.15;
-          spotRef.current.style.opacity = '1';
-          spotRef.current.style.transform = `translate(${springsRef.current.spotX}px, ${springsRef.current.spotY}px)`;
-        } else {
-          spotRef.current.style.opacity = '0';
-        }
-      }
-
-      // 4. Magnetic 3D tilt & press squish on tiles
-      if (gridRef.current) {
-        const gr = gridRef.current.getBoundingClientRect();
-        tileRefs.current.forEach((t, i) => {
-          if (!t) return;
-          const s = tilePhysics[i];
-          if (!s) return;
-
-          let a = 0, b = 0, rx = 0, ry = 0, sc = 1;
-          if (ptr) {
-            const cx = gr.left + t.offsetLeft + t.offsetWidth / 2;
-            const cy = gr.top + t.offsetTop + t.offsetHeight / 2;
-            const dx = ptr[0] - cx;
-            const dy = ptr[1] - cy;
-            const dist = Math.hypot(dx, dy);
-
-            if (dist < 180 && i !== activeTileIndex) {
-              const k = (1 - dist / 180) * 0.14;
-              a = dx * k;
-              b = dy * k;
-            }
-            if (Math.abs(dx) < t.offsetWidth / 2 && Math.abs(dy) < t.offsetHeight / 2) {
-              rx = (-dy / t.offsetHeight) * 18;
-              ry = (dx / t.offsetWidth) * 20;
-              sc = 1.06;
-            }
-          }
-
-          if (pressed === i) sc = 0.92;
-          s.tx += (a - s.tx) * 0.16;
-          s.ty += (b - s.ty) * 0.16;
-          s.rx += (rx - s.rx) * 0.2;
-          s.ry += (ry - s.ry) * 0.2;
-          s.sc.t = sc;
-          s.sc.step(dt);
-
-          t.style.transform = `translate(${s.tx.toFixed(2)}px, ${s.ty.toFixed(2)}px) perspective(520px) rotateX(${s.rx.toFixed(2)}deg) rotateY(${s.ry.toFixed(2)}deg) scale(${s.sc.x.toFixed(3)})`;
-        });
-      }
-
-      animId = requestAnimationFrame(loop);
-    };
-
-    animId = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(animId);
-  }, [activeTileIndex]);
+  }, [filterMode, selectedClassId, debtClassesCount, lowCompletionCount]);
 
   const selectedClass = activeTileIndex >= 0 ? classData[activeTileIndex] : null;
 
   return (
     <>
-      {/* SVG Defs for physical refraction filter */}
-      <svg width="0" height="0" style={{ position: 'absolute' }}>
-        <defs ref={svgDefsRef}></defs>
-      </svg>
 
       {/* Scoped CSS replicating user's exact specification */}
       <style>{`
@@ -672,6 +381,7 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
           background: #fff;
           box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25), inset 0 1px 0 #fff;
           pointer-events: none;
+          transition: left 0.35s var(--liquid-sp), width 0.35s var(--liquid-sp);
         }
         .liquid-seg button {
           position: relative;
@@ -787,9 +497,15 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
           flex-direction: column;
           justify-content: space-between;
           overflow: hidden;
-          transition: opacity 0.3s, filter 0.3s;
+          transition: opacity 0.25s, filter 0.25s, transform 0.28s var(--liquid-sp);
           z-index: 1;
           position: relative;
+        }
+        .liquid-tile:hover {
+          transform: translateY(-2px) scale(1.02);
+        }
+        .liquid-tile:active {
+          transform: scale(0.95);
         }
         .liquid-tile.dim { opacity: 0.3; filter: saturate(0.3); }
         .liquid-tile::before {
@@ -806,16 +522,7 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
         .liquid-tile.on .liquid-n { color: var(--liquid-ac); font-weight: 900; }
 
         .liquid-gl {
-          position: absolute;
-          inset: 0;
-          background: linear-gradient(110deg, transparent 40%, rgba(255, 255, 255, 0.95) 50%, transparent 60%);
-          transform: translateX(-130%);
-          animation: liquid-gl-anim 7s ease-in-out infinite;
-          pointer-events: none;
-        }
-        @keyframes liquid-gl-anim {
-          0%, 72% { transform: translateX(-130%); }
-          100% { transform: translateX(130%); }
+          display: none;
         }
 
         .liquid-r1 {
@@ -954,7 +661,7 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
             <h2>Sinflar</h2>
             <span className="liquid-sm">
               <i className="liquid-lv"></i>
-              <b>{s1Count}</b> o'quvchi · <b>{s2Count}</b> tayyor · <b className="w">{s3Count}</b> sinfda qarz
+              <b>{totalStudentsCount}</b> o'quvchi · <b>{totalCertifiedCount}</b> tayyor · <b className="w">{debtClassesCount}</b> sinfda qarz
             </span>
           </div>
 
@@ -1035,84 +742,17 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
         {/* Liquid Glass Tiles Grid */}
         <div
           ref={gridRef}
-          onPointerDown={e => {
-            wakeUpLens();
-            const gr = gridRef.current?.getBoundingClientRect();
-            if (!gr) return;
-            const hitIdx = tileRefs.current.findIndex(t => {
-              if (!t) return false;
-              const r = t.getBoundingClientRect();
-              return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-            });
-            if (hitIdx >= 0) {
-              springsRef.current.pressed = hitIdx;
-              springsRef.current.drag = 1;
-              springsRef.current.moved = 0;
-              springsRef.current.downSel = activeTileIndex;
-            }
-          }}
           onPointerMove={e => {
-            wakeUpLens();
-            springsRef.current.ptr = [e.clientX, e.clientY];
-            const hitIdx = tileRefs.current.findIndex(t => {
-              if (!t) return false;
-              const r = t.getBoundingClientRect();
-              return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-            });
-            if (hitIdx >= 0) {
-              const t = tileRefs.current[hitIdx];
-              if (t) {
-                const r = t.getBoundingClientRect();
-                t.style.setProperty('--mx', `${e.clientX - r.left}px`);
-                t.style.setProperty('--my', `${e.clientY - r.top}px`);
-              }
-            }
-            if (springsRef.current.drag) {
-              springsRef.current.moved = 1;
-              if (hitIdx >= 0 && hitIdx !== activeTileIndex) {
-                springsRef.current.pressed = hitIdx;
-                const targetTile = tileRefs.current[hitIdx];
-                if (targetTile) {
-                  const cx = targetTile.offsetLeft + targetTile.offsetWidth / 2;
-                  const cy = targetTile.offsetTop + targetTile.offsetHeight / 2;
-                  springsRef.current.lx.t = cx;
-                  springsRef.current.ly.t = cy;
-                  // Playful liquid jelly stretch bounce
-                  springsRef.current.ls.x = 1.14;
-                  springsRef.current.ls.t = 1;
-                }
-                setActiveTileIndex(hitIdx);
-                const targetClass = classData[hitIdx];
-                if (targetClass) {
-                  onSelectClass(targetClass.id);
-                }
-              }
-            }
-          }}
-          onPointerUp={() => {
-            if (springsRef.current.drag) {
-              if (activeTileIndex >= 0) {
-                const target = classData[activeTileIndex];
-                if (target) {
-                  onSelectClass(target.id);
-                  setShowClassDetails(true);
-                  triggerJumpTo(`class-${target.id}`);
-                  const tileEl = tileRefs.current[activeTileIndex];
-                  if (tileEl) {
-                    const cx = tileEl.offsetLeft + tileEl.offsetWidth / 2;
-                    const cy = tileEl.offsetTop + tileEl.offsetHeight / 2;
-                    springsRef.current.lx.t = cx;
-                    springsRef.current.ly.t = cy;
-                    triggerSonarPing(cx, cy);
-                  }
-                }
-              }
-              springsRef.current.drag = 0;
-              springsRef.current.pressed = -1;
+            if (spotRef.current && gridRef.current) {
+              const gr = gridRef.current.getBoundingClientRect();
+              spotRef.current.style.opacity = '1';
+              spotRef.current.style.transform = `translate(${e.clientX - gr.left}px, ${e.clientY - gr.top}px)`;
             }
           }}
           onPointerLeave={() => {
-            if (!springsRef.current.drag) springsRef.current.ptr = null;
+            if (spotRef.current) {
+              spotRef.current.style.opacity = '0';
+            }
           }}
           className="liquid-grid"
           style={{
@@ -1121,9 +761,6 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
         >
           {/* Spotlight under glass */}
           <i ref={spotRef} className="liquid-spot"></i>
-
-          {/* Liquid Glass Physical Refraction Lens */}
-          <div ref={lensRef} className="liquid-g liquid-lens"></div>
 
           {/* Class Tiles */}
           {classData.map((c, i) => {
@@ -1228,18 +865,20 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
 
                 {/* Right: Sleek Action Buttons & Dismiss */}
                 <div className="flex items-center gap-1.5 flex-wrap flex-shrink-0">
-                  <button
-                    type="button"
-                    onClick={e => {
-                      handleButtonRipple(e);
-                      onOpenClassBatch(selectedClass.raw);
-                    }}
-                    className="px-2.5 py-1 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
-                    title="Butun sinfni Aileaders'dan ro'yxatdan o'tkazish"
-                  >
-                    <Zap className="w-3 h-3 text-yellow-300" />
-                    <span>Aileaders</span>
-                  </button>
+                  {selectedClass.raw.projectType !== 'developer' && (
+                    <button
+                      type="button"
+                      onClick={e => {
+                        handleButtonRipple(e);
+                        onOpenClassBatch(selectedClass.raw);
+                      }}
+                      className="px-2.5 py-1 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 transition-all cursor-pointer shadow-2xs"
+                      title="Butun sinfni Aileaders'dan ro'yxatdan o'tkazish"
+                    >
+                      <Zap className="w-3 h-3 text-yellow-300" />
+                      <span>Aileaders</span>
+                    </button>
+                  )}
 
                   {onGenerateClassLogins && (
                     <button
