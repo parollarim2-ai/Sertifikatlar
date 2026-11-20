@@ -329,6 +329,7 @@ export const StudentModal: React.FC<StudentModalProps> = ({
         status: trackData.status,
         certificateLink: trackData.certificateLink,
         certifiedAt: trackData.certifiedAt,
+        certificateDate: trackData.certificateDate,
         hasError: trackData.hasError,
         errorReason: cleanErrorReason,
         errorImage: trackData.errorImage,
@@ -509,6 +510,9 @@ export const StudentModal: React.FC<StudentModalProps> = ({
       updated.devStatus = updated.status;
       updated.devCertificateLink = updated.certificateLink;
       updated.devCertifiedAt = updated.certifiedAt;
+      if (updated.certificateDate) {
+        updated.devCertificateDate = updated.certificateDate;
+      }
       updated.devHasError = updated.hasError;
       updated.devErrorReason = updated.errorReason;
       updated.devErrorImage = updated.errorImage;
@@ -523,6 +527,9 @@ export const StudentModal: React.FC<StudentModalProps> = ({
       updated.aiStatus = updated.status;
       updated.aiCertificateLink = updated.certificateLink;
       updated.aiCertifiedAt = updated.certifiedAt;
+      if (updated.certificateDate) {
+        updated.aiCertificateDate = updated.certificateDate;
+      }
       updated.aiHasError = updated.hasError;
       updated.aiErrorReason = updated.errorReason;
       updated.aiErrorImage = updated.errorImage;
@@ -1259,27 +1266,67 @@ export const StudentModal: React.FC<StudentModalProps> = ({
               )}
             </div>
 
-            {/* Exact Timestamp with Seconds - ONLY FOR CERTIFIED STUDENTS */}
-            {formData.status === 'certified' && (
-              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200/90 text-emerald-950 flex items-center justify-between text-xs shadow-2xs mt-2.5">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-emerald-100 flex items-center justify-center text-emerald-700 flex-shrink-0">
-                    <Clock className="w-4 h-4" />
+            {/* Official Certificate Earned Date & DB Entry Timestamp - ONLY FOR CERTIFIED STUDENTS */}
+            {formData.status === 'certified' && (() => {
+              const td = getStudentTrackData(formData, currentTrack);
+              return (
+                <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200/90 text-emerald-950 space-y-2.5 text-xs shadow-2xs mt-2.5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-lg bg-emerald-100 flex items-center justify-center text-emerald-700 flex-shrink-0">
+                        <FileCheck className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-bold text-emerald-950 text-xs">
+                            Sertifikat olingan rasmiy sana (QR tagidagi):
+                          </span>
+                          {td.certificateDateVerified ? (
+                            <span className="px-2 py-0.5 rounded-md bg-emerald-600 text-white text-[10px] font-bold">
+                              ✅ Rasmiy QR sanasi
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold">
+                              Qo'lda / Tekshirilmagan
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[11px] text-emerald-800 block">
+                          {td.certificateDateSource
+                            ? `Manba: ${td.certificateDateSource}`
+                            : "Sinf sozlamalaridagi 'Sertifikat sanalari va Isbot' orqali avtomatik aniqlash mumkin"}
+                        </span>
+                      </div>
+                    </div>
+                    <input
+                      type="date"
+                      value={(formData.certificateDate || '').slice(0, 10)}
+                      onChange={e => {
+                        const val = e.target.value;
+                        setFormData(prev => ({
+                          ...prev,
+                          certificateDate: val,
+                          ...(currentTrack === 'developer'
+                            ? { devCertificateDate: val, devCertificateDateVerified: Boolean(val), devCertificateDateSource: val ? 'manual-edit' : undefined }
+                            : { aiCertificateDate: val, aiCertificateDateVerified: Boolean(val), aiCertificateDateSource: val ? 'manual-edit' : undefined }),
+                        }));
+                      }}
+                      className="px-2.5 py-1 bg-white border border-emerald-300 rounded-lg text-xs font-mono font-bold text-emerald-950 focus:outline-none focus:border-emerald-600"
+                    />
                   </div>
-                  <div>
-                    <span className="font-bold text-emerald-900 block text-xs">
-                      Sertifikat kiritilgan aniq vaqti (sekundigacha):
+
+                  <div className="pt-2 border-t border-emerald-200/70 flex items-center justify-between text-[11px] text-emerald-800">
+                    <span className="flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>Bazaga kiritilgan vaqt:</span>
                     </span>
-                    <span className="font-mono text-emerald-800 text-[11px] font-semibold">
-                      {formatExactCertificateTime(formData.certifiedAt || formData.certificateDate || formData.createdAt)}
+                    <span className="font-mono font-semibold">
+                      {formatExactCertificateTime(formData.certifiedAt || formData.createdAt)}
                     </span>
                   </div>
                 </div>
-                <span className="px-2 py-0.5 rounded-full bg-emerald-200/80 text-emerald-900 text-[10px] font-black uppercase tracking-wider">
-                  ✅ Tasdiqlangan
-                </span>
-              </div>
-            )}
+              );
+            })()}
           </div>
 
           {/* Problem Details Form & Section */}

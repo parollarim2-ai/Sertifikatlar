@@ -3,8 +3,8 @@ import { ClassGroup, Student, TeacherSession, TeacherMessage } from '../types';
 import { detectCurrentDevice } from '../utils/deviceDetector';
 import { extractPassportDigits } from '../utils/studentValidator';
 import { TeacherIncomingNoticeModal } from './TeacherIncomingNoticeModal';
-import { BlockedAccessOverlay } from './BlockedAccessOverlay';
 import { TelegramShareModal } from './TelegramShareModal';
+import { GoogleSheetsExportModal } from './GoogleSheetsExportModal';
 import { 
   formatClassCertificatesForClipboard, 
   downloadAllCertificatesAsZip,
@@ -14,6 +14,11 @@ import {
   parseMetrikaComponents,
   getStudentTrackData,
 } from '../utils/studentLoginHelper';
+import {
+  buildGoogleSheetsRows,
+  copyRowsToClipboardForGoogleSheets,
+  loadGoogleSheetsDefaults,
+} from '../utils/googleSheetsExport';
 import confetti from 'canvas-confetti';
 import { 
   Users, 
@@ -40,35 +45,36 @@ import {
   Zap, 
   Layers,
   Laptop,
-  CheckCheck
+  CheckCheck,
+  FileSpreadsheet,
+  Eye
 } from 'lucide-react';
 
 interface TeacherPortalProps {
   classes: ClassGroup[];
   students: Student[];
-  sessions: TeacherSession[];
   messages: TeacherMessage[];
   onRegisterSession: (session: Partial<TeacherSession> & { deviceId: string }) => void;
   onMarkMessageAsRead: (messageId: string, deviceName?: string) => void;
   onOpenStudentModal?: (student: Student, focusField?: 'passport' | 'name' | 'email') => void;
   onToggleStudentPayment?: (studentId: string, currentPaidState: boolean) => void;
   onSaveStudent?: (student: Student) => Promise<void> | void;
+  onSaveUpdatedStudents?: (updatedStudents: Student[]) => Promise<void> | void;
+  onSessionActivity?: (info: { action: string; teacherName?: string; className?: string; classId?: string }) => void;
 }
 
 export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   classes,
   students,
-  sessions,
   messages,
   onRegisterSession,
   onMarkMessageAsRead,
   onOpenStudentModal,
+  onSaveUpdatedStudents,
+  onSessionActivity,
 }) => {
   // Device detection
   const currentDevice = useMemo(() => detectCurrentDevice(), []);
-
-  // Check if current device is blocked in sessions
-  const blockedSession = sessions.find(s => s.deviceId === currentDevice.deviceId && s.isBlocked);
 
   // Active Project Track: 'ai' (Bir million promter) vs 'developer' (Besh million sun'iy intellekt yetakchilari)
   const [activeProject, setActiveProject] = useState<'ai' | 'developer'>(() => {
@@ -114,6 +120,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   // Modals
   const [isMessagesListOpen, setIsMessagesListOpen] = useState(false);
   const [viewingProblemStudent, setViewingProblemStudent] = useState<Student | null>(null);
+  const [isSheetsExportOpen, setIsSheetsExportOpen] = useState(false);
 
   // Telegram Share Modal state after PDF download completes
   const [telegramShareModalData, setTelegramShareModalData] = useState<{
@@ -227,15 +234,37 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     });
   }, [rawClassStudents, activeProject]);
 
-  // Session registration when class is selected
+  // Precompute O(N) class stats map instead of O(C * N) filtering per card
+  const classStatsMap = useMemo(() => {
+    const map = new Map<string, { total: number; certified: number }>();
+    for (let i = 0; i < students.length; i++) {
+      const s = students[i];
+      let entry = map.get(s.classId);
+      if (!entry) {
+        entry = { total: 0, certified: 0 };
+        map.set(s.classId, entry);
+      }
+      entry.total += 1;
+      if (getStudentTrackData(s, activeProject).status === 'certified') {
+        entry.certified += 1;
+      }
+    }
+    return map;
+  }, [students, activeProject]);
+
+  // Session registration & live activity reporting
   const onRegisterSessionRef = useRef(onRegisterSession);
   onRegisterSessionRef.current = onRegisterSession;
+  const onSessionActivityRef = useRef(onSessionActivity);
+  onSessionActivityRef.current = onSessionActivity;
 
   useEffect(() => {
+    const trackLabel = activeProject === 'developer' ? '5M AI Yetakchilari' : '1M Promter';
     if (currentClass) {
       onRegisterSessionRef.current({
         id: currentDevice.deviceId,
         deviceId: currentDevice.deviceId,
+        hardwareId: currentDevice.hardwareId,
         teacherName: currentClass.teacherName,
         className: currentClass.name,
         classId: currentClass.id,
@@ -243,10 +272,28 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         browser: currentDevice.browser,
         os: currentDevice.os,
         screen: currentDevice.screen,
+        cpuCores: currentDevice.cpuCores,
+        gpuRenderer: currentDevice.gpuRenderer,
+        currentAction: `${currentClass.name} sinfini ko'rmoqda (${trackLabel})`,
+        currentRole: 'teacher',
         lastActiveAt: new Date().toISOString(),
       });
+    } else if (hasChosenProject) {
+      onSessionActivityRef.current?.({
+        action: `Sinflar ro'yxatini ko'rmoqda (${trackLabel})`,
+        teacherName: '',
+        className: '',
+        classId: '',
+      });
+    } else {
+      onSessionActivityRef.current?.({
+        action: 'Loyiha turini tanlamoqda',
+        teacherName: '',
+        className: '',
+        classId: '',
+      });
     }
-  }, [currentClass?.id, currentDevice.deviceId, currentDevice.deviceName, currentDevice.browser, currentDevice.os, currentDevice.screen]);
+  }, [currentClass?.id, hasChosenProject, activeProject, currentDevice.deviceId, currentDevice.hardwareId, currentDevice.deviceName, currentDevice.browser, currentDevice.os, currentDevice.screen, currentDevice.cpuCores, currentDevice.gpuRenderer]);
 
   // Sequential Multi-Item Clipboard Copy for Windows History (Win + V)
   const handleSequentialCopyForWinV = async (student: Student) => {
@@ -282,15 +329,6 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     }
   };
 
-  // If device is blocked by administrator, show blocked overlay
-  if (blockedSession) {
-    return (
-      <BlockedAccessOverlay
-        session={blockedSession}
-        onRefresh={() => window.location.reload()}
-      />
-    );
-  }
 
   // Statistics for selected class
   const totalStudents = classStudents.length;
@@ -325,6 +363,14 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
     return true;
   });
 
+  // Track unverified official certificate dates among certified students
+  const unverifiedSheetsDateCount = useMemo(() => {
+    return rawClassStudents.filter((st) => {
+      const td = getStudentTrackData(st, activeProject);
+      return td.status === 'certified' && Boolean(td.certificateLink) && !(td.certificateDateVerified && td.certificateDate);
+    }).length;
+  }, [rawClassStudents, activeProject]);
+
   // Copy all certificates to clipboard (Formatted for Telegram)
   const handleCopyAllCertificates = async () => {
     if (!currentClass) return;
@@ -345,6 +391,37 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
       setCopySuccessToast("⚠️ Nusxalashda xatolik yuz berdi. Iltimos qaytadan urining.");
       setTimeout(() => setCopySuccessToast(''), 4000);
     }
+  };
+
+  // Copy 11-column Google Sheets table (Instant if all dates verified in DB, otherwise auto-scans first!)
+  const handleCopyForGoogleSheets = async () => {
+    if (!currentClass) return;
+
+    if (certifiedCount === 0) {
+      setCopySuccessToast("Hozircha sertifikat olgan o'quvchilar mavjud emas");
+      setTimeout(() => setCopySuccessToast(''), 3000);
+      return;
+    }
+
+    if (unverifiedSheetsDateCount === 0) {
+      try {
+        const defaults = loadGoogleSheetsDefaults();
+        const rows = buildGoogleSheetsRows(rawClassStudents, activeProject, defaults);
+        await copyRowsToClipboardForGoogleSheets(rows, false);
+        confetti({ particleCount: 55, spread: 75, origin: { y: 0.6 } });
+        setCopySuccessToast(
+          `✅ ${rows.length} nafar o'quvchi Google Sheets uchun 11 ustunda nusxalandi! Jadvalda "Lavozimi" katagiga Ctrl+V qiling.`
+        );
+        setTimeout(() => setCopySuccessToast(''), 5000);
+        return;
+      } catch {
+        setIsSheetsExportOpen(true);
+        return;
+      }
+    }
+
+    // Some certificate dates are not verified yet -> open modal to scan missing links & cache in DB
+    setIsSheetsExportOpen(true);
   };
 
   // Bulk ZIP Download
@@ -667,12 +744,9 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
               {filteredClasses.map(c => {
-                const cStudents = students.filter(s => s.classId === c.id);
-                const cCertified = cStudents.filter(s => {
-                  const td = getStudentTrackData(s, activeProject);
-                  return td.status === 'certified';
-                }).length;
-                const total = cStudents.length;
+                const stats = classStatsMap.get(c.id) || { total: 0, certified: 0 };
+                const total = stats.total;
+                const cCertified = stats.certified;
                 const pct = total > 0 ? Math.round((cCertified / total) * 100) : 0;
                 const price = activeProject === 'developer' ? 7000 : (c.pricePerStudent || 5000);
                 const debt = Math.max(0, (cCertified * price) - (c.paidAmount || 0));
@@ -686,7 +760,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
                       setStudentSearchQuery('');
                       setStatusFilter('all');
                     }}
-                    className="p-4 rounded-2xl border border-slate-200/90 bg-white hover:border-blue-500 hover:shadow-lg hover:shadow-blue-500/10 transition-all cursor-pointer text-left group flex flex-col justify-between space-y-3 active:scale-[0.98] min-h-[110px]"
+                    className="apple-glass-card p-4 rounded-2xl border border-slate-200/90 bg-white hover:border-blue-500 hover:shadow-lg hover:shadow-blue-500/10 transition-all cursor-pointer text-left group flex flex-col justify-between space-y-3 active:scale-[0.98] min-h-[110px]"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex items-center gap-3 min-w-0">
@@ -902,16 +976,49 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
           </div>
         </div>
 
-        {/* Action Buttons: Copy for Telegram & Download PDF/ZIP */}
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2 border-t border-slate-200/60">
-          <button
-            type="button"
-            onClick={handleCopyAllCertificates}
-            className="py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md shadow-blue-500/20 active:scale-95 transition-all cursor-pointer"
-          >
-            <Copy className="w-4 h-4" />
-            <span>📲 Telegram guruhga nusxalash ({certifiedCount} ta)</span>
-          </button>
+        {/* Action Buttons: Copy for Telegram, Copy for Google Sheets & Download PDF/ZIP */}
+        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-2.5 pt-3 border-t border-slate-200/60">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 flex-wrap">
+            <button
+              type="button"
+              onClick={handleCopyAllCertificates}
+              className="py-2.5 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md shadow-blue-500/20 active:scale-95 transition-all cursor-pointer"
+            >
+              <Copy className="w-4 h-4" />
+              <span>📲 Telegram uchun ({certifiedCount} ta)</span>
+            </button>
+
+            <div className="flex items-stretch gap-1.5">
+              <button
+                type="button"
+                onClick={handleCopyForGoogleSheets}
+                className="flex-1 sm:flex-initial py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-700 hover:to-green-700 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md shadow-emerald-500/20 active:scale-95 transition-all cursor-pointer"
+                title={
+                  unverifiedSheetsDateCount === 0
+                    ? "Barcha sanalar tayyor — darhol Google Sheets uchun nusxalaydi"
+                    : `${unverifiedSheetsDateCount} ta sertifikat sanasini aniqlab Google Sheets uchun tayyorlaydi`
+                }
+              >
+                <FileSpreadsheet className="w-4 h-4" />
+                <span>📊 Google Sheets uchun nusxalash ({certifiedCount} ta)</span>
+                {certifiedCount > 0 && unverifiedSheetsDateCount === 0 && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/20 font-extrabold">
+                    ⚡ Tayyor
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsSheetsExportOpen(true)}
+                disabled={certifiedCount === 0}
+                className="px-3 py-2.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-40 text-emerald-800 text-xs font-bold flex items-center justify-center gap-1 transition-all cursor-pointer"
+                title="Google Sheets ustunlarini ko'rish va sozlash"
+              >
+                <Eye className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
 
           {/* Download Menu */}
           <div className="relative" ref={downloadMenuRef}>
@@ -919,14 +1026,14 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
               type="button"
               onClick={() => setIsDownloadMenuOpen(prev => !prev)}
               disabled={certifiedCount === 0}
-              className={`w-full sm:w-auto py-3 px-5 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md ${
+              className={`w-full lg:w-auto py-2.5 px-4 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md ${
                 certifiedCount === 0
                   ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
-                  : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white shadow-emerald-500/20 active:scale-95'
+                  : 'bg-gradient-to-r from-teal-600 to-cyan-600 hover:from-teal-700 hover:to-cyan-700 text-white shadow-teal-500/20 active:scale-95'
               }`}
             >
               <FileStack className="w-4 h-4" />
-              <span>Sertifikatlarni yuklab olish ({certifiedCount} ta)</span>
+              <span>PDF / ZIP ({certifiedCount} ta)</span>
             </button>
 
             {isDownloadMenuOpen && (
@@ -1384,6 +1491,22 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         studentCount={telegramShareModalData.studentCount}
         pdfBlob={telegramShareModalData.pdfBlob}
       />
+
+      {/* Google Sheets 11-Column Export & Auto Date Scanner Modal */}
+      {currentClass && (
+        <GoogleSheetsExportModal
+          isOpen={isSheetsExportOpen}
+          classGroup={currentClass}
+          students={rawClassStudents}
+          activeTrack={activeProject}
+          onClose={() => setIsSheetsExportOpen(false)}
+          onSaveUpdatedStudents={onSaveUpdatedStudents}
+          onToast={(msg) => {
+            setCopySuccessToast(msg);
+            setTimeout(() => setCopySuccessToast(''), 5000);
+          }}
+        />
+      )}
 
     </div>
   );

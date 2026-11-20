@@ -30,6 +30,9 @@ export interface Student {
   aiCertificateLink?: string;
   aiCertifiedAt?: string;
   aiCertificateDate?: string;
+  aiCertificateDateVerified?: boolean;
+  aiCertificateDateSource?: string;
+  aiCertificateDateCheckedAt?: string;
   aiCertificateNumber?: string;
   aiHasError?: boolean;
   aiErrorReason?: string;
@@ -40,12 +43,30 @@ export interface Student {
   devCertificateLink?: string;
   devCertifiedAt?: string;
   devCertificateDate?: string;
+  devCertificateDateVerified?: boolean;
+  devCertificateDateSource?: string;
+  devCertificateDateCheckedAt?: string;
   devCertificateNumber?: string;
   devHasError?: boolean;
   devErrorReason?: string;
   devErrorImage?: string;
   devRegistered?: boolean;
   devRegisteredAt?: string;
+}
+
+export type PaymentMethod = 'naqd' | 'karta' | 'otkazma' | 'tekshirish';
+
+export interface PaymentHistoryEntry {
+  id: string;
+  date: string; // ISO timestamp
+  track: 'ai' | 'developer';
+  previousAmount: number;
+  newAmount: number;
+  delta: number;
+  method: PaymentMethod;
+  note?: string;
+  paidStudentCount: number;
+  unverified?: boolean;
 }
 
 export interface ClassGroup {
@@ -61,6 +82,11 @@ export interface ClassGroup {
   notes?: string;
   isExternalSchool?: boolean; // Boshqa maktab belgisi
   schoolName?: string; // Masalan: "27-maktab"
+  paymentUnverified?: boolean; // To'lov shubhali / Tekshirish kerak
+  paymentMethod?: PaymentMethod;
+  paymentNote?: string;
+  lastPaymentAt?: string;
+  paymentHistory?: PaymentHistoryEntry[];
 }
 
 export interface EmailAccount {
@@ -71,9 +97,17 @@ export interface EmailAccount {
   addedAt: string;
 }
 
+export type GraphicsTier = 'lite' | 'medium' | 'ultra';
+
+export interface SessionActionLog {
+  time: string;
+  action: string;
+}
+
 export interface TeacherSession {
   id: string;
   deviceId: string;
+  hardwareId?: string; // Cross-browser hardware fingerprint ID
   teacherName: string;
   className: string;
   classId: string;
@@ -81,9 +115,18 @@ export interface TeacherSession {
   browser: string;
   os: string;
   screen?: string;
+  cpuCores?: number;
+  gpuRenderer?: string;
+  isOnline?: boolean;
+  enteredAt?: string;
+  leftAt?: string;
   lastActiveAt: string;
   createdAt: string;
+  currentAction?: string;
+  currentRole?: 'teacher' | 'admin';
+  recentActions?: SessionActionLog[];
   isBlocked: boolean;
+  blockHardware?: boolean;
   blockedReason?: string;
   blockedAt?: string;
   boundClassId?: string; // Boshqa maktab ustozi biriktirilgan sinf
@@ -112,6 +155,7 @@ export interface TelegramUser {
   teacherName: string;
   classId: string;
   className: string;
+  projectType?: 'ai' | 'developer';
   username?: string;
   firstName?: string;
   lastName?: string;

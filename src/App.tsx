@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage, TelegramUser, TeacherCertificate } from './types';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage, TelegramUser, TeacherCertificate, PaymentMethod, PaymentHistoryEntry, GraphicsTier, SessionActionLog } from './types';
 import { INITIAL_CLASSES, INITIAL_STUDENTS, INITIAL_EMAIL_POOL } from './data/mockData';
 import { TeacherPortal } from './components/TeacherPortal';
 import { AdminPanel } from './components/AdminPanel';
@@ -9,11 +9,16 @@ import { BulkEmailModal } from './components/BulkEmailModal';
 import { BulkStudentUploadModal } from './components/BulkStudentUploadModal';
 import { AdminLoginModal } from './components/AdminLoginModal';
 import { TeacherMessageModal } from './components/TeacherMessageModal';
+import { UltraWorldOverlay } from './components/UltraWorldOverlay';
+import { GraphicsSettingsModal } from './components/GraphicsSettingsModal';
+import { BlockedAccessOverlay } from './components/BlockedAccessOverlay';
+import { detectCurrentDevice } from './utils/deviceDetector';
 import { 
   subscribeToClasses,
   subscribeToStudents,
   subscribeToEmailPool,
-  subscribeToSessions,
+  subscribeToBlockedSessions,
+  subscribeToDeviceSession,
   subscribeToTeacherMessages,
   syncSaveClass,
   syncDeleteClass,
@@ -22,6 +27,8 @@ import {
   syncDeleteStudent,
   syncSaveEmailPool,
   syncSaveSession,
+  syncUpdateDeviceActivity,
+  sendSessionLeaveKeepalive,
   syncSetDeviceBlockStatus,
   syncDeleteSession,
   syncSendTeacherMessage,
@@ -40,7 +47,8 @@ import {
   Lock, 
   Trash2, 
   ArrowLeft,
-  GraduationCap
+  GraduationCap,
+  Sliders
 } from 'lucide-react';
 
 const STORAGE_CLASSES_KEY = 'b1m_school_classes_v5';
@@ -89,22 +97,43 @@ export default function App() {
   });
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_TEACHERS_KEY, JSON.stringify(teacherCertificates));
-    } catch {}
+    const t = setTimeout(() => {
+      try {
+        localStorage.setItem(STORAGE_TEACHERS_KEY, JSON.stringify(teacherCertificates));
+      } catch {}
+    }, 1500);
+    return () => clearTimeout(t);
   }, [teacherCertificates]);
 
-  // Sessions and Messages
-  const [sessions, setSessions] = useState<TeacherSession[]>([]);
-  const sessionsRef = React.useRef<TeacherSession[]>([]);
+  // 3-Tier Graphics & Performance Setting (Defaults to 'medium' on all devices)
+  const [graphicsTier, setGraphicsTier] = useState<GraphicsTier>(() => {
+    try {
+      const saved = localStorage.getItem('b1m_graphics_tier');
+      if (saved === 'lite' || saved === 'medium' || saved === 'ultra') return saved;
+    } catch {}
+    return 'medium';
+  });
+  const [isGraphicsSettingsOpen, setIsGraphicsSettingsOpen] = useState(false);
+
   useEffect(() => {
-    sessionsRef.current = sessions;
-  }, [sessions]);
+    try {
+      document.documentElement.dataset.graphics = graphicsTier;
+      localStorage.setItem('b1m_graphics_tier', graphicsTier);
+    } catch {}
+  }, [graphicsTier]);
+
+  // Current device hardware + browser fingerprint
+  const currentDevice = useMemo(() => detectCurrentDevice(), []);
+  const [directBlockedSession, setDirectBlockedSession] = useState<TeacherSession | null>(null);
+  const [blockedSessions, setBlockedSessions] = useState<TeacherSession[]>([]);
+  const directBlockedRef = useRef<TeacherSession | null>(null);
+  const blockedSessionsRef = useRef<TeacherSession[]>([]);
+
   const [messages, setMessages] = useState<TeacherMessage[]>([]);
   const [telegramUsers, setTelegramUsers] = useState<TelegramUser[]>([]);
 
-  // Periodically fetch connected Telegram users from bot server without unnecessary re-renders
-  const fetchTelegramStatus = () => {
+  // Fetch connected Telegram users on demand (and poll only while Admin view is open)
+  const fetchTelegramStatus = useCallback(() => {
     fetch('/api/telegram/status')
       .then((res) => res.json())
       .then((data) => {
@@ -118,12 +147,6 @@ export default function App() {
         }
       })
       .catch(() => {});
-  };
-
-  useEffect(() => {
-    fetchTelegramStatus();
-    const interval = setInterval(fetchTelegramStatus, 15000);
-    return () => clearInterval(interval);
   }, []);
 
   // Debounce syncing classes and students to server telegram store (prevents main thread stutter)
@@ -172,9 +195,18 @@ export default function App() {
     return 'teacher';
   });
 
+  // Poll Telegram status ONLY when Admin view is active (60s interval; never in teacher view)
+  useEffect(() => {
+    if (currentView !== 'admin') return;
+    fetchTelegramStatus();
+    const interval = setInterval(fetchTelegramStatus, 60000);
+    return () => clearInterval(interval);
+  }, [currentView, fetchTelegramStatus]);
+
   // Modals state
   const [activeStudentModal, setActiveStudentModal] = useState<Student | null>(null);
   const [activePaymentClass, setActivePaymentClass] = useState<ClassGroup | null>(null);
+  const [auditTargetClass, setAuditTargetClass] = useState<ClassGroup | null>(null);
   const [isBulkEmailOpen, setIsBulkEmailOpen] = useState(false);
   const [isBulkUploadOpen, setIsBulkUploadOpen] = useState(false);
   const [bulkUploadInitialClassId, setBulkUploadInitialClassId] = useState<string | undefined>(undefined);
@@ -269,10 +301,23 @@ export default function App() {
       }
     });
 
-    const unsubSessions = subscribeToSessions((remoteSessions) => {
-      if (remoteSessions) {
-        setSessions(remoteSessions);
-      }
+    const unsubBlockedSessions = subscribeToBlockedSessions((remoteBlocked) => {
+      blockedSessionsRef.current = remoteBlocked;
+      setBlockedSessions(prev => {
+        if (prev.length === 0 && remoteBlocked.length === 0) return prev;
+        if (
+          prev.length === remoteBlocked.length &&
+          prev.every((p, idx) =>
+            p.deviceId === remoteBlocked[idx]?.deviceId &&
+            p.isBlocked === remoteBlocked[idx]?.isBlocked &&
+            p.blockHardware === remoteBlocked[idx]?.blockHardware &&
+            p.blockedReason === remoteBlocked[idx]?.blockedReason
+          )
+        ) {
+          return prev;
+        }
+        return remoteBlocked;
+      });
     });
 
     const unsubMessages = subscribeToTeacherMessages((remoteMessages) => {
@@ -292,27 +337,72 @@ export default function App() {
       }
     });
 
+    // Dedicated instant single-device block listener (< 200ms reaction without heartbeat re-renders)
+    const unsubDirectDevice = subscribeToDeviceSession(currentDevice.deviceId, (remoteSess) => {
+      const blockedSess = remoteSess?.isBlocked ? remoteSess : null;
+      directBlockedRef.current = blockedSess;
+      setDirectBlockedSession(prev => {
+        if (!prev && !blockedSess) return prev;
+        if (
+          prev?.deviceId === blockedSess?.deviceId &&
+          prev?.isBlocked === blockedSess?.isBlocked &&
+          prev?.blockHardware === blockedSess?.blockHardware &&
+          prev?.blockedReason === blockedSess?.blockedReason
+        ) {
+          return prev;
+        }
+        return blockedSess;
+      });
+    });
+
     return () => {
       unsubClasses();
       unsubStudents();
       unsubEmails();
-      unsubSessions();
+      unsubBlockedSessions();
       unsubMessages();
       unsubTeacherCerts();
+      unsubDirectDevice();
     };
-  }, []);
+  }, [currentDevice.deviceId]);
 
-  // Save changes to localStorage as backup
+  // Debounced localStorage backups (prevents main-thread UI freeze & RAM spike on large datasets)
   useEffect(() => {
-    localStorage.setItem(STORAGE_CLASSES_KEY, JSON.stringify(classes));
+    const t = setTimeout(() => {
+      try {
+        localStorage.setItem(STORAGE_CLASSES_KEY, JSON.stringify(classes));
+      } catch {}
+    }, 1500);
+    return () => clearTimeout(t);
   }, [classes]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_STUDENTS_KEY, JSON.stringify(students));
+    const t = setTimeout(() => {
+      try {
+        // Strip heavy base64 error screenshots (> 4KB) before persisting in localStorage
+        const lightweightStudents = students.map((st) => {
+          const strip = (v?: string) => (v && v.length > 4096 ? undefined : v);
+          const e1 = strip(st.errorImage);
+          const e2 = strip(st.aiErrorImage);
+          const e3 = strip(st.devErrorImage);
+          if (e1 === st.errorImage && e2 === st.aiErrorImage && e3 === st.devErrorImage) {
+            return st;
+          }
+          return { ...st, errorImage: e1, aiErrorImage: e2, devErrorImage: e3 };
+        });
+        localStorage.setItem(STORAGE_STUDENTS_KEY, JSON.stringify(lightweightStudents));
+      } catch {}
+    }, 1800);
+    return () => clearTimeout(t);
   }, [students]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_EMAILS_KEY, JSON.stringify(emailPool));
+    const t = setTimeout(() => {
+      try {
+        localStorage.setItem(STORAGE_EMAILS_KEY, JSON.stringify(emailPool));
+      } catch {}
+    }, 1500);
+    return () => clearTimeout(t);
   }, [emailPool]);
 
   // ESC key listener to close open modals
@@ -406,6 +496,13 @@ export default function App() {
     await syncSaveStudent(studentToSave);
   };
 
+  const handleSaveBatchStudents = async (updatedStudents: Student[]) => {
+    if (!updatedStudents || updatedStudents.length === 0) return;
+    const updatedMap = new Map(updatedStudents.map(s => [s.id, s]));
+    setStudents(prev => prev.map(s => updatedMap.get(s.id) || s));
+    await syncSaveBatchStudents(updatedStudents);
+  };
+
   const handleAddSingleStudent = async (student: Student, updatedPool?: EmailAccount[]) => {
     // 1. Immediately update students in local state
     setStudents(prev => [...prev, student]);
@@ -478,16 +575,68 @@ export default function App() {
   const handleUpdatePayment = async (
     classId: string, 
     newPaidAmount: number,
-    updatedStudentPayments?: { studentId: string; isPaid: boolean }[]
+    updatedStudentPayments?: { studentId: string; isPaid: boolean }[],
+    paymentMeta?: {
+      method?: PaymentMethod;
+      note?: string;
+      unverified?: boolean;
+    }
   ) => {
     const targetClass = classes.find(c => c.id === classId);
     if (!targetClass) return;
 
     const isDev = targetClass.projectType === 'developer';
+    const track: 'ai' | 'developer' = isDev ? 'developer' : 'ai';
+    const previousAmount = isDev
+      ? (targetClass.devPaidAmount ?? (targetClass.id.startsWith('class-dev-') ? (targetClass.paidAmount || 0) : 0))
+      : (targetClass.aiPaidAmount ?? targetClass.paidAmount ?? 0);
+
+    const nowIso = new Date().toISOString();
+    const paidCount = updatedStudentPayments
+      ? updatedStudentPayments.filter(p => p.isPaid).length
+      : students.filter(s => s.classId === classId && s.isPaid).length;
+
+    const method: PaymentMethod = paymentMeta?.method || (paymentMeta?.unverified ? 'tekshirish' : (targetClass.paymentMethod || 'naqd'));
+    const unverified = typeof paymentMeta?.unverified === 'boolean'
+      ? paymentMeta.unverified
+      : (newPaidAmount === 0 ? false : Boolean(targetClass.paymentUnverified));
+    const trimmedNote = (paymentMeta?.note ?? targetClass.paymentNote ?? '').trim();
+
+    const shouldLog =
+      previousAmount !== newPaidAmount ||
+      unverified !== Boolean(targetClass.paymentUnverified) ||
+      Boolean(paymentMeta?.note && paymentMeta.note.trim() !== (targetClass.paymentNote || '').trim()) ||
+      (paymentMeta?.method && paymentMeta.method !== targetClass.paymentMethod);
+
+    const existingHistory = Array.isArray(targetClass.paymentHistory) ? targetClass.paymentHistory : [];
+    const newEntry: PaymentHistoryEntry | null = shouldLog
+      ? {
+          id: `pay-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          date: nowIso,
+          track,
+          previousAmount,
+          newAmount: newPaidAmount,
+          delta: newPaidAmount - previousAmount,
+          method,
+          note: trimmedNote || undefined,
+          paidStudentCount: paidCount,
+          unverified,
+        }
+      : null;
+
+    const updatedHistory = newEntry
+      ? [newEntry, ...existingHistory].slice(0, 50)
+      : existingHistory;
+
     const updatedClass: ClassGroup = {
       ...targetClass,
       paidAmount: newPaidAmount,
       ...(isDev ? { devPaidAmount: newPaidAmount } : { aiPaidAmount: newPaidAmount }),
+      paymentUnverified: unverified,
+      paymentMethod: method,
+      paymentNote: trimmedNote,
+      lastPaymentAt: newPaidAmount > 0 ? nowIso : (targetClass.lastPaymentAt || nowIso),
+      paymentHistory: updatedHistory,
     };
 
     setClasses(prev => prev.map(c => c.id === classId ? updatedClass : c));
@@ -495,7 +644,6 @@ export default function App() {
     let updatedStudentsList: Student[] = [];
     if (updatedStudentPayments && updatedStudentPayments.length > 0) {
       const paymentMap = new Map(updatedStudentPayments.map(p => [p.studentId, p.isPaid]));
-      const nowIso = new Date().toISOString();
       
       setStudents(prev => {
         const next = prev.map(s => {
@@ -504,7 +652,7 @@ export default function App() {
             return {
               ...s,
               isPaid,
-              paidAt: isPaid ? (s.paidAt || nowIso) : undefined,
+              paidAt: isPaid ? (s.paidAt || nowIso) : '',
             };
           }
           return s;
@@ -530,24 +678,43 @@ export default function App() {
     const updatedStudent: Student = {
       ...student,
       isPaid: newIsPaid,
-      paidAt: newIsPaid ? nowIso : undefined,
+      paidAt: newIsPaid ? nowIso : '',
     };
 
     setStudents(prev => prev.map(s => s.id === studentId ? updatedStudent : s));
     await syncSaveStudent(updatedStudent);
 
-    // Also update class's paidAmount accordingly
+    // Also update class's paidAmount accordingly and log audit entry
     const targetClass = classes.find(c => c.id === student.classId);
     if (targetClass) {
       const isDev = targetClass.projectType === 'developer';
+      const track: 'ai' | 'developer' = isDev ? 'developer' : 'ai';
       const price = isDev ? 7000 : (targetClass.pricePerStudent || 5000);
       const classStudents = students.map(s => s.id === studentId ? updatedStudent : s).filter(s => s.classId === targetClass.id);
       const paidCount = classStudents.filter(s => s.isPaid).length;
+      const previousAmount = isDev
+        ? (targetClass.devPaidAmount ?? (targetClass.id.startsWith('class-dev-') ? (targetClass.paidAmount || 0) : 0))
+        : (targetClass.aiPaidAmount ?? targetClass.paidAmount ?? 0);
       const newAmount = paidCount * price;
+      const existingHistory = Array.isArray(targetClass.paymentHistory) ? targetClass.paymentHistory : [];
+      const logEntry: PaymentHistoryEntry = {
+        id: `pay-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        date: nowIso,
+        track,
+        previousAmount,
+        newAmount,
+        delta: newAmount - previousAmount,
+        method: targetClass.paymentMethod || 'naqd',
+        note: `${student.fullName}: ${newIsPaid ? "to'landi deb belgilandi" : "to'lov bekor qilindi"}`,
+        paidStudentCount: paidCount,
+        unverified: Boolean(targetClass.paymentUnverified),
+      };
       const updatedClass: ClassGroup = {
         ...targetClass,
         paidAmount: newAmount,
         ...(isDev ? { devPaidAmount: newAmount } : { aiPaidAmount: newAmount }),
+        lastPaymentAt: nowIso,
+        paymentHistory: [logEntry, ...existingHistory].slice(0, 50),
       };
       setClasses(prev => prev.map(c => c.id === targetClass.id ? updatedClass : c));
       await syncSaveClass(updatedClass);
@@ -589,34 +756,194 @@ export default function App() {
     await syncSaveEmailPool(updatedEmailPool);
   };
 
+  // Live Session Presence, Activity Ring Buffer & Cross-Browser Hardware Blocking
+  const sessionEnteredAtRef = useRef<string>(new Date().toISOString());
+  const sessionRecentActionsRef = useRef<SessionActionLog[]>([]);
+  const childActivityReportedRef = useRef<boolean>(false);
+  const liveContextRef = useRef<{
+    teacherName: string;
+    className: string;
+    classId: string;
+    currentAction: string;
+    currentRole: 'teacher' | 'admin';
+  }>({
+    teacherName: '',
+    className: '',
+    classId: '',
+    currentAction: 'Saytga kirdi',
+    currentRole: currentView,
+  });
+
+  const pushActivityLog = useCallback((actionText: string) => {
+    const nowIso = new Date().toISOString();
+    const list = sessionRecentActionsRef.current;
+    const last = list[0];
+    if (last && last.action === actionText) {
+      const diff = Date.now() - new Date(last.time).getTime();
+      if (diff < 8000) return list;
+    }
+    const next = [{ time: nowIso, action: actionText }, ...list].slice(0, 8);
+    sessionRecentActionsRef.current = next;
+    return next;
+  }, []);
+
+  const reportSessionActivity = useCallback((info: {
+    action: string;
+    teacherName?: string;
+    className?: string;
+    classId?: string;
+    role?: 'teacher' | 'admin';
+  }) => {
+    const nowIso = new Date().toISOString();
+    if (typeof info.teacherName === 'string') liveContextRef.current.teacherName = info.teacherName;
+    if (typeof info.className === 'string') liveContextRef.current.className = info.className;
+    if (typeof info.classId === 'string') liveContextRef.current.classId = info.classId;
+    if (info.role) liveContextRef.current.currentRole = info.role;
+    liveContextRef.current.currentAction = info.action;
+
+    const actions = pushActivityLog(info.action);
+    syncUpdateDeviceActivity({
+      deviceId: currentDevice.deviceId,
+      hardwareId: currentDevice.hardwareId,
+      deviceName: currentDevice.deviceName,
+      browser: currentDevice.browser,
+      os: currentDevice.os,
+      screen: currentDevice.screen,
+      cpuCores: currentDevice.cpuCores,
+      gpuRenderer: currentDevice.gpuRenderer,
+      teacherName: liveContextRef.current.teacherName,
+      className: liveContextRef.current.className,
+      classId: liveContextRef.current.classId,
+      currentRole: liveContextRef.current.currentRole,
+      currentAction: info.action,
+      recentActions: actions,
+      enteredAt: sessionEnteredAtRef.current,
+      isOnline: true,
+      lastActiveAt: nowIso,
+    }).catch(() => {});
+  }, [currentDevice, pushActivityLog]);
+
+  // Global presence heartbeat (10s while visible) + instant leave tracking on hide/close
+  useEffect(() => {
+    liveContextRef.current.currentRole = currentView;
+    if (!childActivityReportedRef.current) {
+      reportSessionActivity({
+        action: currentView === 'admin' ? 'Admin panelini ochdi' : 'Saytga kirdi',
+        role: currentView,
+      });
+    }
+    childActivityReportedRef.current = false;
+
+    const heartbeat = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        syncUpdateDeviceActivity({
+          deviceId: currentDevice.deviceId,
+          hardwareId: currentDevice.hardwareId,
+          deviceName: currentDevice.deviceName,
+          browser: currentDevice.browser,
+          os: currentDevice.os,
+          screen: currentDevice.screen,
+          cpuCores: currentDevice.cpuCores,
+          gpuRenderer: currentDevice.gpuRenderer,
+          teacherName: liveContextRef.current.teacherName,
+          className: liveContextRef.current.className,
+          classId: liveContextRef.current.classId,
+          currentRole: liveContextRef.current.currentRole,
+          currentAction: liveContextRef.current.currentAction,
+          recentActions: sessionRecentActionsRef.current,
+          enteredAt: sessionEnteredAtRef.current,
+          isOnline: true,
+          lastActiveAt: new Date().toISOString(),
+        }).catch(() => {});
+      }
+    }, 20000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        const nowIso = new Date().toISOString();
+        const actions = pushActivityLog('Sahifani yopdi / orqaga o‘tdi');
+        syncUpdateDeviceActivity({
+          deviceId: currentDevice.deviceId,
+          isOnline: false,
+          leftAt: nowIso,
+          lastActiveAt: nowIso,
+          currentAction: 'Sahifadan chiqdi',
+          recentActions: actions,
+        }).catch(() => {});
+      } else if (document.visibilityState === 'visible') {
+        const nowIso = new Date().toISOString();
+        const actions = pushActivityLog('Saytga qaytdi');
+        syncUpdateDeviceActivity({
+          deviceId: currentDevice.deviceId,
+          isOnline: true,
+          lastActiveAt: nowIso,
+          currentAction: liveContextRef.current.currentAction || 'Saytda faol',
+          recentActions: actions,
+        }).catch(() => {});
+      }
+    };
+
+    const handlePageLeave = () => {
+      sendSessionLeaveKeepalive(currentDevice.deviceId, 'Sahifani yopdi');
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('pagehide', handlePageLeave);
+    window.addEventListener('beforeunload', handlePageLeave);
+
+    return () => {
+      clearInterval(heartbeat);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('pagehide', handlePageLeave);
+      window.removeEventListener('beforeunload', handlePageLeave);
+    };
+  }, [currentDevice, currentView, pushActivityLog, reportSessionActivity]);
+
   // Sessions and Device Management Handlers
   const handleRegisterSession = async (session: Partial<TeacherSession> & { deviceId: string }) => {
     if (!session.deviceId) return;
-    const existing = sessionsRef.current.find(s => s.deviceId === session.deviceId);
+    const directBlocked = directBlockedRef.current?.deviceId === session.deviceId ? directBlockedRef.current : null;
+    const hwBlocked = blockedSessionsRef.current.find(
+      s => s.isBlocked && s.blockHardware !== false && s.hardwareId && s.hardwareId === (session.hardwareId || currentDevice.hardwareId)
+    );
+    const nowIso = new Date().toISOString();
+    liveContextRef.current.teacherName = session.teacherName || liveContextRef.current.teacherName;
+    liveContextRef.current.className = session.className || liveContextRef.current.className;
+    liveContextRef.current.classId = session.classId || liveContextRef.current.classId;
+    if (session.currentAction) {
+      liveContextRef.current.currentAction = session.currentAction;
+      pushActivityLog(session.currentAction);
+    }
+
+    const effectiveBlocked = directBlocked || hwBlocked;
     const sessionToSave: TeacherSession = {
       id: session.id || session.deviceId,
       deviceId: session.deviceId,
+      hardwareId: session.hardwareId || currentDevice.hardwareId,
       teacherName: session.teacherName || '',
       className: session.className || '',
       classId: session.classId || '',
-      deviceName: session.deviceName || '',
-      browser: session.browser || '',
-      os: session.os || '',
-      screen: session.screen || '',
-      lastActiveAt: session.lastActiveAt || new Date().toISOString(),
-      createdAt: existing ? existing.createdAt : (session.createdAt || new Date().toISOString()),
-      isBlocked: existing ? Boolean(existing.isBlocked) : Boolean(session.isBlocked),
-      ...(existing?.blockedReason
-        ? { blockedReason: existing.blockedReason }
+      deviceName: session.deviceName || currentDevice.deviceName,
+      browser: session.browser || currentDevice.browser,
+      os: session.os || currentDevice.os,
+      screen: session.screen || currentDevice.screen,
+      cpuCores: session.cpuCores ?? currentDevice.cpuCores,
+      gpuRenderer: session.gpuRenderer || currentDevice.gpuRenderer,
+      isOnline: true,
+      enteredAt: sessionEnteredAtRef.current,
+      lastActiveAt: session.lastActiveAt || nowIso,
+      createdAt: session.createdAt || nowIso,
+      currentAction: session.currentAction || 'Saytda faol',
+      currentRole: session.currentRole || 'teacher',
+      recentActions: sessionRecentActionsRef.current,
+      isBlocked: Boolean(effectiveBlocked?.isBlocked || session.isBlocked),
+      ...(effectiveBlocked?.blockedReason
+        ? { blockedReason: effectiveBlocked.blockedReason, blockHardware: effectiveBlocked.blockHardware ?? true }
         : session.blockedReason
         ? { blockedReason: session.blockedReason }
         : {}),
     };
 
-    setSessions(prev => {
-      const filtered = prev.filter(s => s.deviceId !== session.deviceId);
-      return [sessionToSave, ...filtered];
-    });
     try {
       await syncSaveSession(sessionToSave);
     } catch (e) {
@@ -624,31 +951,32 @@ export default function App() {
     }
   };
 
-  const handleToggleBlockDevice = async (deviceId: string, isBlocked: boolean, reason?: string) => {
-    setSessions(prev => prev.map(s => s.deviceId === deviceId ? { ...s, isBlocked, blockedReason: reason } : s));
-    await syncSetDeviceBlockStatus(deviceId, isBlocked, reason);
+  // Cross-browser hardware-aware block & unblock
+  const handleToggleBlockDevice = async (
+    deviceId: string,
+    isBlocked: boolean,
+    reason?: string,
+    matchingDeviceIds?: string[]
+  ) => {
+    const idsToUpdate =
+      matchingDeviceIds && matchingDeviceIds.length > 0
+        ? Array.from(new Set(matchingDeviceIds))
+        : [deviceId];
+
+    await Promise.all(idsToUpdate.map(id => syncSetDeviceBlockStatus(id, isBlocked, reason)));
   };
 
   const handleDeleteSession = async (sessionId: string) => {
-    setSessions(prev => prev.filter(s => s.id !== sessionId && s.deviceId !== sessionId));
     await syncDeleteSession(sessionId);
   };
 
   const handleUnlockExternalTeacher = async (deviceId: string) => {
-    setSessions(prev => prev.map(s => {
-      if (s.deviceId === deviceId) {
-        return {
-          ...s,
-          allowClassChangeOnce: true,
-        };
-      }
-      return s;
-    }));
-    const targetSession = sessions.find(s => s.deviceId === deviceId);
-    if (targetSession) {
-      const updated = { ...targetSession, allowClassChangeOnce: true };
-      await syncSaveSession(updated);
-    }
+    try {
+      await syncUpdateDeviceActivity({
+        deviceId,
+        allowClassChangeOnce: true,
+      });
+    } catch {}
     // Also save device-specific unlock flag in localStorage
     try {
       localStorage.setItem(`unlock_external_device_${deviceId}`, 'true');
@@ -807,12 +1135,34 @@ export default function App() {
     localStorage.removeItem(STORAGE_TEACHERS_KEY);
   };
 
+  // Global Real-Time Block Enforcement (across ALL browsers on same hardware & without page refresh)
+  const activeBlockedSession = useMemo(() => {
+    if (directBlockedSession?.isBlocked) return directBlockedSession;
+    return blockedSessions.find(
+      s =>
+        s.isBlocked &&
+        (s.deviceId === currentDevice.deviceId ||
+          (s.blockHardware !== false && s.hardwareId && s.hardwareId === currentDevice.hardwareId))
+    ) || null;
+  }, [directBlockedSession, blockedSessions, currentDevice.deviceId, currentDevice.hardwareId]);
+
+  if (activeBlockedSession && !(currentView === 'admin' && isAdminAuthenticated)) {
+    return (
+      <BlockedAccessOverlay
+        session={activeBlockedSession}
+        onRefresh={() => window.location.reload()}
+      />
+    );
+  }
+
   return (
-    <div className="min-h-screen apple-canvas text-slate-900 flex flex-col font-sans selection:bg-blue-600 selection:text-white">
-      
+    <div className="min-h-screen apple-canvas text-slate-900 flex flex-col font-sans selection:bg-blue-600 selection:text-white relative">
+      {/* Ultra Kosmik Grafika Engine (Mounts ONLY when graphicsTier === 'ultra') */}
+      <UltraWorldOverlay active={graphicsTier === 'ultra'} />
+
       {/* Admin Mode Sleek Top Bar (Frosted Dark Glass - Yellow replaced with Apple Pro style) */}
       {currentView === 'admin' && (
-        <div className="bg-slate-900/90 backdrop-blur-xl text-slate-200 px-4 py-2 text-xs font-medium flex items-center justify-between shadow-xs border-b border-white/10">
+        <div className="bg-slate-900/90 backdrop-blur-xl text-slate-200 px-4 py-2 text-xs font-medium flex items-center justify-between shadow-xs border-b border-white/10 relative z-20">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
             <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
@@ -834,55 +1184,79 @@ export default function App() {
 
       {/* Apple Pro Frosted Glass Header */}
       <header className="sticky top-0 z-40 apple-glass border-b border-white/60 backdrop-blur-2xl">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-2">
           
           {/* Logo & School Platform Name */}
-          <div className="flex items-center gap-3.5">
+          <div className="flex items-center gap-3.5 min-w-0">
             <div className="w-10 h-10 rounded-xl apple-btn-blue flex items-center justify-center font-black text-white text-base shadow-md shadow-blue-500/25 flex-shrink-0 animate-bounce-subtle">
               <GraduationCap className="w-5 h-5" />
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <span className="font-extrabold text-slate-900 text-base sm:text-lg tracking-tight">
+                <span className="font-extrabold text-slate-900 text-base sm:text-lg tracking-tight truncate">
                   Bir Million O'zbek Dasturchilari
                 </span>
-                <span className="hidden sm:inline-flex items-center text-[11px] font-semibold text-blue-700 bg-blue-50/80 px-2.5 py-0.5 rounded-md border border-blue-200/60">
+                <span className="hidden sm:inline-flex items-center text-[11px] font-semibold text-blue-700 bg-blue-50/80 px-2.5 py-0.5 rounded-md border border-blue-200/60 flex-shrink-0">
                   Coursera Ta'lim Portali
                 </span>
               </div>
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-slate-500 truncate">
                 Sinf rahbarlari va sertifikatlashtirish monitoring tizimi
               </p>
             </div>
           </div>
 
-          {/* Right badge: School Year */}
-          <div className="text-right">
-            <span className="text-xs font-bold text-slate-800 block">
-              2025–2026 o'quv yili
-            </span>
-            <span className="text-[11px] text-emerald-700 font-semibold flex items-center justify-end gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-xs shadow-emerald-400 animate-pulse"></span>
-              <span>Tizim faol</span>
-            </span>
+          {/* Right controls: Graphics selector + School Year */}
+          <div className="flex items-center gap-3 flex-shrink-0">
+            <button
+              type="button"
+              onClick={() => setIsGraphicsSettingsOpen(true)}
+              className={`px-2.5 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                graphicsTier === 'ultra'
+                  ? 'bg-purple-600 text-white border-purple-600 shadow-xs'
+                  : graphicsTier === 'lite'
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                  : 'bg-white/90 text-slate-700 border-slate-200 hover:bg-slate-50'
+              }`}
+              title="Grafika va animatsiya rejimini tanlash"
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">
+                {graphicsTier === 'ultra' ? 'Ultra' : graphicsTier === 'lite' ? 'Yengil' : "O'rtacha"}
+              </span>
+            </button>
+
+            <div className="text-right hidden xs:block sm:block">
+              <span className="text-xs font-bold text-slate-800 block">
+                2025–2026 o'quv yili
+              </span>
+              <span className="text-[11px] text-emerald-700 font-semibold flex items-center justify-end gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-xs shadow-emerald-400 animate-pulse"></span>
+                <span>Tizim faol</span>
+              </span>
+            </div>
           </div>
 
         </div>
       </header>
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-5xl w-full mx-auto px-3 sm:px-6 py-6">
+      <main className="flex-1 max-w-5xl w-full mx-auto px-3 sm:px-6 py-6 relative z-10">
         {currentView === 'teacher' ? (
           <TeacherPortal
             classes={classes}
             students={students}
-            sessions={sessions}
             messages={messages}
             onRegisterSession={handleRegisterSession}
             onMarkMessageAsRead={handleMarkMessageAsRead}
             onOpenStudentModal={(student) => setActiveStudentModal(student)}
             onToggleStudentPayment={handleToggleStudentPayment}
             onSaveStudent={handleSaveStudent}
+            onSaveUpdatedStudents={handleSaveBatchStudents}
+            onSessionActivity={(info) => {
+              childActivityReportedRef.current = true;
+              reportSessionActivity({ ...info, role: 'teacher' });
+            }}
           />
         ) : (
           <div className="animate-fade-in">
@@ -890,10 +1264,10 @@ export default function App() {
               classes={classes}
               students={students}
               emailPool={emailPool}
-              sessions={sessions}
               messages={messages}
               telegramUsers={telegramUsers}
               teacherCertificates={teacherCertificates}
+              currentDeviceId={currentDevice.deviceId}
               onRefreshTelegramUsers={fetchTelegramStatus}
               onOpenStudentModal={(student) => setActiveStudentModal(student)}
               onOpenPaymentModal={(classGroup) => setActivePaymentClass(classGroup)}
@@ -921,8 +1295,17 @@ export default function App() {
               onAssignBatchTeacherEmails={handleAssignBatchTeacherEmails}
               onAddGeneratedEmails={handleAddGeneratedEmails}
               onSaveStudent={handleSaveStudent}
+              onSaveBatchStudents={handleSaveBatchStudents}
               onSaveClassAndStudents={handleSaveClassAndStudents}
               onUnlockExternalTeacher={handleUnlockExternalTeacher}
+              auditTargetClass={auditTargetClass}
+              onClearAuditTarget={() => setAuditTargetClass(null)}
+              graphicsTier={graphicsTier}
+              onOpenGraphicsSettings={() => setIsGraphicsSettingsOpen(true)}
+              onSessionActivity={(info) => {
+                childActivityReportedRef.current = true;
+                reportSessionActivity({ ...info, role: 'admin' });
+              }}
             />
           </div>
         )}
@@ -1026,7 +1409,14 @@ export default function App() {
           students={students}
           isOpen={true}
           onClose={() => setActivePaymentClass(null)}
-          onUpdatePayment={(classId, newAmount, studentPayments) => handleUpdatePayment(classId, newAmount, studentPayments)}
+          onUpdatePayment={(classId, newAmount, studentPayments, paymentMeta) =>
+            handleUpdatePayment(classId, newAmount, studentPayments, paymentMeta)
+          }
+          onOpenClassDateAudit={(cg) => {
+            setActivePaymentClass(null);
+            setAuditTargetClass(cg);
+            setCurrentView('admin');
+          }}
         />
       )}
 
@@ -1074,6 +1464,13 @@ export default function App() {
           onSuccess={handleAdminLoginSuccess}
         />
       )}
+
+      <GraphicsSettingsModal
+        isOpen={isGraphicsSettingsOpen}
+        currentTier={graphicsTier}
+        onSelectTier={(tier) => setGraphicsTier(tier)}
+        onClose={() => setIsGraphicsSettingsOpen(false)}
+      />
     </div>
   );
 }

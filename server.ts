@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { Browser } from 'puppeteer';
@@ -36,6 +36,47 @@ import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getFirestore, doc, updateDoc } from 'firebase/firestore';
 
 let sharedBrowser: Browser | null = null;
+let browserIdleTimer: NodeJS.Timeout | null = null;
+const BROWSER_IDLE_TIMEOUT_MS = 45_000;
+
+async function closeSharedBrowser() {
+  if (browserIdleTimer) {
+    clearTimeout(browserIdleTimer);
+    browserIdleTimer = null;
+  }
+  if (sharedBrowser) {
+    const b = sharedBrowser;
+    sharedBrowser = null;
+    try {
+      await b.close();
+    } catch {}
+    try {
+      b.process()?.kill('SIGKILL');
+    } catch {}
+    console.log('🧹 [RAM Optimization] Idle headless Chromium closed to free memory.');
+  }
+}
+
+function scheduleBrowserIdleClose() {
+  if (browserIdleTimer) {
+    clearTimeout(browserIdleTimer);
+  }
+  browserIdleTimer = setTimeout(async () => {
+    try {
+      if (!sharedBrowser) return;
+      const pages = await sharedBrowser.pages().catch(() => []);
+      // Default blank tab is <= 1 page; only close when no active scraping tabs remain
+      if (pages.length <= 1) {
+        await closeSharedBrowser();
+      } else {
+        scheduleBrowserIdleClose();
+      }
+    } catch {
+      await closeSharedBrowser();
+    }
+  }, BROWSER_IDLE_TIMEOUT_MS);
+  browserIdleTimer.unref?.();
+}
 
 // Direct server-side Firestore backup save helper
 async function saveCertificateDirectToFirestore(studentId: string, certUrl: string, certId?: string) {
@@ -64,8 +105,12 @@ async function saveCertificateDirectToFirestore(studentId: string, certUrl: stri
   }
 }
 
-// Resilient browser manager with health-ping, auto-recovery and zombie-killing
+// Resilient browser manager with health-ping, auto-recovery and automatic idle RAM release
 async function getBrowser(): Promise<Browser> {
+  if (browserIdleTimer) {
+    clearTimeout(browserIdleTimer);
+    browserIdleTimer = null;
+  }
   let isAlive = false;
   if (sharedBrowser && sharedBrowser.connected) {
     try {
@@ -80,15 +125,7 @@ async function getBrowser(): Promise<Browser> {
   }
 
   if (!isAlive) {
-    if (sharedBrowser) {
-      try {
-        await sharedBrowser.close();
-      } catch {}
-      try {
-        sharedBrowser.process()?.kill('SIGKILL');
-      } catch {}
-      sharedBrowser = null;
-    }
+    await closeSharedBrowser();
 
     sharedBrowser = (await puppeteerExtra.launch({
       headless: true,
@@ -104,6 +141,7 @@ async function getBrowser(): Promise<Browser> {
       ],
     })) as unknown as Browser;
   }
+  scheduleBrowserIdleClose();
   return sharedBrowser as Browser;
 }
 
@@ -1082,22 +1120,35 @@ Javobni FAQAT toza JSON formatida qaytaring:
         const page = await browser.newPage();
         try {
           await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 2 });
-          await page.goto(trimmedUrl, { waitUntil: 'networkidle2', timeout: 20000 });
+          await page.goto(trimmedUrl, { waitUntil: 'networkidle2', timeout: 22000 }).catch(() =>
+            page.goto(trimmedUrl, { waitUntil: 'domcontentloaded', timeout: 15000 })
+          );
+
+          await page
+            .waitForSelector('img[src*="CERTIFICATE_LANDING_PAGE"], img[alt*="certificate" i], [class*="certificate" i], canvas, svg', {
+              timeout: 4000,
+            })
+            .catch(() => {});
 
           // First, check if the exact certificate <img> is present in the DOM
           const certImageSrc = await page.evaluate(() => {
             const imgs = Array.from(document.querySelectorAll('img'));
-            const cert = imgs.find(img => 
-              (img.src.includes('CERTIFICATE_LANDING_PAGE') || img.src.includes('coursera_assets')) &&
-              (img.naturalWidth > 400 || img.width > 400)
-            ) || imgs.find(img => 
-              (img.alt?.toLowerCase().includes('certificate') || img.className?.toLowerCase().includes('certificate')) &&
-              (img.naturalWidth > 400 || img.width > 400)
-            );
+            const cert =
+              imgs.find(
+                img =>
+                  (img.src.includes('CERTIFICATE_LANDING_PAGE') || img.src.includes('coursera_assets')) &&
+                  (img.naturalWidth > 400 || img.width > 400)
+              ) ||
+              imgs.find(
+                img =>
+                  (img.alt?.toLowerCase().includes('certificate') ||
+                    (typeof img.className === 'string' && img.className.toLowerCase().includes('certificate'))) &&
+                  (img.naturalWidth > 400 || img.width > 400)
+              );
             return cert ? cert.src : null;
           });
 
-          if (certImageSrc) {
+          if (certImageSrc && certImageSrc.startsWith('http')) {
             const imgRes = await fetch(certImageSrc, { signal: AbortSignal.timeout(8000) });
             if (imgRes.ok) {
               const buf = await imgRes.arrayBuffer();
@@ -1110,8 +1161,8 @@ Javobni FAQAT toza JSON formatida qaytaring:
             }
           }
 
-          // Second, screenshot ONLY the certificate element / card (excluding header, footer, buttons)
-          const certSelector = [
+          // Second, screenshot ONLY the certificate element / card using Puppeteer DOM handles (runs on page, NOT in Node!)
+          const candidateSelectors = [
             'img[src*="CERTIFICATE_LANDING_PAGE"]',
             'img[alt*="certificate" i]',
             '[data-testid="certificate-image"]',
@@ -1119,35 +1170,56 @@ Javobni FAQAT toza JSON formatida qaytaring:
             '[class*="CertificateImage"]',
             '[class*="certificate-container"]',
             '[class*="CertificatePreview"]',
-            '[class*="certificate"]'
-          ].find(s => document.querySelector(s));
+            '[class*="certificate" i]',
+            'canvas',
+            'main'
+          ];
 
-          const elementToCapture = certSelector ? await page.$(certSelector) : null;
-          const targetHandle = elementToCapture || page;
+          let elementToCapture = null;
+          for (const sel of candidateSelectors) {
+            const handle = await page.$(sel);
+            if (handle) {
+              const box = await handle.boundingBox().catch(() => null);
+              if (box && box.width >= 200 && box.height >= 150) {
+                elementToCapture = handle;
+                break;
+              }
+              await handle.dispose().catch(() => {});
+            }
+          }
 
-          const buf = await targetHandle.screenshot({ type: 'jpeg', quality: 95 });
-          if (buf && buf.length > 5000) {
-            const base64 = Buffer.from(buf).toString('base64');
-            return res.json({
-              success: true,
-              imageBase64: `data:image/jpeg;base64,${base64}`
-            });
+          try {
+            const buf = elementToCapture
+              ? await elementToCapture.screenshot({ type: 'jpeg', quality: 94 })
+              : await page.screenshot({ type: 'jpeg', quality: 92 });
+
+            if (buf && buf.length > 5000) {
+              const base64 = Buffer.from(buf).toString('base64');
+              return res.json({
+                success: true,
+                imageBase64: `data:image/jpeg;base64,${base64}`
+              });
+            }
+          } finally {
+            if (elementToCapture) {
+              await elementToCapture.dispose().catch(() => {});
+            }
           }
         } finally {
           await page.close().catch(() => {});
         }
-      } catch (e) {
-        console.warn("Headless Puppeteer element capture failed:", e);
+      } catch (e: any) {
+        console.warn("Headless Puppeteer element capture skipped:", e?.message || e);
       }
 
       // 5. Microlink API screenshot as external backup
       try {
         const microUrl = `https://api.microlink.io?url=${encodeURIComponent(trimmedUrl)}&screenshot=true&viewport.width=1280&viewport.height=900&viewport.deviceScaleFactor=2`;
-        const microRes = await fetch(microUrl, { signal: AbortSignal.timeout(10000) });
+        const microRes = await fetch(microUrl, { signal: AbortSignal.timeout(16000) });
         if (microRes.ok) {
           const microJson: any = await microRes.json();
           if (microJson.status === 'success' && microJson.data?.screenshot?.url) {
-            const imgRes = await fetch(microJson.data.screenshot.url, { signal: AbortSignal.timeout(8000) });
+            const imgRes = await fetch(microJson.data.screenshot.url, { signal: AbortSignal.timeout(10000) });
             if (imgRes.ok) {
               const buf = await imgRes.arrayBuffer();
               const base64 = Buffer.from(buf).toString('base64');
@@ -1158,8 +1230,8 @@ Javobni FAQAT toza JSON formatida qaytaring:
             }
           }
         }
-      } catch (e) {
-        console.warn("Microlink capture failed:", e);
+      } catch (e: any) {
+        console.log("Microlink backup timed out or unavailable, using SVG fallback:", e?.message || e);
       }
 
       // 6. Graceful fallback flag so client generates crisp SVG certificate
@@ -1314,6 +1386,518 @@ Javobni FAQAT toza JSON formatida qaytaring:
         warning: err.message,
         url: req.body?.url,
       });
+    }
+  });
+
+  // ==========================================
+  // OFFICIAL CERTIFICATE DATE EXTRACTOR (QR / PAGE COMPLETION DATE)
+  // ==========================================
+  const MONTH_MAP: Record<string, number> = {
+    january: 1, jan: 1, yanvar: 1, yan: 1, январь: 1, января: 1,
+    february: 2, feb: 2, fevral: 2, fev: 2, февраль: 2, февраля: 2,
+    march: 3, mar: 3, mart: 3, март: 3, марта: 3,
+    april: 4, apr: 4, aprel: 4, апрель: 4, апреля: 4,
+    may: 5, май: 5, мая: 5,
+    june: 6, jun: 6, iyun: 6, июнь: 6, июня: 6,
+    july: 7, jul: 7, iyul: 7, июль: 7, июля: 7,
+    august: 8, aug: 8, avgust: 8, avg: 8, август: 8, августа: 8,
+    september: 9, sep: 9, sept: 9, sentabr: 9, sentyabr: 9, sen: 9, сентябрь: 9, сентября: 9,
+    october: 10, oct: 10, oktabr: 10, oktyabr: 10, okt: 10, октябрь: 10, октября: 10,
+    november: 11, nov: 11, noyabr: 11, noy: 11, ноябрь: 11, ноября: 11,
+    december: 12, dec: 12, dekabr: 12, dek: 12, декабрь: 12, декабря: 12,
+  };
+
+  function toValidISODate(year: number, month: number, day: number): string | null {
+    const maxYear = new Date().getFullYear() + 1;
+    if (year < 2020 || year > maxYear || month < 1 || month > 12 || day < 1 || day > 31) {
+      return null;
+    }
+    const dt = new Date(Date.UTC(year, month - 1, day));
+    if (
+      dt.getUTCFullYear() !== year ||
+      dt.getUTCMonth() !== month - 1 ||
+      dt.getUTCDate() !== day
+    ) {
+      return null;
+    }
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  }
+
+  function extractDatesFromText(rawText: string): { iso: string; raw: string }[] {
+    if (!rawText) return [];
+    const results: { iso: string; raw: string }[] = [];
+    const seen = new Set<string>();
+    const push = (iso: string | null, raw: string) => {
+      if (iso && !seen.has(iso)) {
+        seen.add(iso);
+        results.push({ iso, raw: raw.trim() });
+      }
+    };
+
+    // 1. YYYY-MM-DD / YYYY.MM.DD / YYYY/MM/DD
+    for (const m of rawText.matchAll(/\b(202[0-9])[-./](\d{1,2})[-./](\d{1,2})\b/g)) {
+      push(toValidISODate(Number(m[1]), Number(m[2]), Number(m[3])), m[0]);
+    }
+
+    // 2. DD.MM.YYYY / DD/MM/YYYY / DD-MM-YYYY
+    for (const m of rawText.matchAll(/\b(\d{1,2})[./-](\d{1,2})[./-](202[0-9])\b/g)) {
+      push(toValidISODate(Number(m[3]), Number(m[2]), Number(m[1])), m[0]);
+    }
+
+    // 3. Uzbek "2026-yil 15-may" or "2026 yil 15 may"
+    for (const m of rawText.matchAll(/\b(202[0-9])\s*[-\s]?yil(?:da)?\s*,?\s*(\d{1,2})\s*[-\s]?([a-zA-Zʻ’'а-яА-ЯёЁ]+)\b/gi)) {
+      const month = MONTH_MAP[m[3].toLowerCase()];
+      if (month) push(toValidISODate(Number(m[1]), month, Number(m[2])), m[0]);
+    }
+
+    // 4. "May 15, 2026" or "May 15 2026"
+    for (const m of rawText.matchAll(/\b([a-zA-Zа-яА-ЯёЁ]{3,12})\s+(\d{1,2})\s*,?\s+(202[0-9])\b/gi)) {
+      const month = MONTH_MAP[m[1].toLowerCase()];
+      if (month) push(toValidISODate(Number(m[3]), month, Number(m[2])), m[0]);
+    }
+
+    // 5. "15 May 2026" / "15-may, 2026" / "15 мая 2026"
+    for (const m of rawText.matchAll(/\b(\d{1,2})\s*[-\s]?\s*([a-zA-Zа-яА-ЯёЁ]{3,12})\s*,?\s*(202[0-9])\b/gi)) {
+      const month = MONTH_MAP[m[2].toLowerCase()];
+      if (month) push(toValidISODate(Number(m[3]), month, Number(m[1])), m[0]);
+    }
+
+    return results;
+  }
+
+  async function extractDateWithGeminiVision(
+    imageBuffers: Array<{ mimeType: string; data: Buffer }>,
+    hintUrl: string
+  ): Promise<{ date: string | null; rawDateText: string; recipientName: string | null } | null> {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey || imageBuffers.length === 0) return null;
+
+    try {
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+
+      const parts: any[] = imageBuffers.map(img => ({
+        inlineData: {
+          mimeType: img.mimeType,
+          data: img.data.toString('base64'),
+        },
+      }));
+
+      parts.push({
+        text: `Inspect these certificate image(s) from ${hintUrl}.
+Look carefully at the top-right corner directly beneath/near the QR code (for omp.aistudy.uz / AI Leaders certificates) OR the completion/issue date printed on the certificate (for Coursera).
+Extract:
+1. "date": the exact certificate completion/issue date formatted strictly as YYYY-MM-DD. If no clear certificate date is visible anywhere in the image, return null. NEVER guess or use today's date.
+2. "rawDateText": exact date text printed on the certificate (e.g. "15.05.2026" or "May 15, 2026").
+3. "recipientName": the student name printed on the certificate if visible, else null.`,
+      });
+
+      const models = ['gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-4-hydrogen'];
+      for (const model of models) {
+        try {
+          const resp = await Promise.race([
+            ai.models.generateContent({
+              model,
+              contents: { parts },
+              config: {
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    date: { type: Type.STRING, nullable: true },
+                    rawDateText: { type: Type.STRING },
+                    recipientName: { type: Type.STRING, nullable: true },
+                  },
+                  required: ['rawDateText'],
+                },
+              },
+            }),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('Gemini Vision timeout')), 15000)),
+          ]);
+
+          const txt = (resp.text || '').trim();
+          if (!txt) continue;
+          const parsed = JSON.parse(txt);
+          let isoDate: string | null = null;
+          if (parsed.date && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date)) {
+            const [y, mo, d] = parsed.date.split('-').map(Number);
+            isoDate = toValidISODate(y, mo, d);
+          }
+          if (!isoDate && parsed.rawDateText) {
+            const fromRaw = extractDatesFromText(parsed.rawDateText);
+            if (fromRaw.length > 0) isoDate = fromRaw[0].iso;
+          }
+          if (isoDate) {
+            return {
+              date: isoDate,
+              rawDateText: parsed.rawDateText || isoDate,
+              recipientName: parsed.recipientName || null,
+            };
+          }
+          return null;
+        } catch (err: any) {
+          console.warn(`[CertDate Vision ${model}] fallback:`, err?.message || err);
+        }
+      }
+    } catch (e: any) {
+      console.warn('[CertDate Vision] error:', e?.message || e);
+    }
+    return null;
+  }
+
+  async function extractOfficialCertificateDate(rawUrl: string): Promise<{
+    success: boolean;
+    certificateDate?: string;
+    rawDateText?: string;
+    recipientName?: string | null;
+    source?: string;
+    error?: string;
+  }> {
+    const trimmedUrl = (rawUrl || '').trim();
+    if (!trimmedUrl.startsWith('http://') && !trimmedUrl.startsWith('https://')) {
+      return { success: false, error: "Noto'g'ri havola" };
+    }
+
+    const isCoursera = /coursera\.org/i.test(trimmedUrl) || /coursera_assets/i.test(trimmedUrl);
+    const isAiStudy = /aistudy\.uz/i.test(trimmedUrl) || /certificate\?id=/i.test(trimmedUrl);
+
+    // LAYER 1: Fast HTTP HTML / JSON / S3 image extraction (no browser launch when SSR/S3 works)
+    try {
+      if (isCoursera) {
+        const res = await fetch(trimmedUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(7000),
+        });
+
+        if (res.ok) {
+          const finalUrl = res.url;
+          const html = await res.text();
+
+          // Check explicit completion JSON keys or "Completed by ... on Month DD, YYYY"
+          const completionPhraseMatch = html.match(/Completed\s+by\s+[^<]{2,80}?\bon\s+([A-Za-z]+\s+\d{1,2},?\s+202\d|\d{1,2}\s+[A-Za-z]+\s+202\d)/i);
+          if (completionPhraseMatch) {
+            const parsed = extractDatesFromText(completionPhraseMatch[1]);
+            if (parsed.length > 0) {
+              return { success: true, certificateDate: parsed[0].iso, rawDateText: parsed[0].raw, source: 'coursera_html' };
+            }
+          }
+
+          const jsonDateMatch = html.match(/"(?:completedAt|completionDate|dateIssued|issuedAt|earnedAt|certifiedAt)"\s*:\s*(?:"([^"]+)"|(\d{13}))/i);
+          if (jsonDateMatch) {
+            if (jsonDateMatch[1]) {
+              const parsed = extractDatesFromText(jsonDateMatch[1]);
+              if (parsed.length > 0) {
+                return { success: true, certificateDate: parsed[0].iso, rawDateText: parsed[0].raw, source: 'coursera_json' };
+              }
+            } else if (jsonDateMatch[2]) {
+              const dt = new Date(Number(jsonDateMatch[2]));
+              if (!isNaN(dt.getTime())) {
+                const iso = toValidISODate(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
+                if (iso) return { success: true, certificateDate: iso, rawDateText: iso, source: 'coursera_json' };
+              }
+            }
+          }
+
+          // S3 Coursera image + Gemini Vision
+          const idMatch = finalUrl.match(/verify\/([A-Za-z0-9_-]+)/i) || trimmedUrl.match(/verify\/([A-Za-z0-9_-]+)/i);
+          if (idMatch && idMatch[1]) {
+            const s3Url = `https://s3.amazonaws.com/coursera_assets/meta_images/generated/CERTIFICATE_LANDING_PAGE/CERTIFICATE_LANDING_PAGE~${idMatch[1]}/CERTIFICATE_LANDING_PAGE~${idMatch[1]}.jpeg`;
+            const imgRes = await fetch(s3Url, { signal: AbortSignal.timeout(7000) }).catch(() => null);
+            if (imgRes && imgRes.ok) {
+              const buf = Buffer.from(await imgRes.arrayBuffer());
+              const visionRes = await extractDateWithGeminiVision([{ mimeType: 'image/jpeg', data: buf }], trimmedUrl);
+              if (visionRes?.date) {
+                return {
+                  success: true,
+                  certificateDate: visionRes.date,
+                  rawDateText: visionRes.rawDateText,
+                  recipientName: visionRes.recipientName,
+                  source: 'vision_s3',
+                };
+              }
+            }
+          }
+        }
+      } else if (isAiStudy) {
+        // Check if omp.aistudy.uz embeds certificate metadata directly or exposes an API
+        const uuidMatch = trimmedUrl.match(/[?&]id=([a-zA-Z0-9-]{8,64})/i) || trimmedUrl.match(/certificate\/([a-zA-Z0-9-]{8,64})/i);
+        if (uuidMatch && uuidMatch[1]) {
+          const certUuid = uuidMatch[1];
+          const originMatch = trimmedUrl.match(/^(https?:\/\/[^/]+)/i);
+          const origin = originMatch ? originMatch[1] : 'https://omp.aistudy.uz';
+          const candidateApis = [
+            `${origin}/api/certificate?id=${encodeURIComponent(certUuid)}`,
+            `${origin}/api/certificates/${encodeURIComponent(certUuid)}`,
+            `${origin}/api/v1/certificate/${encodeURIComponent(certUuid)}`,
+          ];
+          for (const apiUrl of candidateApis) {
+            try {
+              const apiRes = await fetch(apiUrl, {
+                headers: { Accept: 'application/json' },
+                signal: AbortSignal.timeout(3000),
+              });
+              if (apiRes.ok) {
+                const ctype = apiRes.headers.get('content-type') || '';
+                if (ctype.includes('json')) {
+                  const data: any = await apiRes.json();
+                  const payload = data?.data || data?.certificate || data?.result || data;
+                  const rawCandidate =
+                    payload?.issuedAt ||
+                    payload?.issued_at ||
+                    payload?.completedAt ||
+                    payload?.completed_at ||
+                    payload?.createdAt ||
+                    payload?.created_at ||
+                    payload?.date;
+                  if (typeof rawCandidate === 'string') {
+                    const parsed = extractDatesFromText(rawCandidate);
+                    if (parsed.length > 0) {
+                      return {
+                        success: true,
+                        certificateDate: parsed[0].iso,
+                        rawDateText: parsed[0].raw,
+                        recipientName: payload?.fullName || payload?.full_name || payload?.studentName || null,
+                        source: 'aistudy_api',
+                      };
+                    }
+                  }
+                }
+              }
+            } catch {
+              // ignore non-existent API path
+            }
+          }
+        }
+      }
+    } catch {
+      // Proceed to Puppeteer DOM + Vision
+    }
+
+    // LAYER 2 & 3: Headless Puppeteer render -> Top-Right QR region DOM inspection + Gemini Vision on screenshot
+    let page: any = null;
+    try {
+      const browser = await getBrowser();
+      page = await browser.newPage();
+      await page.setViewport({ width: 1366, height: 960, deviceScaleFactor: 2 });
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+
+      await page.goto(trimmedUrl, { waitUntil: 'networkidle2', timeout: 22000 }).catch(() =>
+        page.goto(trimmedUrl, { waitUntil: 'domcontentloaded', timeout: 15000 })
+      );
+
+      // Give React / Vue / custom canvas fonts time to paint QR + date text
+      await page
+        .waitForSelector('svg, canvas, img, [class*="cert" i], [class*="date" i]', { timeout: 5000 })
+        .catch(() => {});
+      await new Promise(r => setTimeout(r, 1100));
+
+      const domInspection = await page.evaluate(() => {
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const topRightTexts: string[] = [];
+        const qrNearbyTexts: string[] = [];
+
+        // Locate potential QR code element in top-right / right side
+        const qrCandidates = Array.from(document.querySelectorAll('canvas, svg, img')).filter(el => {
+          const r = el.getBoundingClientRect();
+          const aspect = r.height > 0 ? r.width / r.height : 0;
+          return r.width >= 45 && r.width <= 320 && aspect >= 0.7 && aspect <= 1.4 && r.left > vw * 0.4;
+        });
+
+        const qrBoxes = qrCandidates.map(el => el.getBoundingClientRect());
+
+        // Inspect text nodes / leaf elements
+        const allEls = Array.from(document.querySelectorAll('p, span, div, h1, h2, h3, h4, time, small, strong, b, td, text'));
+        for (const el of allEls) {
+          const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          if (!txt || txt.length > 90) continue;
+          // Skip container divs with huge text children
+          if (el.children.length > 3) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) continue;
+
+          // Check proximity directly below or near QR code
+          const nearQr = qrBoxes.some(qb => {
+            const dx = Math.abs((r.left + r.width / 2) - (qb.left + qb.width / 2));
+            const dy = r.top - qb.bottom;
+            return dx < 180 && dy >= -40 && dy <= 140;
+          });
+          if (nearQr) {
+            qrNearbyTexts.push(txt);
+          }
+
+          // Top-right quadrant
+          if (r.left > vw * 0.48 && r.top < vh * 0.65) {
+            topRightTexts.push(txt);
+          }
+        }
+
+        // Also check the main certificate card bounding box for crisp screenshot
+        const cardEl =
+          document.querySelector('[class*="certificate" i], [id*="certificate" i], main, .container, #root > div') ||
+          document.body;
+        const cardRect = cardEl ? cardEl.getBoundingClientRect() : null;
+
+        return {
+          bodyText: (document.body?.innerText || '').slice(0, 6000),
+          qrNearbyTexts: Array.from(new Set(qrNearbyTexts)),
+          topRightTexts: Array.from(new Set(topRightTexts)),
+          qrBox: qrBoxes[0]
+            ? {
+                x: Math.max(0, qrBoxes[0].left - 60),
+                y: Math.max(0, qrBoxes[0].top - 20),
+                width: Math.min(vw, qrBoxes[0].width + 120),
+                height: Math.min(vh, qrBoxes[0].height + 150),
+              }
+            : null,
+          cardBox:
+            cardRect && cardRect.width > 300 && cardRect.height > 200
+              ? {
+                  x: Math.max(0, cardRect.left),
+                  y: Math.max(0, cardRect.top),
+                  width: Math.min(vw, cardRect.width),
+                  height: Math.min(vh, cardRect.height),
+                }
+              : null,
+        };
+      });
+
+      // Check DOM text found directly beneath QR code first
+      const qrDates = extractDatesFromText(domInspection.qrNearbyTexts.join(' | '));
+      if (qrDates.length > 0) {
+        return {
+          success: true,
+          certificateDate: qrDates[0].iso,
+          rawDateText: qrDates[0].raw,
+          source: 'qr_dom',
+        };
+      }
+
+      // Check top-right quadrant DOM text
+      const topRightDates = extractDatesFromText(domInspection.topRightTexts.join(' | '));
+      if (topRightDates.length > 0) {
+        return {
+          success: true,
+          certificateDate: topRightDates[0].iso,
+          rawDateText: topRightDates[0].raw,
+          source: 'topright_dom',
+        };
+      }
+
+      // Capture high-res screenshot (plus cropped QR region if detected) -> Gemini Vision
+      const imagesToAnalyze: Array<{ mimeType: string; data: Buffer }> = [];
+      if (domInspection.qrBox && domInspection.qrBox.width >= 80 && domInspection.qrBox.height >= 60) {
+        try {
+          const qrCrop = (await page.screenshot({
+            type: 'jpeg',
+            quality: 94,
+            clip: domInspection.qrBox,
+          })) as Buffer;
+          if (qrCrop && qrCrop.length > 1000) {
+            imagesToAnalyze.push({ mimeType: 'image/jpeg', data: qrCrop });
+          }
+        } catch {}
+      }
+
+      try {
+        const fullBuf = (await page.screenshot({
+          type: 'jpeg',
+          quality: 90,
+          ...(domInspection.cardBox && domInspection.cardBox.width >= 350 && domInspection.cardBox.height >= 250
+            ? { clip: domInspection.cardBox }
+            : {}),
+        })) as Buffer;
+        if (fullBuf && fullBuf.length > 2000) {
+          imagesToAnalyze.push({ mimeType: 'image/jpeg', data: fullBuf });
+        }
+      } catch {}
+
+      if (imagesToAnalyze.length > 0) {
+        const visionRes = await extractDateWithGeminiVision(imagesToAnalyze, trimmedUrl);
+        if (visionRes?.date) {
+          return {
+            success: true,
+            certificateDate: visionRes.date,
+            rawDateText: visionRes.rawDateText,
+            recipientName: visionRes.recipientName,
+            source: 'vision_qr',
+          };
+        }
+      }
+
+      // Final DOM text fallback (excluding footer copyright years or checking explicit labels)
+      const bodyDates = extractDatesFromText(domInspection.bodyText);
+      if (bodyDates.length > 0) {
+        return {
+          success: true,
+          certificateDate: bodyDates[0].iso,
+          rawDateText: bodyDates[0].raw,
+          source: 'page_text',
+        };
+      }
+
+      return {
+        success: false,
+        error: "Sertifikat sahifasidan olingan sana topilmadi (havolani qo'lda ochib tekshiring)",
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || "Sertifikat havolasini ochishda xatolik",
+      };
+    } finally {
+      if (page) {
+        await page.close().catch(() => {});
+      }
+      scheduleBrowserIdleClose();
+    }
+  }
+
+  app.post('/api/certificates/verify-dates', apiRateLimiter(120), async (req, res) => {
+    try {
+      const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+      if (rawItems.length === 0) {
+        return res.status(400).json({ success: false, error: "Tekshirish uchun sertifikatlar ro'yxati bo'sh" });
+      }
+
+      const items = rawItems.slice(0, 15);
+      const results: Array<{
+        studentId: string;
+        url: string;
+        success: boolean;
+        certificateDate?: string;
+        rawDateText?: string;
+        recipientName?: string | null;
+        source?: string;
+        error?: string;
+      }> = [];
+
+      // Process at concurrency=2 so laptop RAM stays low
+      for (let i = 0; i < items.length; i += 2) {
+        const chunk = items.slice(i, i + 2);
+        const chunkRes = await Promise.all(
+          chunk.map(async (item: any) => {
+            const out = await extractOfficialCertificateDate(item?.url || '');
+            return {
+              studentId: String(item?.studentId || ''),
+              url: String(item?.url || ''),
+              ...out,
+            };
+          })
+        );
+        results.push(...chunkRes);
+      }
+
+      return res.json({ success: true, results });
+    } catch (err: any) {
+      console.error('verify-dates error:', err);
+      return res.status(500).json({ success: false, error: err?.message || 'Server xatosi' });
     }
   });
 
@@ -2636,6 +3220,7 @@ Javobni FAQAT toza JSON formatida qaytaring:
     try {
       stopTelegramBot();
     } catch {}
+    closeSharedBrowser().catch(() => {});
     server.close(() => {
       console.log('HTTP server closed.');
       process.exit(0);

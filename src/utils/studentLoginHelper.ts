@@ -267,6 +267,8 @@ export function getStudentTrackData(student: Student, targetTrack: 'ai' | 'devel
       errorReason: student.devErrorReason || (student.projectType === 'developer' ? (student.errorReason || '') : ''),
       errorImage: student.devErrorImage || (student.projectType === 'developer' ? (student.errorImage || '') : ''),
       certificateDate: student.devCertificateDate,
+      certificateDateVerified: Boolean(student.devCertificateDateVerified && student.devCertificateDate),
+      certificateDateSource: student.devCertificateDateSource,
       certificateNumber: student.devCertificateNumber,
     };
   } else {
@@ -292,6 +294,8 @@ export function getStudentTrackData(student: Student, targetTrack: 'ai' | 'devel
       errorReason: student.aiErrorReason || (student.projectType !== 'developer' ? (student.errorReason || '') : ''),
       errorImage: student.aiErrorImage || (student.projectType !== 'developer' ? (student.errorImage || '') : ''),
       certificateDate: student.aiCertificateDate || student.certificateDate,
+      certificateDateVerified: Boolean(student.aiCertificateDateVerified && (student.aiCertificateDate || student.certificateDate)),
+      certificateDateSource: student.aiCertificateDateSource,
       certificateNumber: student.aiCertificateNumber || student.certificateNumber,
     };
   }

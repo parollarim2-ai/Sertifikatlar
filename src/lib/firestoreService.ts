@@ -1,12 +1,16 @@
 import { 
   collection, 
   doc, 
-  setDoc, 
+  setDoc,
+  updateDoc,
   deleteDoc, 
   onSnapshot,
-  writeBatch
+  writeBatch,
+  query,
+  where
 } from 'firebase/firestore';
 import { db, auth } from './firebase';
+import firebaseConfig from '../../firebase-applet-config.json';
 import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage, TeacherCertificate } from '../types';
 
 export const CLASSES_COLLECTION = 'classes';
@@ -172,6 +176,25 @@ export function subscribeToSessions(onUpdate: (sessions: TeacherSession[]) => vo
   }
 }
 
+// Ultra-light real-time listener for ONLY blocked sessions (cross-browser hardware block with ZERO heartbeat re-renders)
+export function subscribeToBlockedSessions(onUpdate: (blockedSessions: TeacherSession[]) => void) {
+  try {
+    const q = query(collection(db, SESSIONS_COLLECTION), where('isBlocked', '==', true));
+    return onSnapshot(q, (snapshot) => {
+      const items: TeacherSession[] = [];
+      snapshot.forEach((docSnap) => {
+        items.push({ id: docSnap.id, ...docSnap.data() } as TeacherSession);
+      });
+      onUpdate(items);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, SESSIONS_COLLECTION);
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, SESSIONS_COLLECTION);
+    return () => {};
+  }
+}
+
 // Dedicated real-time single-device listener for instant blocking feedback (< 50ms)
 export function subscribeToDeviceSession(deviceId: string, onUpdate: (session: TeacherSession | null) => void) {
   try {
@@ -207,6 +230,31 @@ export function subscribeToTeacherMessages(onUpdate: (messages: TeacherMessage[]
   } catch (err) {
     handleFirestoreError(err, OperationType.GET, TEACHER_MESSAGES_COLLECTION);
     return () => {};
+  }
+}
+
+// Fetch hidden Firestore server createTime / updateTime via Firestore REST API
+export async function fetchDocumentServerTimestamps(
+  collectionName: string,
+  docId: string
+): Promise<{ createTime?: string; updateTime?: string } | null> {
+  try {
+    const cfg = firebaseConfig as Record<string, any>;
+    const projectId = cfg.projectId;
+    const dbId = cfg.firestoreDatabaseId || '(default)';
+    const apiKey = cfg.apiKey;
+    if (!projectId || !apiKey || !docId) return null;
+
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(dbId)}/documents/${encodeURIComponent(collectionName)}/${encodeURIComponent(docId)}?mask.fieldPaths=paidAmount&key=${encodeURIComponent(apiKey)}`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return {
+      createTime: typeof data.createTime === 'string' ? data.createTime : undefined,
+      updateTime: typeof data.updateTime === 'string' ? data.updateTime : undefined,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -299,30 +347,78 @@ export async function syncSaveEmailPool(emails: EmailAccount[]) {
   }
 }
 
-// Update device activity safely without touching isBlocked status
-export async function syncUpdateDeviceActivity(data: {
-  id?: string;
-  deviceId: string;
-  deviceName?: string;
-  browser?: string;
-  os?: string;
-  screen?: string;
-  teacherName?: string;
-  className?: string;
-  classId?: string;
-  lastActiveAt?: string;
-  createdAt?: string;
-}) {
+// Update device activity safely without touching isBlocked status on existing docs
+export async function syncUpdateDeviceActivity(data: Partial<TeacherSession> & { deviceId: string }) {
+  const docRef = doc(db, SESSIONS_COLLECTION, data.deviceId);
+  const nowIso = new Date().toISOString();
+  const payload = removeUndefinedFields({
+    ...data,
+    id: data.deviceId,
+    deviceId: data.deviceId,
+    lastActiveAt: data.lastActiveAt || nowIso,
+  });
+  // Never let generic activity heartbeat overwrite existing isBlocked status
+  delete (payload as any).isBlocked;
+  delete (payload as any).blockedReason;
+  delete (payload as any).blockedAt;
+
   try {
-    const docRef = doc(db, SESSIONS_COLLECTION, data.deviceId);
-    await setDoc(docRef, removeUndefinedFields({
-      ...data,
-      id: data.deviceId,
-      deviceId: data.deviceId,
-      lastActiveAt: data.lastActiveAt || new Date().toISOString(),
-    }), { merge: true });
-  } catch (e) {
-    handleFirestoreError(e, OperationType.WRITE, `${SESSIONS_COLLECTION}/${data.deviceId}`);
+    await updateDoc(docRef, payload as Record<string, any>);
+  } catch (e: any) {
+    const code = e?.code || '';
+    const msg = e instanceof Error ? e.message : String(e);
+    if (code === 'not-found' || msg.includes('No document to update')) {
+      try {
+        await setDoc(docRef, {
+          ...payload,
+          deviceName: payload.deviceName || 'Qurilma',
+          browser: payload.browser || 'Brauzer',
+          os: payload.os || 'OS',
+          teacherName: payload.teacherName || '',
+          className: payload.className || '',
+          classId: payload.classId || '',
+          createdAt: payload.createdAt || nowIso,
+          enteredAt: payload.enteredAt || nowIso,
+          isOnline: payload.isOnline ?? true,
+          isBlocked: false,
+        }, { merge: true });
+        return;
+      } catch (createErr) {
+        handleFirestoreError(createErr, OperationType.CREATE, `${SESSIONS_COLLECTION}/${data.deviceId}`);
+      }
+    } else {
+      handleFirestoreError(e, OperationType.WRITE, `${SESSIONS_COLLECTION}/${data.deviceId}`);
+    }
+  }
+}
+
+// Keepalive REST PATCH when user closes tab / hides page so leftAt & isOnline=false persist instantly
+export function sendSessionLeaveKeepalive(deviceId: string, actionText = 'Sahifadan chiqdi') {
+  try {
+    const cfg = firebaseConfig as Record<string, any>;
+    const projectId = cfg.projectId;
+    const dbId = cfg.firestoreDatabaseId || '(default)';
+    const apiKey = cfg.apiKey;
+    if (!projectId || !apiKey || !deviceId || typeof fetch === 'undefined') return;
+
+    const nowIso = new Date().toISOString();
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(dbId)}/documents/${SESSIONS_COLLECTION}/${encodeURIComponent(deviceId)}?updateMask.fieldPaths=isOnline&updateMask.fieldPaths=leftAt&updateMask.fieldPaths=lastActiveAt&updateMask.fieldPaths=currentAction&key=${encodeURIComponent(apiKey)}`;
+
+    fetch(url, {
+      method: 'PATCH',
+      keepalive: true,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fields: {
+          isOnline: { booleanValue: false },
+          leftAt: { stringValue: nowIso },
+          lastActiveAt: { stringValue: nowIso },
+          currentAction: { stringValue: actionText },
+        },
+      }),
+    }).catch(() => {});
+  } catch {
+    // ignore keepalive failure on unload
   }
 }
 
@@ -345,6 +441,7 @@ export async function syncSetDeviceBlockStatus(deviceId: string, isBlocked: bool
       id: deviceId,
       deviceId,
       isBlocked,
+      blockHardware: isBlocked,
       blockedReason: isBlocked ? (reason || 'Administrator tomonidan bloklandi') : '',
       blockedAt: isBlocked ? new Date().toISOString() : '',
       updatedAt: new Date().toISOString(),

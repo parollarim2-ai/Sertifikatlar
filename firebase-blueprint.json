@@ -13,7 +13,12 @@
         "aiPaidAmount": { "type": "number" },
         "devPaidAmount": { "type": "number" },
         "projectType": { "type": "string" },
-        "notes": { "type": "string" }
+        "notes": { "type": "string" },
+        "paymentUnverified": { "type": "boolean" },
+        "paymentMethod": { "type": "string" },
+        "paymentNote": { "type": "string" },
+        "lastPaymentAt": { "type": "string" },
+        "paymentHistory": { "type": "array" }
       },
       "required": ["name", "teacherName"]
     },
@@ -39,6 +44,14 @@
         "certificateLink": { "type": "string" },
         "certificateDate": { "type": "string" },
         "certificateNumber": { "type": "string" },
+        "aiCertificateDate": { "type": "string" },
+        "aiCertificateDateVerified": { "type": "boolean" },
+        "aiCertificateDateSource": { "type": "string" },
+        "aiCertificateDateCheckedAt": { "type": "string" },
+        "devCertificateDate": { "type": "string" },
+        "devCertificateDateVerified": { "type": "boolean" },
+        "devCertificateDateSource": { "type": "string" },
+        "devCertificateDateCheckedAt": { "type": "string" },
         "createdAt": { "type": "string" }
       },
       "required": ["fullName", "classId", "status"]
@@ -62,6 +75,7 @@
       "type": "object",
       "properties": {
         "deviceId": { "type": "string" },
+        "hardwareId": { "type": "string" },
         "teacherName": { "type": "string" },
         "className": { "type": "string" },
         "classId": { "type": "string" },
@@ -69,9 +83,18 @@
         "browser": { "type": "string" },
         "os": { "type": "string" },
         "screen": { "type": "string" },
+        "cpuCores": { "type": "number" },
+        "gpuRenderer": { "type": "string" },
+        "isOnline": { "type": "boolean" },
+        "enteredAt": { "type": "string" },
+        "leftAt": { "type": "string" },
         "lastActiveAt": { "type": "string" },
         "createdAt": { "type": "string" },
+        "currentAction": { "type": "string" },
+        "currentRole": { "type": "string" },
+        "recentActions": { "type": "array" },
         "isBlocked": { "type": "boolean" },
+        "blockHardware": { "type": "boolean" },
         "blockedReason": { "type": "string" },
         "blockedAt": { "type": "string" }
       },
@@ -106,6 +129,7 @@
         "teacherName": { "type": "string" },
         "classId": { "type": "string" },
         "className": { "type": "string" },
+        "projectType": { "type": "string" },
         "username": { "type": "string" },
         "firstName": { "type": "string" },
         "lastName": { "type": "string" },

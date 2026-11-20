@@ -19,6 +19,7 @@ import {
   Zap
 } from 'lucide-react';
 import { getAdminAuthHeaders } from '../utils/authHeaders';
+import { getStudentTrackData } from '../utils/studentLoginHelper';
 
 interface TelegramBotTabProps {
   classes: ClassGroup[];
@@ -39,6 +40,7 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
   const [isForceRefreshing, setIsForceRefreshing] = useState(false);
   const [feedbackToast, setFeedbackToast] = useState('');
   const [copiedLink, setCopiedLink] = useState(false);
+  const [projectFilter, setProjectFilter] = useState<'all' | 'ai' | 'developer'>('all');
 
   const showToast = (msg: string) => {
     setFeedbackToast(msg);
@@ -218,7 +220,7 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
                 </span>
               </div>
               <p className="text-xs text-sky-100 max-w-2xl leading-relaxed">
-                Ustozlar ushbu bot orqali o'z sinflarining real vaqt ko'rsatkichlarini kuzatishi, xatoliklarni asos skrinshotlari bilan ko'rishi, xabarlarni qabul qilishi va yagona PDF sertifikatlar to'plamini to'g'ridan-to'g'ri Telegramga yuklab olishi mumkin.
+                Ustozlar ushbu bot orqali avval loyihani (<b>Bir Million Promter</b> yoki <b>5M AI Yetakchilari</b>) tanlab, o'z sinflarining real vaqt ko'rsatkichlari va to'lov holatini kuzatishi, sertifikatlarni <b>Telegram guruhga nusxalashi</b> hamda yagona PDF to'plamni yuklab olishi mumkin.
               </p>
             </div>
           </div>
@@ -323,23 +325,55 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
 
       {/* Teachers Connection Status Table */}
       <div className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-200 bg-slate-50/70 flex items-center justify-between flex-wrap gap-2">
+        <div className="px-6 py-4 border-b border-slate-200 bg-slate-50/70 flex items-center justify-between flex-wrap gap-3">
           <div>
             <h3 className="text-sm font-bold text-slate-900">Ustozlarning Telegram Bot Holati</h3>
             <p className="text-xs text-slate-500">
-              Qaysi ustoz botga ulangan va qachon kirgani real vaqt rejimida ko'rinadi
+              Har ikkala loyiha bo'yicha qaysi ustoz botga ulangani va sinf holati real vaqt rejimida ko'rinadi
             </p>
           </div>
 
-          {onRefreshUsers && (
-            <button
-              onClick={onRefreshUsers}
-              className="py-1.5 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>Yangilash</span>
-            </button>
-          )}
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5 text-[11px] font-bold">
+              <button
+                type="button"
+                onClick={() => setProjectFilter('all')}
+                className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                  projectFilter === 'all' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                Barchasi ({classes.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setProjectFilter('ai')}
+                className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                  projectFilter === 'ai' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                🚀 1M Promter ({classes.filter(c => c.projectType !== 'developer').length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setProjectFilter('developer')}
+                className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                  projectFilter === 'developer' ? 'bg-emerald-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                💡 5M AI ({classes.filter(c => c.projectType === 'developer').length})
+              </button>
+            </div>
+
+            {onRefreshUsers && (
+              <button
+                onClick={onRefreshUsers}
+                className="py-1.5 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Yangilash</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {classes.length === 0 ? (
@@ -352,6 +386,7 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
               <thead className="bg-slate-100/70 text-slate-600 font-bold border-b border-slate-200">
                 <tr>
                   <th className="py-3 px-4">Sinf</th>
+                  <th className="py-3 px-4">Loyiha</th>
                   <th className="py-3 px-4">Sinf Rahbari (Ustoz)</th>
                   <th className="py-3 px-4">O'quvchilar</th>
                   <th className="py-3 px-4">Telegram Holati</th>
@@ -360,17 +395,50 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
-                {classes.map((cls) => {
+                {classes
+                  .filter((cls) => {
+                    if (projectFilter === 'developer') return cls.projectType === 'developer';
+                    if (projectFilter === 'ai') return cls.projectType !== 'developer';
+                    return true;
+                  })
+                  .map((cls) => {
+                  const track: 'ai' | 'developer' = cls.projectType === 'developer' ? 'developer' : 'ai';
                   const classStudents = students.filter((s) => s.classId === cls.id);
-                  const certified = classStudents.filter((s) => s.status === 'certified').length;
-                  const errors = classStudents.filter((s) => s.status === 'error' || s.hasError).length;
-                  const pending = classStudents.filter((s) => s.status === 'pending').length;
+                  let certified = 0;
+                  let errors = 0;
+                  let registered = 0;
+                  let pending = 0;
+
+                  classStudents.forEach((s) => {
+                    const td = getStudentTrackData(s, track);
+                    if (td.status === 'certified') certified++;
+                    else if (td.status === 'error' || td.hasError) errors++;
+                    else if (track === 'developer' && s.devRegistered) registered++;
+                    else pending++;
+                  });
+
                   const tgUser = telegramUsers.find((u) => u.classId === cls.id);
 
                   return (
                     <tr key={cls.id} className="hover:bg-slate-50/70 transition-colors">
                       <td className="py-3.5 px-4 font-bold text-slate-900">
-                        {cls.name}
+                        <div>{cls.name}</div>
+                        {cls.isExternalSchool && (
+                          <div className="text-[10px] font-medium text-indigo-600">
+                            {cls.schoolName || 'Boshqa maktab'}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                            track === 'developer'
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              : 'bg-blue-50 text-blue-700 border-blue-200'
+                          }`}
+                        >
+                          {track === 'developer' ? '💡 5M AI Yetakchilari' : '🚀 1M Promter'}
+                        </span>
                       </td>
                       <td className="py-3.5 px-4 font-medium text-slate-800">
                         {cls.teacherName}
@@ -378,6 +446,9 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
                       <td className="py-3.5 px-4">
                         <div className="flex items-center gap-1.5 font-mono text-[11px]">
                           <span className="text-emerald-700 font-bold" title="Sertifikat olganlar">🟢 {certified}</span>
+                          {track === 'developer' && registered > 0 && (
+                            <span className="text-amber-600 font-bold" title="Ro'yxatdan o'tganlar">📝 {registered}</span>
+                          )}
                           <span className="text-rose-700 font-bold" title="Xatolik chiqqanlar">🔴 {errors}</span>
                           {pending > 0 && (
                             <span className="text-slate-500 font-medium" title="Kutilayotganlar">⚪️ {pending}</span>
@@ -435,15 +506,15 @@ export const TelegramBotTab: React.FC<TelegramBotTabProps> = ({
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs text-slate-600 leading-relaxed">
           <div className="p-3.5 rounded-xl bg-white border border-slate-200 space-y-1">
-            <div className="font-bold text-slate-900">1. Ustoz ro'yxatdan o'tishi</div>
+            <div className="font-bold text-slate-900">1. Loyiha va sinfni tanlash</div>
             <p className="text-slate-500">
-              Ustoz Telegramda <b>@Courseradan_bot</b> ga kirib, <code>/start</code> tugmasini bosadi va o'z sinfini tanlaydi. Bot uni darhol eslab qoladi.
+              Ustoz Telegramda <b>@Courseradan_bot</b> ga kirib <code>/start</code> bosadi, avval loyihani (<b>1M Promter</b> yoki <b>5M AI</b>) tanlaydi, so'ngra o'z sinfini belgilashi bilan barcha sinf ma'lumotlari darhol ochiladi.
             </p>
           </div>
           <div className="p-3.5 rounded-xl bg-white border border-slate-200 space-y-1">
-            <div className="font-bold text-slate-900">2. Real vaqt natijalari & PDF</div>
+            <div className="font-bold text-slate-900">2. Telegramga nusxalash & PDF</div>
             <p className="text-slate-500">
-              Ustoz o'z sinfidagi barcha o'quvchilar holatini ko'radi, xato chiqqanlarning sababi va skrinshotini tekshiradi, hamda <b>Yagona PDF to'plamni</b> botdan yuklab oladi.
+              Ustoz o'z sinfi hisoboti, to'lov qoldig'i va xatolik skrinshotlarini ko'radi, <b>📲 Telegram uchun nusxalash</b> orqali havolalarni 1 bosishda ko'chiradi hamda <b>Yagona PDF</b> ni yuklab oladi.
             </p>
           </div>
           <div className="p-3.5 rounded-xl bg-white border border-slate-200 space-y-1">

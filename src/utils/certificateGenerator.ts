@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
 import { jsPDF } from 'jspdf';
 import { Student, ClassGroup } from '../types';
+import { getStudentTrackData } from './studentLoginHelper';
 
 export function generateCertificateHTML(student: Student, classGroup?: ClassGroup): string {
   const dateStr = student.certificateDate || new Date().toISOString().split('T')[0];
@@ -359,7 +360,11 @@ export async function downloadAllCertificatesAsZip(
   classGroup: ClassGroup,
   onProgress?: (percent: number) => void
 ): Promise<void> {
-  const certifiedStudents = students.filter(s => s.status === 'certified' && s.classId === classGroup.id);
+  const track: 'ai' | 'developer' = classGroup.projectType === 'developer' ? 'developer' : 'ai';
+  const certifiedStudents = students.filter(s => {
+    if (s.classId !== classGroup.id) return false;
+    return getStudentTrackData(s, track).status === 'certified';
+  });
   if (certifiedStudents.length === 0) {
     return;
   }
@@ -369,7 +374,7 @@ export async function downloadAllCertificatesAsZip(
 
   // Text summary file
   let summaryText = `====================================================\n`;
-  summaryText += `  ${classGroup.name} SINF - BIR MILLION DASTURCHI SERTIFIKATLARI\n`;
+  summaryText += `  ${classGroup.name} SINF - ${track === 'developer' ? 'BESH MILLION AI YETAKCHILARI' : 'BIR MILLION PROMTER'} SERTIFIKATLARI\n`;
   summaryText += `  Sinf rahbari: ${classGroup.teacherName}\n`;
   summaryText += `  Jami sertifikatlar: ${certifiedStudents.length} ta\n`;
   summaryText += `  Sana: ${new Date().toLocaleDateString('uz-UZ')}\n`;
@@ -379,11 +384,12 @@ export async function downloadAllCertificatesAsZip(
 
   for (let index = 0; index < total; index++) {
     const student = certifiedStudents[index];
+    const td = getStudentTrackData(student, track);
 
     summaryText += `${index + 1}. ${student.fullName}\n`;
     summaryText += `   ID/Pasport: ${student.passportOrId || 'Mavjud emas'}\n`;
-    summaryText += `   Havola: ${student.certificateLink || 'Mavjud emas'}\n`;
-    summaryText += `   Email: ${student.assignedEmail || 'Mavjud emas'}\n\n`;
+    summaryText += `   Havola: ${td.certificateLink || 'Mavjud emas'}\n`;
+    summaryText += `   ${track === 'developer' ? 'Login' : 'Email'}: ${track === 'developer' ? (student.assignedLogin || 'Mavjud emas') : (student.assignedEmail || 'Mavjud emas')}\n\n`;
 
     // 1. Individual PDF file
     try {
@@ -484,7 +490,11 @@ export async function generateUnifiedCertificatesPdf(
   classGroup: ClassGroup,
   onProgress?: (statusText: string, current: number, total: number) => void
 ): Promise<{ filename: string; blob: Blob } | null> {
-  const certifiedStudents = students.filter(s => s.status === 'certified' && s.classId === classGroup.id);
+  const track: 'ai' | 'developer' = classGroup.projectType === 'developer' ? 'developer' : 'ai';
+  const certifiedStudents = students.filter(s => {
+    if (s.classId !== classGroup.id) return false;
+    return getStudentTrackData(s, track).status === 'certified';
+  });
   
   if (certifiedStudents.length === 0) {
     return null;
@@ -506,6 +516,7 @@ export async function generateUnifiedCertificatesPdf(
 
   for (let i = 0; i < total; i++) {
     const student = sortedStudents[i];
+    const td = getStudentTrackData(student, track);
 
     if (onProgress) {
       onProgress(
@@ -521,9 +532,9 @@ export async function generateUnifiedCertificatesPdf(
 
     // Attempt to capture real certificate image from external link
     let certificateImage: string | null = null;
-    if (student.certificateLink) {
+    if (td.certificateLink) {
       certificateImage = await captureCertificateFromLink(
-        student.certificateLink,
+        td.certificateLink,
         student.fullName,
         classGroup.name
       );
@@ -614,7 +625,7 @@ export async function generateUnifiedCertificatesPdf(
     doc.setTextColor(71, 85, 105);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8);
-    const linkStr = student.certificateLink || 'https://coursera.org/verify';
+    const linkStr = td.certificateLink || (track === 'developer' ? 'https://omp.aistudy.uz' : 'https://coursera.org/verify');
     const displayLink = linkStr.length > 90 ? linkStr.slice(0, 87) + '...' : linkStr;
     doc.text(`Elektron tasdiq: ${displayLink}`, 12, 206);
 
@@ -636,9 +647,12 @@ export async function generateUnifiedCertificatesPdf(
 // Format all student certificates into clipboard-ready text
 export function formatClassCertificatesForClipboard(students: Student[], classGroup: ClassGroup): string {
   const isDev = classGroup.projectType === 'developer';
+  const track: 'ai' | 'developer' = isDev ? 'developer' : 'ai';
   const trackTitle = isDev ? "Besh million sun'iy intellekt yetakchilari (omp.aistudy.uz)" : "Bir million promter (Coursera)";
-  const certified = students.filter(s => s.status === 'certified' && s.classId === classGroup.id);
-  
+  const certified = students
+    .filter(s => s.classId === classGroup.id && getStudentTrackData(s, track).status === 'certified')
+    .sort((a, b) => a.fullName.trim().localeCompare(b.fullName.trim(), 'uz', { sensitivity: 'base' }));
+
   if (certified.length === 0) {
     return `${classGroup.name} sinfida hali sertifikat olgan o'quvchilar yo'q.`;
   }
@@ -648,7 +662,8 @@ export function formatClassCertificatesForClipboard(students: Student[], classGr
   text += `📊 Jami sertifikat olganlar: ${certified.length} nafar\n\n`;
 
   certified.forEach((st, idx) => {
-    text += `${idx + 1}. ${st.fullName}\n   🔗 Havola: ${st.certificateLink || 'Mavjud emas'}\n`;
+    const td = getStudentTrackData(st, track);
+    text += `${idx + 1}. ${st.fullName}\n   🔗 Havola: ${td.certificateLink || 'Mavjud emas'}\n`;
   });
 
   return text;

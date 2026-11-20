@@ -1,4 +1,4 @@
-import React, { useRef, useCallback } from 'react';
+import React, { useRef, useCallback, useEffect, useState } from 'react';
 import {
   Layers,
   GraduationCap,
@@ -7,8 +7,9 @@ import {
   Smartphone,
   Send
 } from 'lucide-react';
-
+import { GraphicsTier } from '../types';
 import { useUnifiedGlass } from '../context/UnifiedGlassContext';
+import { subscribeToSessions } from '../lib/firestoreService';
 
 export type AdminTabType = 'classes' | 'teachers' | 'finance' | 'emails' | 'sessions' | 'telegram';
 
@@ -16,29 +17,69 @@ interface NavigationLiquidGlassTabsProps {
   activeTab: AdminTabType;
   onSelectTab: (tab: AdminTabType) => void;
   teacherCertificatesCount: number;
-  sessionsCount: number;
-  hasBlockedSession: boolean;
   telegramUsersCount: number;
+  graphicsTier?: GraphicsTier;
 }
+
+const SessionsNavBadges: React.FC = React.memo(() => {
+  const [summary, setSummary] = useState<{ count: number; hasBlocked: boolean }>({
+    count: 0,
+    hasBlocked: false,
+  });
+
+  useEffect(() => {
+    const unsub = subscribeToSessions((list) => {
+      const nextCount = list.length;
+      const nextBlocked = list.some((s) => s.isBlocked);
+      setSummary((prev) =>
+        prev.count === nextCount && prev.hasBlocked === nextBlocked
+          ? prev
+          : { count: nextCount, hasBlocked: nextBlocked }
+      );
+    });
+    return () => unsub();
+  }, []);
+
+  return (
+    <>
+      {summary.count > 0 && (
+        <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-200 text-slate-700 font-mono">
+          {summary.count}
+        </span>
+      )}
+      {summary.hasBlocked && (
+        <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" title="Bloklangan qurilma mavjud" />
+      )}
+    </>
+  );
+});
 
 export const NavigationLiquidGlassTabs: React.FC<NavigationLiquidGlassTabsProps> = ({
   activeTab,
   onSelectTab,
   teacherCertificatesCount,
-  sessionsCount,
-  hasBlockedSession,
   telegramUsersCount,
+  graphicsTier = 'medium',
 }) => {
+  const isUltra = graphicsTier === 'ultra';
   const { registerTargetElement, triggerJumpTo } = useUnifiedGlass();
   const containerRef = useRef<HTMLDivElement>(null);
   const spotRef = useRef<HTMLElement>(null);
+  const buttonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+
+  useEffect(() => {
+    if (!isUltra) return;
+    Object.entries(buttonRefs.current).forEach(([tabId, el]) => {
+      registerTargetElement(`nav-${tabId}`, el, 14);
+    });
+  }, [isUltra, registerTargetElement]);
 
   const handlePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    if (!spotRef.current || !containerRef.current) return;
+    if (!isUltra || !spotRef.current || !containerRef.current) return;
     const cr = containerRef.current.getBoundingClientRect();
     spotRef.current.style.opacity = '1';
     spotRef.current.style.transform = `translate(${e.clientX - cr.left}px, ${e.clientY - cr.top}px)`;
-  }, []);
+  }, [isUltra]);
 
   const handlePointerLeave = useCallback(() => {
     if (spotRef.current) {
@@ -87,18 +128,7 @@ export const NavigationLiquidGlassTabs: React.FC<NavigationLiquidGlassTabsProps>
       icon: <Smartphone className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-purple-600 flex-shrink-0" />,
       labelShort: 'Seanslar',
       labelFull: 'Faol Seanslar',
-      badge: (
-        <>
-          {sessionsCount > 0 && (
-            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-200 text-slate-700 font-mono">
-              {sessionsCount}
-            </span>
-          )}
-          {hasBlockedSession && (
-            <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" title="Bloklangan qurilma mavjud"></span>
-          )}
-        </>
-      ),
+      badge: <SessionsNavBadges />,
     },
     {
       id: 'telegram',
@@ -114,81 +144,40 @@ export const NavigationLiquidGlassTabs: React.FC<NavigationLiquidGlassTabsProps>
   ];
 
   return (
-    <>
-      <style>{`
-        .liquid-nav-container {
-          position: relative;
-          background: rgba(226, 232, 240, 0.72);
-          backdrop-filter: blur(8px);
-          -webkit-backdrop-filter: blur(8px);
-          padding: 4px;
-          border-radius: 18px;
-          border: 1px solid rgba(203, 213, 225, 0.9);
-          box-shadow: inset 0 2px 4px rgba(15, 23, 42, 0.05);
-          user-select: none;
-        }
-        .liquid-nav-spot {
-          position: absolute;
-          left: 0;
-          top: 0;
-          width: 180px;
-          height: 180px;
-          margin: -90px 0 0 -90px;
-          border-radius: 50%;
-          background: radial-gradient(circle, rgba(37, 99, 235, 0.16), transparent 65%);
-          pointer-events: none;
-          opacity: 0;
-          transition: opacity 0.25s;
-          z-index: 1;
-        }
-        .liquid-nav-btn {
-          position: relative;
-          z-index: 3;
-          transition: color 0.2s, background-color 0.2s, transform 0.15s, box-shadow 0.2s;
-        }
-        .liquid-nav-btn:hover {
-          color: #0f172a;
-        }
-        .liquid-nav-btn:active {
-          transform: scale(0.96);
-        }
-      `}</style>
+    <div
+      ref={containerRef}
+      onPointerMove={isUltra ? handlePointerMove : undefined}
+      onPointerLeave={isUltra ? handlePointerLeave : undefined}
+      className="liquid-nav-container flex items-center gap-1 overflow-x-auto no-scrollbar"
+    >
+      {isUltra && <i ref={spotRef} className="liquid-nav-spot" />}
 
-      <div
-        ref={containerRef}
-        onPointerMove={handlePointerMove}
-        onPointerLeave={handlePointerLeave}
-        className="liquid-nav-container flex items-center gap-1 overflow-x-auto no-scrollbar"
-      >
-        <i ref={spotRef} className="liquid-nav-spot"></i>
-
-        {tabs.map(tab => {
-          const isActive = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              ref={el => {
-                registerTargetElement(`nav-${tab.id}`, el, 14);
-              }}
-              type="button"
-              onClick={() => {
-                triggerJumpTo(`nav-${tab.id}`);
-                onSelectTab(tab.id);
-              }}
-              className={`liquid-nav-btn flex-shrink-0 sm:flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 sm:gap-2 cursor-pointer whitespace-nowrap ${
-                isActive
-                  ? 'bg-white text-slate-950 font-black shadow-xs border border-slate-200/80'
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
-              }`}
-            >
-              {tab.icon}
-              <span className="sm:hidden">{tab.labelShort}</span>
-              <span className="hidden sm:inline">{tab.labelFull}</span>
-              {tab.badge}
-            </button>
-          );
-        })}
-      </div>
-    </>
+      {tabs.map(tab => {
+        const isActive = activeTab === tab.id;
+        return (
+          <button
+            key={tab.id}
+            ref={(el) => {
+              buttonRefs.current[tab.id] = el;
+            }}
+            type="button"
+            onClick={() => {
+              if (isUltra) triggerJumpTo(`nav-${tab.id}`);
+              onSelectTab(tab.id);
+            }}
+            className={`liquid-nav-btn flex-shrink-0 sm:flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 sm:gap-2 cursor-pointer whitespace-nowrap ${
+              isActive
+                ? 'bg-white text-slate-950 font-black shadow-xs border border-slate-200/80'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+            }`}
+          >
+            {tab.icon}
+            <span className="sm:hidden">{tab.labelShort}</span>
+            <span className="hidden sm:inline">{tab.labelFull}</span>
+            {tab.badge}
+          </button>
+        );
+      })}
+    </div>
   );
 };

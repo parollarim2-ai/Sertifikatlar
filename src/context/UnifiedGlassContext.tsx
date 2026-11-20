@@ -18,14 +18,20 @@ interface UnifiedGlassContextType {
   wakeLens: () => void;
 }
 
-const UnifiedGlassContext = createContext<UnifiedGlassContextType | null>(null);
+const NOOP = () => {};
+const NOOP_GLASS_CONTEXT: UnifiedGlassContextType = {
+  activeTargetId: 'nav-classes',
+  setActiveTarget: NOOP,
+  registerTargetElement: NOOP,
+  unregisterTargetElement: NOOP,
+  triggerJumpTo: NOOP,
+  wakeLens: NOOP,
+};
+
+const UnifiedGlassContext = createContext<UnifiedGlassContextType>(NOOP_GLASS_CONTEXT);
 
 export const useUnifiedGlass = () => {
-  const ctx = useContext(UnifiedGlassContext);
-  if (!ctx) {
-    throw new Error('useUnifiedGlass must be used within a UnifiedGlassProvider');
-  }
-  return ctx;
+  return useContext(UnifiedGlassContext);
 };
 
 class LensSpring {
@@ -51,9 +57,10 @@ class LensSpring {
 
 interface UnifiedGlassProviderProps {
   children: React.ReactNode;
+  enabled?: boolean;
 }
 
-export const UnifiedGlassProvider: React.FC<UnifiedGlassProviderProps> = ({ children }) => {
+const ActiveUnifiedGlassProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [activeTargetId, setActiveTargetId] = useState<string>('nav-classes');
   const targetElementsRef = useRef<Map<string, { el: HTMLElement; radius?: number }>>(new Map());
   const rootContainerRef = useRef<HTMLDivElement>(null);
@@ -94,7 +101,6 @@ export const UnifiedGlassProvider: React.FC<UnifiedGlassProviderProps> = ({ chil
     lens.style.opacity = curScale > 0.01 && s.isInitialized ? '1' : '0';
   }, []);
 
-  // On-demand animation loop: ONLY runs while springs are moving, stops immediately when settled!
   const startLoop = useCallback(() => {
     if (animIdRef.current !== null) return;
     let lastTime = performance.now();
@@ -156,6 +162,8 @@ export const UnifiedGlassProvider: React.FC<UnifiedGlassProviderProps> = ({ chil
 
   const registerTargetElement = useCallback((id: string, el: HTMLElement | null, radius = 14) => {
     if (el) {
+      const prev = targetElementsRef.current.get(id);
+      if (prev && prev.el === el && prev.radius === radius) return;
       targetElementsRef.current.set(id, { el, radius });
       const s = springsRef.current;
       const root = rootContainerRef.current;
@@ -212,6 +220,7 @@ export const UnifiedGlassProvider: React.FC<UnifiedGlassProviderProps> = ({ chil
       s.cr.x = s.cr.t = targetR;
       s.cx.v = s.cy.v = 0;
       s.isInitialized = true;
+      s.inFlight = false;
       applyLensDOM();
       return;
     }
@@ -309,4 +318,18 @@ export const UnifiedGlassProvider: React.FC<UnifiedGlassProviderProps> = ({ chil
       </div>
     </UnifiedGlassContext.Provider>
   );
+};
+
+export const UnifiedGlassProvider: React.FC<UnifiedGlassProviderProps> = ({
+  children,
+  enabled = false,
+}) => {
+  if (!enabled) {
+    return (
+      <UnifiedGlassContext.Provider value={NOOP_GLASS_CONTEXT}>
+        {children}
+      </UnifiedGlassContext.Provider>
+    );
+  }
+  return <ActiveUnifiedGlassProvider>{children}</ActiveUnifiedGlassProvider>;
 };
