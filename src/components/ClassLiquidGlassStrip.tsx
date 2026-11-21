@@ -43,7 +43,7 @@ export const ClassLiquidGlassStrip: React.FC<ClassLiquidGlassStripProps> = ({
   onEditClass,
   onDeleteClass,
 }) => {
-  const isUltra = graphicsTier === 'ultra';
+  const isUltra = graphicsTier === 'ultra' || graphicsTier === 'high';
   const { registerTargetElement, triggerJumpTo } = useUnifiedGlass();
   const [searchQuery, setSearchQuery] = useState('');
   const [filterMode, setFilterMode] = useState<'all' | 'debt' | 'low'>('all');

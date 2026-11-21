@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { TeacherSession } from '../types';
-import { subscribeToSessions } from '../lib/firestoreService';
+import { subscribeToSessions, fetchSessionsListOnce } from '../lib/firestoreService';
 import { 
   Smartphone, 
   Laptop, 
@@ -88,18 +88,40 @@ export const SessionsManagementTab: React.FC<SessionsManagementTabProps> = ({
   onUnlockExternalTeacher,
 }) => {
   const [liveSessions, setLiveSessions] = useState<TeacherSession[]>(initialSessions || []);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState<'all' | 'live' | 'active' | 'blocked'>('all');
   const [blockingTarget, setBlockingTarget] = useState<TeacherSession | null>(null);
   const [blockingReason, setBlockingReason] = useState('Administrator tomonidan bloklandi');
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
 
-  // Isolated subscription to sessions ONLY while Seanslar tab is mounted
+  const handleManualRefresh = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
+      const fresh = await fetchSessionsListOnce();
+      if (fresh.length > 0) {
+        setLiveSessions(fresh);
+      }
+    } finally {
+      setTimeout(() => setIsRefreshing(false), 350);
+    }
+  }, []);
+
+  // Isolated subscription to sessions ONLY while Seanslar tab is mounted + immediate REST fetch
   useEffect(() => {
-    const unsub = subscribeToSessions((remote) => {
-      setLiveSessions(remote);
+    let active = true;
+    fetchSessionsListOnce().then((fresh) => {
+      if (active && fresh.length > 0) {
+        setLiveSessions(fresh);
+      }
     });
-    return () => unsub();
+    const unsub = subscribeToSessions((remote) => {
+      if (active) setLiveSessions(remote);
+    });
+    return () => {
+      active = false;
+      unsub();
+    };
   }, []);
 
   const sessions = liveSessions;
@@ -155,10 +177,10 @@ export const SessionsManagementTab: React.FC<SessionsManagementTabProps> = ({
 
   const getDeviceIcon = (os: string, deviceName: string) => {
     const text = (os + ' ' + deviceName).toLowerCase();
-    if (text.includes('iphone') || text.includes('android') || text.includes('telefon') || text.includes('galaxy') || text.includes('redmi') || text.includes('xiaomi') || text.includes('pixel')) {
+    if (/iphone|android|telefon|mobil|galaxy|redmi|xiaomi|poco|pixel|huawei|honor|oppo|vivo|realme|oneplus|infinix|tecno/.test(text)) {
       return <Smartphone className="w-5 h-5 text-blue-600" />;
     }
-    if (text.includes('ipad') || text.includes('tablet') || text.includes('planshet')) {
+    if (/ipad|tablet|planshet/.test(text)) {
       return <Tablet className="w-5 h-5 text-purple-600" />;
     }
     return <Laptop className="w-5 h-5 text-slate-700" />;
@@ -327,9 +349,20 @@ export const SessionsManagementTab: React.FC<SessionsManagementTabProps> = ({
               Bloklash tugmasi bosilgan zahoti sahifani yangilamasdan ham barcha brauzerlarda darhol to‘xtatiladi
             </p>
           </div>
-          <span className="text-xs text-slate-600 font-mono font-semibold tabular-nums">
-            Jonli soat: {formatOnlyHms(new Date(nowMs).toISOString())} • {filteredSessions.length} ta
-          </span>
+          <div className="flex items-center gap-2.5">
+            <span className="text-xs text-slate-600 font-mono font-semibold tabular-nums">
+              Jonli soat: {formatOnlyHms(new Date(nowMs).toISOString())} • {filteredSessions.length} ta
+            </span>
+            <button
+              type="button"
+              onClick={handleManualRefresh}
+              className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-xs font-semibold text-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer"
+              title="Seanslar ro'yxatini serverdan darhol qayta yuklash"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-blue-600 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span>Yangilash</span>
+            </button>
+          </div>
         </div>
 
         {filteredSessions.length === 0 ? (

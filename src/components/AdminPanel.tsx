@@ -1446,7 +1446,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   };
 
   return (
-    <UnifiedGlassProvider enabled={graphicsTier === 'ultra'}>
+    <UnifiedGlassProvider enabled={graphicsTier === 'ultra' || graphicsTier === 'high'}>
       <div className="space-y-6 animate-fade-in pb-12">
       
       {/* Floating Quick Toast Alert without OK button */}
@@ -1637,15 +1637,24 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 className={`px-3.5 py-2.5 text-xs font-semibold rounded-xl border shadow-xs flex items-center gap-2 transition-colors cursor-pointer ${
                   graphicsTier === 'ultra'
                     ? 'bg-purple-600 hover:bg-purple-700 text-white border-purple-600'
+                    : graphicsTier === 'high'
+                    ? 'bg-sky-600 hover:bg-sky-700 text-white border-sky-600'
                     : graphicsTier === 'lite'
                     ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-300'
                     : 'bg-white hover:bg-slate-50 text-slate-800 border-slate-300'
                 }`}
-                title="Grafika va animatsiya kuchini sozlash (Yengil / O'rtacha / Ultra)"
+                title="Grafika va animatsiya kuchini sozlash (Yengil / O'rtacha / Yuqori / Ultra)"
               >
                 <Settings className="w-4 h-4 flex-shrink-0" />
                 <span>
-                  Grafika: {graphicsTier === 'ultra' ? 'Ultra' : graphicsTier === 'lite' ? 'Yengil' : "O'rtacha"}
+                  Grafika:{' '}
+                  {graphicsTier === 'ultra'
+                    ? 'Ultra'
+                    : graphicsTier === 'high'
+                    ? 'Yuqori'
+                    : graphicsTier === 'lite'
+                    ? 'Yengil'
+                    : "O'rtacha"}
                 </span>
               </button>
             )}
@@ -1852,7 +1861,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             <AnimatedGlassSearchInput
               value={searchQuery}
               onChange={setSearchQuery}
-              enableKeyPop={graphicsTier === 'ultra'}
+              enableKeyPop={graphicsTier === 'ultra' || graphicsTier === 'high'}
               placeholder="O'quvchini ismi, pasporti yoki emaili orqali qidirish..."
             />
 

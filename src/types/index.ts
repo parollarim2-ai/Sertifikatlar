@@ -97,7 +97,7 @@ export interface EmailAccount {
   addedAt: string;
 }
 
-export type GraphicsTier = 'lite' | 'medium' | 'ultra';
+export type GraphicsTier = 'lite' | 'medium' | 'high' | 'ultra';
 
 export interface SessionActionLog {
   time: string;

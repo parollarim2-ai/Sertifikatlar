@@ -11,10 +11,13 @@ import { AdminLoginModal } from './components/AdminLoginModal';
 import { TeacherMessageModal } from './components/TeacherMessageModal';
 import { GraphicsSettingsModal } from './components/GraphicsSettingsModal';
 import { BlockedAccessOverlay } from './components/BlockedAccessOverlay';
-import { detectCurrentDevice } from './utils/deviceDetector';
+import { detectCurrentDevice, enrichDeviceWithClientHints } from './utils/deviceDetector';
 
 const UltraWorldOverlay = React.lazy(() =>
   import('./components/UltraWorldOverlay').then(m => ({ default: m.UltraWorldOverlay }))
+);
+const OceanPhysicsOverlay = React.lazy(() =>
+  import('./components/OceanPhysicsOverlay').then(m => ({ default: m.OceanPhysicsOverlay }))
 );
 import { 
   subscribeToClasses,
@@ -108,11 +111,11 @@ export default function App() {
     return () => clearTimeout(t);
   }, [teacherCertificates]);
 
-  // 3-Tier Graphics & Performance Setting (Defaults to 'medium' on all devices)
+  // 4-Tier Graphics & Performance Setting (Defaults to 'medium' on all devices)
   const [graphicsTier, setGraphicsTier] = useState<GraphicsTier>(() => {
     try {
       const saved = localStorage.getItem('b1m_graphics_tier');
-      if (saved === 'lite' || saved === 'medium' || saved === 'ultra') return saved;
+      if (saved === 'lite' || saved === 'medium' || saved === 'high' || saved === 'ultra') return saved;
     } catch {}
     return 'medium';
   });
@@ -125,8 +128,13 @@ export default function App() {
     } catch {}
   }, [graphicsTier]);
 
-  // Current device hardware + browser fingerprint
-  const currentDevice = useMemo(() => detectCurrentDevice(), []);
+  // Current device hardware + browser fingerprint (synchronously detected + async Client Hints enrichment)
+  const [currentDevice, setCurrentDevice] = useState(() => detectCurrentDevice());
+  useEffect(() => {
+    enrichDeviceWithClientHints((refined) => {
+      setCurrentDevice(refined);
+    });
+  }, []);
   const [directBlockedSession, setDirectBlockedSession] = useState<TeacherSession | null>(null);
   const [blockedSessions, setBlockedSessions] = useState<TeacherSession[]>([]);
   const directBlockedRef = useRef<TeacherSession | null>(null);
@@ -805,28 +813,36 @@ export default function App() {
     liveContextRef.current.currentAction = info.action;
 
     const actions = pushActivityLog(info.action);
-    syncUpdateDeviceActivity({
-      deviceId: currentDevice.deviceId,
-      hardwareId: currentDevice.hardwareId,
-      deviceName: currentDevice.deviceName,
-      browser: currentDevice.browser,
-      os: currentDevice.os,
-      screen: currentDevice.screen,
-      cpuCores: currentDevice.cpuCores,
-      gpuRenderer: currentDevice.gpuRenderer,
-      teacherName: liveContextRef.current.teacherName,
-      className: liveContextRef.current.className,
-      classId: liveContextRef.current.classId,
-      currentRole: liveContextRef.current.currentRole,
-      currentAction: info.action,
-      recentActions: actions,
-      enteredAt: sessionEnteredAtRef.current,
-      isOnline: true,
-      lastActiveAt: nowIso,
-    }).catch(() => {});
+    syncUpdateDeviceActivity(
+      {
+        deviceId: currentDevice.deviceId,
+        hardwareId: currentDevice.hardwareId,
+        deviceName: currentDevice.deviceName,
+        browser: currentDevice.browser,
+        os: currentDevice.os,
+        screen: currentDevice.screen,
+        cpuCores: currentDevice.cpuCores,
+        gpuRenderer: currentDevice.gpuRenderer,
+        teacherName: liveContextRef.current.teacherName,
+        className: liveContextRef.current.className,
+        classId: liveContextRef.current.classId,
+        currentRole: liveContextRef.current.currentRole,
+        currentAction: info.action,
+        recentActions: actions,
+        enteredAt: sessionEnteredAtRef.current,
+        isOnline: true,
+        lastActiveAt: nowIso,
+      },
+      {
+        onBlockedDetected: (blockedSess) => {
+          directBlockedRef.current = blockedSess;
+          setDirectBlockedSession(blockedSess);
+        },
+      }
+    ).catch(() => {});
   }, [currentDevice, pushActivityLog]);
 
-  // Global presence heartbeat (10s while visible) + instant leave tracking on hide/close
+  // Global presence heartbeat (12s while visible) + instant leave tracking on hide/close
   useEffect(() => {
     liveContextRef.current.currentRole = currentView;
     if (!childActivityReportedRef.current) {
@@ -839,27 +855,35 @@ export default function App() {
 
     const heartbeat = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        syncUpdateDeviceActivity({
-          deviceId: currentDevice.deviceId,
-          hardwareId: currentDevice.hardwareId,
-          deviceName: currentDevice.deviceName,
-          browser: currentDevice.browser,
-          os: currentDevice.os,
-          screen: currentDevice.screen,
-          cpuCores: currentDevice.cpuCores,
-          gpuRenderer: currentDevice.gpuRenderer,
-          teacherName: liveContextRef.current.teacherName,
-          className: liveContextRef.current.className,
-          classId: liveContextRef.current.classId,
-          currentRole: liveContextRef.current.currentRole,
-          currentAction: liveContextRef.current.currentAction,
-          recentActions: sessionRecentActionsRef.current,
-          enteredAt: sessionEnteredAtRef.current,
-          isOnline: true,
-          lastActiveAt: new Date().toISOString(),
-        }).catch(() => {});
+        syncUpdateDeviceActivity(
+          {
+            deviceId: currentDevice.deviceId,
+            hardwareId: currentDevice.hardwareId,
+            deviceName: currentDevice.deviceName,
+            browser: currentDevice.browser,
+            os: currentDevice.os,
+            screen: currentDevice.screen,
+            cpuCores: currentDevice.cpuCores,
+            gpuRenderer: currentDevice.gpuRenderer,
+            teacherName: liveContextRef.current.teacherName,
+            className: liveContextRef.current.className,
+            classId: liveContextRef.current.classId,
+            currentRole: liveContextRef.current.currentRole,
+            currentAction: liveContextRef.current.currentAction,
+            recentActions: sessionRecentActionsRef.current,
+            enteredAt: sessionEnteredAtRef.current,
+            isOnline: true,
+            lastActiveAt: new Date().toISOString(),
+          },
+          {
+            onBlockedDetected: (blockedSess) => {
+              directBlockedRef.current = blockedSess;
+              setDirectBlockedSession(blockedSess);
+            },
+          }
+        ).catch(() => {});
       }
-    }, 20000);
+    }, 12000);
 
     const handleVisibility = () => {
       if (document.visibilityState === 'hidden') {
@@ -948,7 +972,12 @@ export default function App() {
     };
 
     try {
-      await syncSaveSession(sessionToSave);
+      await syncSaveSession(sessionToSave, {
+        onBlockedDetected: (blockedSess) => {
+          directBlockedRef.current = blockedSess;
+          setDirectBlockedSession(blockedSess);
+        },
+      });
     } catch (e) {
       console.warn('Session sync error:', e);
     }
@@ -1167,6 +1196,13 @@ export default function App() {
         </Suspense>
       )}
 
+      {/* Yuqori Fizik Okean Grafika Engine (Lazy-loaded & mounted ONLY when graphicsTier === 'high') */}
+      {graphicsTier === 'high' && (
+        <Suspense fallback={null}>
+          <OceanPhysicsOverlay active />
+        </Suspense>
+      )}
+
       {/* Admin Mode Sleek Top Bar (Frosted Dark Glass - Yellow replaced with Apple Pro style) */}
       {currentView === 'admin' && (
         <div className="bg-slate-900/90 backdrop-blur-xl text-slate-200 px-4 py-2 text-xs font-medium flex items-center justify-between shadow-xs border-b border-white/10 relative z-20">
@@ -1221,6 +1257,8 @@ export default function App() {
               className={`px-2.5 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
                 graphicsTier === 'ultra'
                   ? 'bg-purple-600 text-white border-purple-600 shadow-xs'
+                  : graphicsTier === 'high'
+                  ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
                   : graphicsTier === 'lite'
                   ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
                   : 'bg-white/90 text-slate-700 border-slate-200 hover:bg-slate-50'
@@ -1229,7 +1267,13 @@ export default function App() {
             >
               <Sliders className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">
-                {graphicsTier === 'ultra' ? 'Ultra' : graphicsTier === 'lite' ? 'Yengil' : "O'rtacha"}
+                {graphicsTier === 'ultra'
+                  ? 'Ultra'
+                  : graphicsTier === 'high'
+                  ? 'Yuqori'
+                  : graphicsTier === 'lite'
+                  ? 'Yengil'
+                  : "O'rtacha"}
               </span>
             </button>
 

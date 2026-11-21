@@ -61,7 +61,7 @@ export const NavigationLiquidGlassTabs: React.FC<NavigationLiquidGlassTabsProps>
   telegramUsersCount,
   graphicsTier = 'medium',
 }) => {
-  const isUltra = graphicsTier === 'ultra';
+  const isUltra = graphicsTier === 'ultra' || graphicsTier === 'high';
   const { registerTargetElement, triggerJumpTo } = useUnifiedGlass();
   const containerRef = useRef<HTMLDivElement>(null);
   const spotRef = useRef<HTMLElement>(null);

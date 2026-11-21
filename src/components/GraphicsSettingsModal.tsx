@@ -1,6 +1,6 @@
 import React from 'react';
 import { GraphicsTier } from '../types';
-import { X, Zap, Gauge, Sparkles, Check, AlertTriangle } from 'lucide-react';
+import { X, Zap, Gauge, Waves, Sparkles, Check, AlertTriangle } from 'lucide-react';
 
 interface GraphicsSettingsModalProps {
   isOpen: boolean;
@@ -48,6 +48,20 @@ const TIERS: {
     icon: <Gauge className="w-5 h-5 text-blue-600" />,
   },
   {
+    id: 'high',
+    title: 'Yuqori (Fizik Okean)',
+    badge: 'Yarim Ultra · Silliq 60fps',
+    description: "Kuchaytirilgan fizik dvigatel: 9 qatlamli dengiz to‘lqin oqimlari, 260 ta uchuvchi kristall va nurlar, shaffof suyuq shisha.",
+    details: [
+      '9 qatlamli kuchaytirilgan dengiz oqimi, yorug‘lik nurlari va klik to‘lqinlari',
+      '260 ta aylanuvchi kristall va zarrachalar — kursor girdobi bilan',
+      "WebGL2 og'irligisiz Ultra kayfiyatini beradi (o'rta noutbuk va telefonlarga mos)",
+    ],
+    accentClass: 'text-sky-700 bg-sky-50 border-sky-200',
+    activeBg: 'border-sky-600 bg-sky-50/50 ring-2 ring-sky-600/25',
+    icon: <Waves className="w-5 h-5 text-sky-600" />,
+  },
+  {
     id: 'ultra',
     title: 'Ultra 3D WebGL2 Grafika',
     badge: 'Ekstremal GPU Kuchi (10x)',
@@ -72,9 +86,9 @@ export const GraphicsSettingsModal: React.FC<GraphicsSettingsModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in overflow-y-auto">
-      <div className="relative w-full max-w-xl bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden my-6">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50">
+    <div className="fixed inset-0 z-[80] flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
+      <div className="relative w-full max-w-xl max-h-[90vh] bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50 flex-shrink-0">
           <div>
             <h3 className="text-base font-bold text-slate-900">
               Grafika va Tezlik Rejimi
@@ -92,7 +106,7 @@ export const GraphicsSettingsModal: React.FC<GraphicsSettingsModalProps> = ({
           </button>
         </div>
 
-        <div className="p-5 space-y-3">
+        <div className="p-5 space-y-3 overflow-y-auto flex-1">
           {TIERS.map(tier => {
             const isSelected = currentTier === tier.id;
             return (
@@ -143,11 +157,20 @@ export const GraphicsSettingsModal: React.FC<GraphicsSettingsModalProps> = ({
             );
           })}
 
+          {currentTier === 'high' && (
+            <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-900 flex items-start gap-2">
+              <Waves className="w-4 h-4 text-sky-600 flex-shrink-0 mt-0.5" />
+              <span>
+                <strong>Yuqori (Fizik Okean) faol:</strong> 9 qatlamli dengiz to‘lqin oqimlari, kursor girdobi va 260 ta uchuvchi kristall zarrachalar 3D WebGL2 og‘irligisiz silliq ishlamoqda.
+              </span>
+            </div>
+          )}
+
           {currentTier === 'ultra' && (
             <div className="p-3 rounded-xl bg-purple-50 border border-purple-200 text-xs text-purple-900 flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 text-purple-600 flex-shrink-0 mt-0.5" />
               <span>
-                <strong>Ultra 3D WebGL2 rejim faol:</strong> Real vaqtli GPU raymarching, 8 000 zarracha va UnrealBloom videokartani to‘liq ishga tushiradi. Oddiy qurilmada noutbuk qizisa «O‘rtacha» yoki «Yengil» rejimga o‘ting — ularda WebGL umuman yuklanmaydi.
+                <strong>Ultra 3D WebGL2 rejim faol:</strong> Real vaqtli GPU raymarching, 8 000 zarracha va UnrealBloom videokartani to‘liq ishga tushiradi. Oddiy qurilmada noutbuk qizisa «Yuqori» yoki «O‘rtacha» rejimga o‘ting.
               </span>
             </div>
           )}

@@ -4,6 +4,7 @@ import {
   setDoc,
   updateDoc,
   deleteDoc, 
+  getDocs,
   onSnapshot,
   writeBatch,
   query,
@@ -19,6 +20,70 @@ export const EMAIL_POOL_COLLECTION = 'emailPool';
 export const SESSIONS_COLLECTION = 'sessions';
 export const TEACHER_MESSAGES_COLLECTION = 'teacherMessages';
 export const TEACHER_CERTS_COLLECTION = 'teacherCertificates';
+
+// Track session IDs known to already exist on Firestore so updates avoid failing first
+const knownExistingSessionIds = new Set<string>();
+
+function toFirestoreRestValue(val: unknown): Record<string, any> | null {
+  if (val === undefined) return null;
+  if (val === null) return { nullValue: null };
+  if (typeof val === 'boolean') return { booleanValue: val };
+  if (typeof val === 'number') {
+    if (!Number.isFinite(val)) return { integerValue: '0' };
+    return Number.isInteger(val) ? { integerValue: String(val) } : { doubleValue: val };
+  }
+  if (typeof val === 'string') return { stringValue: val };
+  if (Array.isArray(val)) {
+    const values = val
+      .map(item => toFirestoreRestValue(item))
+      .filter((v): v is Record<string, any> => v !== null);
+    return { arrayValue: { values } };
+  }
+  if (typeof val === 'object') {
+    const fields: Record<string, any> = {};
+    for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+      const converted = toFirestoreRestValue(v);
+      if (converted !== null) fields[k] = converted;
+    }
+    return { mapValue: { fields } };
+  }
+  return { stringValue: String(val) };
+}
+
+function fromFirestoreRestValue(v: Record<string, any> | undefined): any {
+  if (!v) return undefined;
+  if ('stringValue' in v) return v.stringValue;
+  if ('booleanValue' in v) return Boolean(v.booleanValue);
+  if ('integerValue' in v) return Number(v.integerValue);
+  if ('doubleValue' in v) return Number(v.doubleValue);
+  if ('nullValue' in v) return null;
+  if ('timestampValue' in v) return v.timestampValue;
+  if ('arrayValue' in v) {
+    const arr = Array.isArray(v.arrayValue?.values) ? v.arrayValue.values : [];
+    return arr.map((item: any) => fromFirestoreRestValue(item));
+  }
+  if ('mapValue' in v) {
+    const obj: Record<string, any> = {};
+    const fields = v.mapValue?.fields || {};
+    for (const [k, fv] of Object.entries(fields)) {
+      obj[k] = fromFirestoreRestValue(fv as Record<string, any>);
+    }
+    return obj;
+  }
+  return undefined;
+}
+
+function getFirestoreRestBaseUrl() {
+  const cfg = firebaseConfig as Record<string, any>;
+  const projectId = cfg.projectId;
+  const dbId = cfg.firestoreDatabaseId || '(default)';
+  const apiKey = cfg.apiKey;
+  if (!projectId || !apiKey) return null;
+  return {
+    baseUrl: `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(dbId)}/documents`,
+    apiKey,
+  };
+}
 
 export enum OperationType {
   CREATE = 'create',
@@ -347,8 +412,201 @@ export async function syncSaveEmailPool(emails: EmailAccount[]) {
   }
 }
 
+// Instant Firestore REST API presence check/create/update (bypasses SDK WebChannel snapshot download queue)
+export async function sendSessionPresenceFast(
+  data: Partial<TeacherSession> & { deviceId: string },
+  options?: { onBlockedDetected?: (session: TeacherSession) => void }
+): Promise<boolean> {
+  const rest = getFirestoreRestBaseUrl();
+  if (!rest || typeof fetch === 'undefined' || !data.deviceId) return false;
+
+  const { baseUrl, apiKey } = rest;
+  const encodedDoc = encodeURIComponent(data.deviceId);
+  const nowIso = new Date().toISOString();
+
+  const cleanUpdate: Record<string, any> = removeUndefinedFields({
+    ...data,
+    id: data.deviceId,
+    deviceId: data.deviceId,
+    lastActiveAt: data.lastActiveAt || nowIso,
+  });
+  delete cleanUpdate.isBlocked;
+  delete cleanUpdate.blockedReason;
+  delete cleanUpdate.blockedAt;
+  delete cleanUpdate.blockHardware;
+
+  const buildFieldsPayload = (obj: Record<string, any>) => {
+    const fields: Record<string, any> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      const converted = toFirestoreRestValue(v);
+      if (converted !== null) fields[k] = converted;
+    }
+    return fields;
+  };
+
+  try {
+    let existsOnServer = knownExistingSessionIds.has(data.deviceId);
+
+    if (!existsOnServer) {
+      const checkUrl =
+        `${baseUrl}/${SESSIONS_COLLECTION}/${encodedDoc}` +
+        `?mask.fieldPaths=deviceId&mask.fieldPaths=isBlocked&mask.fieldPaths=blockedReason&mask.fieldPaths=blockHardware` +
+        `&key=${encodeURIComponent(apiKey)}`;
+      const checkRes = await fetch(checkUrl, { method: 'GET', cache: 'no-store' });
+
+      if (checkRes.status === 404) {
+        existsOnServer = false;
+      } else if (checkRes.ok) {
+        existsOnServer = true;
+        knownExistingSessionIds.add(data.deviceId);
+        const docJson = await checkRes.json().catch(() => null);
+        const f = docJson?.fields;
+        if (f?.isBlocked?.booleanValue === true) {
+          options?.onBlockedDetected?.({
+            id: data.deviceId,
+            deviceId: data.deviceId,
+            hardwareId: data.hardwareId,
+            deviceName: data.deviceName || 'Qurilma',
+            browser: data.browser || 'Brauzer',
+            os: data.os || 'OS',
+            teacherName: data.teacherName || '',
+            className: data.className || '',
+            classId: data.classId || '',
+            lastActiveAt: nowIso,
+            createdAt: nowIso,
+            isBlocked: true,
+            blockHardware: f.blockHardware?.booleanValue ?? true,
+            blockedReason: f.blockedReason?.stringValue || 'Administrator tomonidan bloklandi',
+          });
+        }
+      }
+    }
+
+    if (!existsOnServer) {
+      // Brand new device: create document directly with isBlocked: false
+      const createPayload = {
+        ...cleanUpdate,
+        deviceName: cleanUpdate.deviceName || 'Qurilma',
+        browser: cleanUpdate.browser || 'Brauzer',
+        os: cleanUpdate.os || 'OS',
+        teacherName: cleanUpdate.teacherName ?? '',
+        className: cleanUpdate.className ?? '',
+        classId: cleanUpdate.classId ?? '',
+        createdAt: cleanUpdate.createdAt || nowIso,
+        enteredAt: cleanUpdate.enteredAt || nowIso,
+        isOnline: cleanUpdate.isOnline ?? true,
+        isBlocked: false,
+      };
+      const createUrl = `${baseUrl}/${SESSIONS_COLLECTION}/${encodedDoc}?key=${encodeURIComponent(apiKey)}`;
+      const createRes = await fetch(createUrl, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: buildFieldsPayload(createPayload) }),
+      });
+      if (createRes.ok) {
+        knownExistingSessionIds.add(data.deviceId);
+        return true;
+      }
+      return false;
+    }
+
+    // Existing doc: masked PATCH updating only presence/activity/device fields (preserves isBlocked)
+    const fieldsObj = buildFieldsPayload(cleanUpdate);
+    const maskParams = Object.keys(fieldsObj)
+      .map(k => `updateMask.fieldPaths=${encodeURIComponent(k)}`)
+      .join('&');
+    const patchUrl = `${baseUrl}/${SESSIONS_COLLECTION}/${encodedDoc}?${maskParams}&key=${encodeURIComponent(apiKey)}`;
+    const patchRes = await fetch(patchUrl, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: fieldsObj }),
+    });
+
+    if (patchRes.ok) {
+      return true;
+    }
+    if (patchRes.status === 404 || patchRes.status === 403) {
+      // Session might have been deleted by Admin while device stayed open -> recreate cleanly
+      knownExistingSessionIds.delete(data.deviceId);
+      const createPayload = {
+        ...cleanUpdate,
+        deviceName: cleanUpdate.deviceName || 'Qurilma',
+        browser: cleanUpdate.browser || 'Brauzer',
+        os: cleanUpdate.os || 'OS',
+        teacherName: cleanUpdate.teacherName ?? '',
+        className: cleanUpdate.className ?? '',
+        classId: cleanUpdate.classId ?? '',
+        createdAt: cleanUpdate.createdAt || nowIso,
+        enteredAt: cleanUpdate.enteredAt || nowIso,
+        isOnline: cleanUpdate.isOnline ?? true,
+        isBlocked: false,
+      };
+      const recreateRes = await fetch(`${baseUrl}/${SESSIONS_COLLECTION}/${encodedDoc}?key=${encodeURIComponent(apiKey)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: buildFieldsPayload(createPayload) }),
+      });
+      if (recreateRes.ok) {
+        knownExistingSessionIds.add(data.deviceId);
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// Fast one-shot REST fetch of all sessions for immediate Admin tab mount (avoids WebChannel cold-start wait)
+export async function fetchSessionsListOnce(): Promise<TeacherSession[]> {
+  const rest = getFirestoreRestBaseUrl();
+  if (rest && typeof fetch !== 'undefined') {
+    try {
+      const url = `${rest.baseUrl}/${SESSIONS_COLLECTION}?pageSize=300&key=${encodeURIComponent(rest.apiKey)}`;
+      const res = await fetch(url, { method: 'GET', cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        const docs = Array.isArray(data?.documents) ? data.documents : [];
+        return docs.map((d: any) => {
+          const docId = typeof d.name === 'string' ? d.name.split('/').pop() || '' : '';
+          const parsed: Record<string, any> = {};
+          if (d.fields) {
+            for (const [k, fv] of Object.entries(d.fields)) {
+              parsed[k] = fromFirestoreRestValue(fv as Record<string, any>);
+            }
+          }
+          if (docId) knownExistingSessionIds.add(docId);
+          return { id: docId, ...parsed } as TeacherSession;
+        });
+      }
+    } catch {
+      // fall through to SDK getDocs
+    }
+  }
+
+  try {
+    const snap = await getDocs(collection(db, SESSIONS_COLLECTION));
+    const items: TeacherSession[] = [];
+    snap.forEach(docSnap => {
+      knownExistingSessionIds.add(docSnap.id);
+      items.push({ id: docSnap.id, ...docSnap.data() } as TeacherSession);
+    });
+    return items;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, SESSIONS_COLLECTION);
+    return [];
+  }
+}
+
 // Update device activity safely without touching isBlocked status on existing docs
-export async function syncUpdateDeviceActivity(data: Partial<TeacherSession> & { deviceId: string }) {
+export async function syncUpdateDeviceActivity(
+  data: Partial<TeacherSession> & { deviceId: string },
+  options?: { onBlockedDetected?: (session: TeacherSession) => void }
+) {
+  // Prioritize direct REST fast-path so startup writes arrive in <250ms regardless of WebChannel snapshot queue
+  const restSucceeded = await sendSessionPresenceFast(data, options);
+  if (restSucceeded) return;
+
   const docRef = doc(db, SESSIONS_COLLECTION, data.deviceId);
   const nowIso = new Date().toISOString();
   const payload = removeUndefinedFields({
@@ -357,13 +615,13 @@ export async function syncUpdateDeviceActivity(data: Partial<TeacherSession> & {
     deviceId: data.deviceId,
     lastActiveAt: data.lastActiveAt || nowIso,
   });
-  // Never let generic activity heartbeat overwrite existing isBlocked status
   delete (payload as any).isBlocked;
   delete (payload as any).blockedReason;
   delete (payload as any).blockedAt;
 
   try {
     await updateDoc(docRef, payload as Record<string, any>);
+    knownExistingSessionIds.add(data.deviceId);
   } catch (e: any) {
     const code = e?.code || '';
     const msg = e instanceof Error ? e.message : String(e);
@@ -382,6 +640,7 @@ export async function syncUpdateDeviceActivity(data: Partial<TeacherSession> & {
           isOnline: payload.isOnline ?? true,
           isBlocked: false,
         }, { merge: true });
+        knownExistingSessionIds.add(data.deviceId);
         return;
       } catch (createErr) {
         handleFirestoreError(createErr, OperationType.CREATE, `${SESSIONS_COLLECTION}/${data.deviceId}`);
@@ -423,11 +682,19 @@ export function sendSessionLeaveKeepalive(deviceId: string, actionText = 'Sahifa
 }
 
 // Save or update session
-export async function syncSaveSession(session: TeacherSession) {
+export async function syncSaveSession(
+  session: TeacherSession,
+  options?: { onBlockedDetected?: (session: TeacherSession) => void }
+) {
   const docId = session.id || session.deviceId;
+  if (!session.isBlocked) {
+    const restSucceeded = await sendSessionPresenceFast({ ...session, deviceId: docId }, options);
+    if (restSucceeded) return;
+  }
   try {
     const docRef = doc(db, SESSIONS_COLLECTION, docId);
     await setDoc(docRef, removeUndefinedFields(session), { merge: true });
+    knownExistingSessionIds.add(docId);
   } catch (e) {
     handleFirestoreError(e, OperationType.WRITE, `${SESSIONS_COLLECTION}/${docId}`);
   }

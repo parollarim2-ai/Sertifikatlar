@@ -73,8 +73,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   onSaveUpdatedStudents,
   onSessionActivity,
 }) => {
-  // Device detection
-  const currentDevice = useMemo(() => detectCurrentDevice(), []);
+  // Read fresh device info on demand so async Client Hints enrichment is always reflected
 
   // Active Project Track: 'ai' (Bir million promter) vs 'developer' (Besh million sun'iy intellekt yetakchilari)
   const [activeProject, setActiveProject] = useState<'ai' | 'developer'>(() => {
@@ -259,21 +258,22 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   onSessionActivityRef.current = onSessionActivity;
 
   useEffect(() => {
+    const freshDevice = detectCurrentDevice();
     const trackLabel = activeProject === 'developer' ? '5M AI Yetakchilari' : '1M Promter';
     if (currentClass) {
       onRegisterSessionRef.current({
-        id: currentDevice.deviceId,
-        deviceId: currentDevice.deviceId,
-        hardwareId: currentDevice.hardwareId,
+        id: freshDevice.deviceId,
+        deviceId: freshDevice.deviceId,
+        hardwareId: freshDevice.hardwareId,
         teacherName: currentClass.teacherName,
         className: currentClass.name,
         classId: currentClass.id,
-        deviceName: currentDevice.deviceName,
-        browser: currentDevice.browser,
-        os: currentDevice.os,
-        screen: currentDevice.screen,
-        cpuCores: currentDevice.cpuCores,
-        gpuRenderer: currentDevice.gpuRenderer,
+        deviceName: freshDevice.deviceName,
+        browser: freshDevice.browser,
+        os: freshDevice.os,
+        screen: freshDevice.screen,
+        cpuCores: freshDevice.cpuCores,
+        gpuRenderer: freshDevice.gpuRenderer,
         currentAction: `${currentClass.name} sinfini ko'rmoqda (${trackLabel})`,
         currentRole: 'teacher',
         lastActiveAt: new Date().toISOString(),
@@ -293,7 +293,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         classId: '',
       });
     }
-  }, [currentClass?.id, hasChosenProject, activeProject, currentDevice.deviceId, currentDevice.hardwareId, currentDevice.deviceName, currentDevice.browser, currentDevice.os, currentDevice.screen, currentDevice.cpuCores, currentDevice.gpuRenderer]);
+  }, [currentClass?.id, hasChosenProject, activeProject]);
 
   // Sequential Multi-Item Clipboard Copy for Windows History (Win + V)
   const handleSequentialCopyForWinV = async (student: Student) => {
@@ -1363,7 +1363,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
         <TeacherIncomingNoticeModal
           message={unreadMessage}
           isOpen={true}
-          onMarkAsRead={(msgId) => onMarkMessageAsRead(msgId, currentDevice.deviceName)}
+          onMarkAsRead={(msgId) => onMarkMessageAsRead(msgId, detectCurrentDevice().deviceName)}
         />
       )}
 
