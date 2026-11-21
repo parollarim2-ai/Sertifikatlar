@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, Suspense } from 'react';
 import { ClassGroup, Student, EmailAccount, TeacherSession, TeacherMessage, TelegramUser, TeacherCertificate, PaymentMethod, PaymentHistoryEntry, GraphicsTier, SessionActionLog } from './types';
 import { INITIAL_CLASSES, INITIAL_STUDENTS, INITIAL_EMAIL_POOL } from './data/mockData';
 import { TeacherPortal } from './components/TeacherPortal';
@@ -9,10 +9,13 @@ import { BulkEmailModal } from './components/BulkEmailModal';
 import { BulkStudentUploadModal } from './components/BulkStudentUploadModal';
 import { AdminLoginModal } from './components/AdminLoginModal';
 import { TeacherMessageModal } from './components/TeacherMessageModal';
-import { UltraWorldOverlay } from './components/UltraWorldOverlay';
 import { GraphicsSettingsModal } from './components/GraphicsSettingsModal';
 import { BlockedAccessOverlay } from './components/BlockedAccessOverlay';
 import { detectCurrentDevice } from './utils/deviceDetector';
+
+const UltraWorldOverlay = React.lazy(() =>
+  import('./components/UltraWorldOverlay').then(m => ({ default: m.UltraWorldOverlay }))
+);
 import { 
   subscribeToClasses,
   subscribeToStudents,
@@ -1157,8 +1160,12 @@ export default function App() {
 
   return (
     <div className="min-h-screen apple-canvas text-slate-900 flex flex-col font-sans selection:bg-blue-600 selection:text-white relative">
-      {/* Ultra Kosmik Grafika Engine (Mounts ONLY when graphicsTier === 'ultra') */}
-      <UltraWorldOverlay active={graphicsTier === 'ultra'} />
+      {/* Ultra Kosmik 3D WebGL2 Grafika Engine (Lazy-loaded & mounted ONLY when graphicsTier === 'ultra') */}
+      {graphicsTier === 'ultra' && (
+        <Suspense fallback={null}>
+          <UltraWorldOverlay active />
+        </Suspense>
+      )}
 
       {/* Admin Mode Sleek Top Bar (Frosted Dark Glass - Yellow replaced with Apple Pro style) */}
       {currentView === 'admin' && (

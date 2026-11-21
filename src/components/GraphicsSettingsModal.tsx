@@ -49,13 +49,13 @@ const TIERS: {
   },
   {
     id: 'ultra',
-    title: 'Ultra Kosmik Grafika',
-    badge: 'Maksimal Vizual Kuch',
-    description: "To'liq alohida grafik dvigatel: 180 ta fizik zarracha, suyuq linza (SVG refraction), ko'p qatlamli shisha va 3D effektlar.",
+    title: 'Ultra 3D WebGL2 Grafika',
+    badge: 'Ekstremal GPU Kuchi (10x)',
+    description: "To'liq Three.js WebGL2 3D dvigatel: 7-oktavli GLSL Raymarched Aurora, 8 000 ta GPU zarrachalar quyuni, 3D Kristall Giroskop va UnrealBloom.",
     details: [
-      'Real vaqtli fizik zarrachalar va kursor gravitatsiyasi',
-      'Chuqur ko‘p qatlamli blur, nur sinishi va 3D egilish',
-      'Faqat kuchli kompyuter va flagman telefonlar uchun',
+      '7-oktavli FBM Volumetric Aurora + Voronoi kaustik GLSL shader',
+      '8 000 ta GPU Curl-Noise zarrachalari va 64 ta 3D nur sochuvchi kristallar',
+      'UnrealBloom, xromatik aberratsiya, chuqur optik shisha va prizmatik chegara',
     ],
     accentClass: 'text-purple-700 bg-purple-50 border-purple-200',
     activeBg: 'border-purple-600 bg-purple-50/50 ring-2 ring-purple-600/25',
@@ -147,7 +147,7 @@ export const GraphicsSettingsModal: React.FC<GraphicsSettingsModalProps> = ({
             <div className="p-3 rounded-xl bg-purple-50 border border-purple-200 text-xs text-purple-900 flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 text-purple-600 flex-shrink-0 mt-0.5" />
               <span>
-                <strong>Ultra rejim faol:</strong> Maksimal fizik algoritmlar va ko‘p qatlamli optik shisha yoqilgan. Noutbuk qizisa yoki sekinlashsa «O‘rtacha» yoki «Yengil» rejimga o‘ting.
+                <strong>Ultra 3D WebGL2 rejim faol:</strong> Real vaqtli GPU raymarching, 8 000 zarracha va UnrealBloom videokartani to‘liq ishga tushiradi. Oddiy qurilmada noutbuk qizisa «O‘rtacha» yoki «Yengil» rejimga o‘ting — ularda WebGL umuman yuklanmaydi.
               </span>
             </div>
           )}

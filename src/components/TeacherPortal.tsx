@@ -600,8 +600,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
           </div>
 
           {/* Reassuring note */}
-          <div className="pt-2 text-center text-xs text-slate-500">
-            Istalgan vaqt yuqori paneldan loyihani bir teginishda almashtirishingiz mumkin.
+          <div className="pt-2 text-center text-xs text-slate-500 ultra-canvas-text">
+            <span>Istalgan vaqt yuqori paneldan loyihani bir teginishda almashtirishingiz mumkin.</span>
           </div>
 
         </div>
@@ -707,7 +707,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
 
         {/* Classes Responsive Grid */}
         <div className="space-y-3">
-          <div className="flex items-center justify-between text-xs text-slate-500 px-1 font-medium">
+          <div className="flex items-center justify-between text-xs text-slate-500 px-1 font-medium ultra-canvas-text">
             <span>
               Topilgan sinflar: <strong className="text-slate-900 font-bold">{filteredClasses.length}</strong> ta
             </span>
