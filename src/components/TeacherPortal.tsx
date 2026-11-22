@@ -61,6 +61,9 @@ interface TeacherPortalProps {
   onSaveStudent?: (student: Student) => Promise<void> | void;
   onSaveUpdatedStudents?: (updatedStudents: Student[]) => Promise<void> | void;
   onSessionActivity?: (info: { action: string; teacherName?: string; className?: string; classId?: string }) => void;
+  initialProjectTrack?: 'ai' | 'developer';
+  initialClassId?: string;
+  onConsumeInitialSelection?: () => void;
 }
 
 export const TeacherPortal: React.FC<TeacherPortalProps> = ({
@@ -72,6 +75,9 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
   onOpenStudentModal,
   onSaveUpdatedStudents,
   onSessionActivity,
+  initialProjectTrack,
+  initialClassId,
+  onConsumeInitialSelection,
 }) => {
   // Read fresh device info on demand so async Client Hints enrichment is always reflected
 
@@ -95,6 +101,24 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({
 
   // Currently selected class inside the active project
   const [selectedClassId, setSelectedClassId] = useState<string>('');
+
+  // Sync deep-link selection passed from LandingPagePro
+  useEffect(() => {
+    if (!initialProjectTrack && !initialClassId) return;
+    if (initialProjectTrack) {
+      setActiveProject(initialProjectTrack);
+      setHasChosenProject(true);
+      try {
+        localStorage.setItem('teacher_portal_active_project', initialProjectTrack);
+        localStorage.setItem('teacher_portal_has_chosen', 'true');
+      } catch {}
+    }
+    if (initialClassId) {
+      setHasChosenProject(true);
+      setSelectedClassId(initialClassId);
+    }
+    onConsumeInitialSelection?.();
+  }, [initialProjectTrack, initialClassId, onConsumeInitialSelection]);
 
   // Class list search query (NO autoFocus so phone keyboard stays closed!)
   const [classSearchQuery, setClassSearchQuery] = useState('');

@@ -11,6 +11,7 @@ import { AdminLoginModal } from './components/AdminLoginModal';
 import { TeacherMessageModal } from './components/TeacherMessageModal';
 import { GraphicsSettingsModal } from './components/GraphicsSettingsModal';
 import { BlockedAccessOverlay } from './components/BlockedAccessOverlay';
+import { LandingPagePro } from './components/LandingPagePro';
 import { detectCurrentDevice, enrichDeviceWithClientHints } from './utils/deviceDetector';
 
 const UltraWorldOverlay = React.lazy(() =>
@@ -54,7 +55,8 @@ import {
   Trash2, 
   ArrowLeft,
   GraduationCap,
-  Sliders
+  Sliders,
+  Home
 } from 'lucide-react';
 
 const STORAGE_CLASSES_KEY = 'b1m_school_classes_v5';
@@ -119,14 +121,8 @@ export default function App() {
     } catch {}
     return 'medium';
   });
+  // Keep graphicsTier persisted, but enforce clean architectural mode on the Landing view (zero cosmic CSS)
   const [isGraphicsSettingsOpen, setIsGraphicsSettingsOpen] = useState(false);
-
-  useEffect(() => {
-    try {
-      document.documentElement.dataset.graphics = graphicsTier;
-      localStorage.setItem('b1m_graphics_tier', graphicsTier);
-    } catch {}
-  }, [graphicsTier]);
 
   // Current device hardware + browser fingerprint (synchronously detected + async Client Hints enrichment)
   const [currentDevice, setCurrentDevice] = useState(() => detectCurrentDevice());
@@ -196,15 +192,57 @@ export default function App() {
     }
   });
 
-  // Active view: Teachers always land on 'teacher' portal by default!
-  const [currentView, setCurrentView] = useState<'teacher' | 'admin'>(() => {
+  // Active view: Landing Page Pro Max Ultra by default unless #admin or #portal is targeted
+  const [currentView, setCurrentView] = useState<'landing' | 'teacher' | 'admin'>(() => {
     if (typeof window !== 'undefined') {
       if (window.location.hash.includes('admin') || window.location.search.includes('admin')) {
         return 'admin';
       }
+      if (window.location.hash.includes('portal') || window.location.search.includes('portal')) {
+        return 'teacher';
+      }
     }
-    return 'teacher';
+    return 'landing';
   });
+
+  const [portalLaunchTarget, setPortalLaunchTarget] = useState<{
+    track?: 'ai' | 'developer';
+    classId?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    try {
+      document.documentElement.dataset.graphics = currentView === 'landing' ? 'medium' : graphicsTier;
+      localStorage.setItem('b1m_graphics_tier', graphicsTier);
+    } catch {}
+  }, [graphicsTier, currentView]);
+
+  const handleEnterPortal = useCallback((track?: 'ai' | 'developer', classId?: string) => {
+    if (track) {
+      try {
+        localStorage.setItem('teacher_portal_active_project', track);
+        localStorage.setItem('teacher_portal_has_chosen', 'true');
+      } catch {}
+    }
+    if (track || classId) {
+      setPortalLaunchTarget({ track, classId });
+    } else {
+      setPortalLaunchTarget(null);
+    }
+    setCurrentView('teacher');
+    if (typeof window !== 'undefined') {
+      window.location.hash = '#portal';
+      window.scrollTo({ top: 0, behavior: 'auto' });
+    }
+  }, []);
+
+  const handleReturnToLanding = useCallback(() => {
+    setCurrentView('landing');
+    if (typeof window !== 'undefined') {
+      window.location.hash = '';
+      window.scrollTo({ top: 0, behavior: 'auto' });
+    }
+  }, []);
 
   // Poll Telegram status ONLY when Admin view is active (60s interval; never in teacher view)
   useEffect(() => {
@@ -233,7 +271,7 @@ export default function App() {
 
   const [isConfirmClearOpen, setIsConfirmClearOpen] = useState(false);
 
-  // Check URL hash for admin
+  // Check URL hash for admin / portal / landing
   useEffect(() => {
     const handleHashChange = () => {
       if (window.location.hash.includes('admin')) {
@@ -242,8 +280,10 @@ export default function App() {
         } else {
           setIsAdminLoginOpen(true);
         }
-      } else {
+      } else if (window.location.hash.includes('portal')) {
         setCurrentView('teacher');
+      } else {
+        setCurrentView('landing');
       }
     };
 
@@ -473,7 +513,7 @@ export default function App() {
     localStorage.removeItem('b1m_admin_token');
     localStorage.removeItem(STORAGE_ADMIN_AUTH_KEY);
     setCurrentView('teacher');
-    window.location.hash = '';
+    window.location.hash = '#portal';
   };
 
   const handleOpenAdminLogin = () => {
@@ -782,7 +822,7 @@ export default function App() {
     className: '',
     classId: '',
     currentAction: 'Saytga kirdi',
-    currentRole: currentView,
+    currentRole: currentView === 'admin' ? 'admin' : 'teacher',
   });
 
   const pushActivityLog = useCallback((actionText: string) => {
@@ -844,11 +884,17 @@ export default function App() {
 
   // Global presence heartbeat (12s while visible) + instant leave tracking on hide/close
   useEffect(() => {
-    liveContextRef.current.currentRole = currentView;
+    const sessionRole: 'teacher' | 'admin' = currentView === 'admin' ? 'admin' : 'teacher';
+    liveContextRef.current.currentRole = sessionRole;
     if (!childActivityReportedRef.current) {
       reportSessionActivity({
-        action: currentView === 'admin' ? 'Admin panelini ochdi' : 'Saytga kirdi',
-        role: currentView,
+        action:
+          currentView === 'admin'
+            ? 'Admin panelini ochdi'
+            : currentView === 'landing'
+            ? "Bosh sahifani ko'rmoqda"
+            : 'Portalga kirdi',
+        role: sessionRole,
       });
     }
     childActivityReportedRef.current = false;
@@ -1189,214 +1235,244 @@ export default function App() {
 
   return (
     <div className="min-h-screen apple-canvas text-slate-900 flex flex-col font-sans selection:bg-blue-600 selection:text-white relative">
-      {/* Ultra Kosmik 3D WebGL2 Grafika Engine (Lazy-loaded & mounted ONLY when graphicsTier === 'ultra') */}
-      {graphicsTier === 'ultra' && (
+      {/* Ultra Kosmik 3D WebGL2 Grafika Engine (NEVER mounted on Landing Page) */}
+      {currentView !== 'landing' && graphicsTier === 'ultra' && (
         <Suspense fallback={null}>
           <UltraWorldOverlay active />
         </Suspense>
       )}
 
-      {/* Yuqori Fizik Okean Grafika Engine (Lazy-loaded & mounted ONLY when graphicsTier === 'high') */}
-      {graphicsTier === 'high' && (
+      {/* Yuqori Fizik Okean Grafika Engine (NEVER mounted on Landing Page) */}
+      {currentView !== 'landing' && graphicsTier === 'high' && (
         <Suspense fallback={null}>
           <OceanPhysicsOverlay active />
         </Suspense>
       )}
 
-      {/* Admin Mode Sleek Top Bar (Frosted Dark Glass - Yellow replaced with Apple Pro style) */}
-      {currentView === 'admin' && (
-        <div className="bg-slate-900/90 backdrop-blur-xl text-slate-200 px-4 py-2 text-xs font-medium flex items-center justify-between shadow-xs border-b border-white/10 relative z-20">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-            <span className="text-slate-200 font-semibold">Administrator Boshqaruv Rejimi</span>
-            <span className="hidden sm:inline text-slate-400 text-[11px]">• Tizim boshqaruvi, faol seanslar va sertifikatlar monitoringi</span>
-          </div>
-          <button
-            onClick={() => {
-              setCurrentView('teacher');
-              window.location.hash = '';
-            }}
-            className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border border-white/10"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            <span>O'qituvchilar portaliga qaytish</span>
-          </button>
-        </div>
-      )}
-
-      {/* Apple Pro Frosted Glass Header */}
-      <header className="sticky top-0 z-40 apple-glass border-b border-white/60 backdrop-blur-2xl">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-2">
-          
-          {/* Logo & School Platform Name */}
-          <div className="flex items-center gap-3.5 min-w-0">
-            <div className="w-10 h-10 rounded-xl apple-btn-blue flex items-center justify-center font-black text-white text-base shadow-md shadow-blue-500/25 flex-shrink-0 animate-bounce-subtle">
-              <GraduationCap className="w-5 h-5" />
-            </div>
-            <div className="min-w-0">
+      {currentView === 'landing' ? (
+        <LandingPagePro
+          classes={classes}
+          students={students}
+          teacherCertificates={teacherCertificates}
+          onEnterPortal={handleEnterPortal}
+          onOpenAdminLogin={handleOpenAdminLogin}
+        />
+      ) : (
+        <>
+          {/* Admin Mode Sleek Top Bar */}
+          {currentView === 'admin' && (
+            <div className="bg-slate-900/90 backdrop-blur-xl text-slate-200 px-4 py-2 text-xs font-medium flex items-center justify-between shadow-xs border-b border-white/10 relative z-20">
               <div className="flex items-center gap-2">
-                <span className="font-extrabold text-slate-900 text-base sm:text-lg tracking-tight truncate">
-                  Bir Million O'zbek Dasturchilari
-                </span>
-                <span className="hidden sm:inline-flex items-center text-[11px] font-semibold text-blue-700 bg-blue-50/80 px-2.5 py-0.5 rounded-md border border-blue-200/60 flex-shrink-0">
-                  Coursera Ta'lim Portali
-                </span>
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                <span className="text-slate-200 font-semibold">Administrator Boshqaruv Rejimi</span>
+                <span className="hidden sm:inline text-slate-400 text-[11px]">• Tizim boshqaruvi, faol seanslar va sertifikatlar monitoringi</span>
               </div>
-              <p className="text-xs text-slate-500 truncate">
-                Sinf rahbarlari va sertifikatlashtirish monitoring tizimi
-              </p>
-            </div>
-          </div>
-
-          {/* Right controls: Graphics selector + School Year */}
-          <div className="flex items-center gap-3 flex-shrink-0">
-            <button
-              type="button"
-              onClick={() => setIsGraphicsSettingsOpen(true)}
-              className={`px-2.5 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
-                graphicsTier === 'ultra'
-                  ? 'bg-purple-600 text-white border-purple-600 shadow-xs'
-                  : graphicsTier === 'high'
-                  ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
-                  : graphicsTier === 'lite'
-                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
-                  : 'bg-white/90 text-slate-700 border-slate-200 hover:bg-slate-50'
-              }`}
-              title="Grafika va animatsiya rejimini tanlash"
-            >
-              <Sliders className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">
-                {graphicsTier === 'ultra'
-                  ? 'Ultra'
-                  : graphicsTier === 'high'
-                  ? 'Yuqori'
-                  : graphicsTier === 'lite'
-                  ? 'Yengil'
-                  : "O'rtacha"}
-              </span>
-            </button>
-
-            <div className="text-right hidden xs:block sm:block">
-              <span className="text-xs font-bold text-slate-800 block">
-                2025–2026 o'quv yili
-              </span>
-              <span className="text-[11px] text-emerald-700 font-semibold flex items-center justify-end gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-xs shadow-emerald-400 animate-pulse"></span>
-                <span>Tizim faol</span>
-              </span>
-            </div>
-          </div>
-
-        </div>
-      </header>
-
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-5xl w-full mx-auto px-3 sm:px-6 py-6 relative z-10">
-        {currentView === 'teacher' ? (
-          <TeacherPortal
-            classes={classes}
-            students={students}
-            messages={messages}
-            onRegisterSession={handleRegisterSession}
-            onMarkMessageAsRead={handleMarkMessageAsRead}
-            onOpenStudentModal={(student) => setActiveStudentModal(student)}
-            onToggleStudentPayment={handleToggleStudentPayment}
-            onSaveStudent={handleSaveStudent}
-            onSaveUpdatedStudents={handleSaveBatchStudents}
-            onSessionActivity={(info) => {
-              childActivityReportedRef.current = true;
-              reportSessionActivity({ ...info, role: 'teacher' });
-            }}
-          />
-        ) : (
-          <div className="animate-fade-in">
-            <AdminPanel
-              classes={classes}
-              students={students}
-              emailPool={emailPool}
-              messages={messages}
-              telegramUsers={telegramUsers}
-              teacherCertificates={teacherCertificates}
-              currentDeviceId={currentDevice.deviceId}
-              onRefreshTelegramUsers={fetchTelegramStatus}
-              onOpenStudentModal={(student) => setActiveStudentModal(student)}
-              onOpenPaymentModal={(classGroup) => setActivePaymentClass(classGroup)}
-              onToggleStudentPayment={handleToggleStudentPayment}
-              onOpenBulkEmailModal={() => setIsBulkEmailOpen(true)}
-              onApplyEmailDistribution={handleApplyEmailDistribution}
-              onOpenBulkUploadModal={(classId) => {
-                setBulkUploadInitialClassId(classId);
-                setIsBulkUploadOpen(true);
-              }}
-              onOpenTeacherMessageModal={(classGroup) => setActiveMessageClass(classGroup)}
-              onToggleBlockDevice={handleToggleBlockDevice}
-              onDeleteSession={handleDeleteSession}
-              onAddSingleStudent={handleAddSingleStudent}
-              onDeleteStudent={handleDeleteStudent}
-              onSaveClass={handleSaveClass}
-              onDeleteClass={handleDeleteClass}
-              onLogoutAdmin={handleAdminLogout}
-              onAddTeacher={handleAddTeacher}
-              onAddBatchTeachers={handleAddBatchTeachers}
-              onUpdateTeacher={handleUpdateTeacher}
-              onDeleteTeacher={handleDeleteTeacher}
-              onDeleteBatchTeachers={handleDeleteBatchTeachers}
-              onAssignTeacherEmail={handleAssignTeacherEmail}
-              onAssignBatchTeacherEmails={handleAssignBatchTeacherEmails}
-              onAddGeneratedEmails={handleAddGeneratedEmails}
-              onSaveStudent={handleSaveStudent}
-              onSaveBatchStudents={handleSaveBatchStudents}
-              onSaveClassAndStudents={handleSaveClassAndStudents}
-              onUnlockExternalTeacher={handleUnlockExternalTeacher}
-              auditTargetClass={auditTargetClass}
-              onClearAuditTarget={() => setAuditTargetClass(null)}
-              graphicsTier={graphicsTier}
-              onOpenGraphicsSettings={() => setIsGraphicsSettingsOpen(true)}
-              onSessionActivity={(info) => {
-                childActivityReportedRef.current = true;
-                reportSessionActivity({ ...info, role: 'admin' });
-              }}
-            />
-          </div>
-        )}
-      </main>
-
-      {/* Apple Pro Glass Footer */}
-      <footer className="apple-glass border-t border-white/60 py-6 text-slate-600 text-xs mt-auto">
-        <div className="max-w-5xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-center sm:text-left">
-          <div className="space-y-0.5">
-            <p className="text-slate-800 font-semibold">
-              © 2026 "Bir Million O'zbek Dasturchilari" maktab ta'lim monitoringi platformasi.
-            </p>
-            <p className="text-xs text-slate-500">
-              Belgilangan xizmat to'lovi: 5 000 so'm / ta sertifikat
-            </p>
-          </div>
-
-          <div className="flex items-center gap-4 text-xs">
-            {currentView === 'admin' ? (
               <button
-                onClick={handleRequestClearAllData}
-                className="text-slate-500 hover:text-rose-600 flex items-center gap-1.5 transition-colors cursor-pointer"
-                title="Barcha ma'lumotlarni tozalash"
+                onClick={() => {
+                  setCurrentView('teacher');
+                  window.location.hash = '#portal';
+                }}
+                className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border border-white/10"
               >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>Baza tozalash</span>
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>O'qituvchilar portaliga qaytish</span>
               </button>
+            </div>
+          )}
+
+          {/* Apple Pro Frosted Glass Header */}
+          <header className="sticky top-0 z-40 apple-glass border-b border-white/60 backdrop-blur-2xl">
+            <div className="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-2">
+              
+              {/* Logo & School Platform Name (Click returns to Landing Page) */}
+              <button
+                type="button"
+                onClick={handleReturnToLanding}
+                className="flex items-center gap-3.5 min-w-0 text-left cursor-pointer group"
+                title="Bosh sahifaga qaytish"
+              >
+                <div className="w-10 h-10 rounded-xl apple-btn-blue flex items-center justify-center font-black text-white text-base shadow-md shadow-blue-500/25 flex-shrink-0 animate-bounce-subtle">
+                  <GraduationCap className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-extrabold text-slate-900 group-hover:text-blue-700 transition-colors text-base sm:text-lg tracking-tight truncate">
+                      Bir Million O'zbek Dasturchilari
+                    </span>
+                    <span className="hidden sm:inline-flex items-center text-[11px] font-semibold text-blue-700 bg-blue-50/80 px-2.5 py-0.5 rounded-md border border-blue-200/60 flex-shrink-0">
+                      Coursera Ta'lim Portali
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 truncate">
+                    Sinf rahbarlari va sertifikatlashtirish monitoring tizimi
+                  </p>
+                </div>
+              </button>
+
+              {/* Right controls: Home button + Graphics selector + School Year */}
+              <div className="flex items-center gap-2.5 flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={handleReturnToLanding}
+                  className="px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white/90 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="Bosh sahifaga qaytish"
+                >
+                  <Home className="w-3.5 h-3.5 text-blue-600" />
+                  <span className="hidden sm:inline">Bosh sahifa</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIsGraphicsSettingsOpen(true)}
+                  className={`px-2.5 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                    graphicsTier === 'ultra'
+                      ? 'bg-purple-600 text-white border-purple-600 shadow-xs'
+                      : graphicsTier === 'high'
+                      ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+                      : graphicsTier === 'lite'
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                      : 'bg-white/90 text-slate-700 border-slate-200 hover:bg-slate-50'
+                  }`}
+                  title="Grafika va animatsiya rejimini tanlash"
+                >
+                  <Sliders className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">
+                    {graphicsTier === 'ultra'
+                      ? 'Ultra'
+                      : graphicsTier === 'high'
+                      ? 'Yuqori'
+                      : graphicsTier === 'lite'
+                      ? 'Yengil'
+                      : "O'rtacha"}
+                  </span>
+                </button>
+
+                <div className="text-right hidden md:block">
+                  <span className="text-xs font-bold text-slate-800 block">
+                    2025–2026 o'quv yili
+                  </span>
+                  <span className="text-[11px] text-emerald-700 font-semibold flex items-center justify-end gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-xs shadow-emerald-400 animate-pulse"></span>
+                    <span>Tizim faol</span>
+                  </span>
+                </div>
+              </div>
+
+            </div>
+          </header>
+
+          {/* Main Content Area */}
+          <main className="flex-1 max-w-5xl w-full mx-auto px-3 sm:px-6 py-6 relative z-10">
+            {currentView === 'teacher' ? (
+              <TeacherPortal
+                classes={classes}
+                students={students}
+                messages={messages}
+                onRegisterSession={handleRegisterSession}
+                onMarkMessageAsRead={handleMarkMessageAsRead}
+                onOpenStudentModal={(student) => setActiveStudentModal(student)}
+                onToggleStudentPayment={handleToggleStudentPayment}
+                onSaveStudent={handleSaveStudent}
+                onSaveUpdatedStudents={handleSaveBatchStudents}
+                initialProjectTrack={portalLaunchTarget?.track}
+                initialClassId={portalLaunchTarget?.classId}
+                onConsumeInitialSelection={() => setPortalLaunchTarget(null)}
+                onSessionActivity={(info) => {
+                  childActivityReportedRef.current = true;
+                  reportSessionActivity({ ...info, role: 'teacher' });
+                }}
+              />
             ) : (
-              <button
-                onClick={handleOpenAdminLogin}
-                className="text-slate-600 hover:text-slate-900 flex items-center gap-1.5 transition-all cursor-pointer px-3 py-1.5 rounded-lg apple-btn-secondary"
-                title="Maktab ma'muriyati uchun"
-              >
-                <Lock className="w-3.5 h-3.5 text-blue-600" />
-                <span className="font-medium">Boshqaruv</span>
-              </button>
+              <div className="animate-fade-in">
+                <AdminPanel
+                  classes={classes}
+                  students={students}
+                  emailPool={emailPool}
+                  messages={messages}
+                  telegramUsers={telegramUsers}
+                  teacherCertificates={teacherCertificates}
+                  currentDeviceId={currentDevice.deviceId}
+                  onRefreshTelegramUsers={fetchTelegramStatus}
+                  onOpenStudentModal={(student) => setActiveStudentModal(student)}
+                  onOpenPaymentModal={(classGroup) => setActivePaymentClass(classGroup)}
+                  onToggleStudentPayment={handleToggleStudentPayment}
+                  onOpenBulkEmailModal={() => setIsBulkEmailOpen(true)}
+                  onApplyEmailDistribution={handleApplyEmailDistribution}
+                  onOpenBulkUploadModal={(classId) => {
+                    setBulkUploadInitialClassId(classId);
+                    setIsBulkUploadOpen(true);
+                  }}
+                  onOpenTeacherMessageModal={(classGroup) => setActiveMessageClass(classGroup)}
+                  onToggleBlockDevice={handleToggleBlockDevice}
+                  onDeleteSession={handleDeleteSession}
+                  onAddSingleStudent={handleAddSingleStudent}
+                  onDeleteStudent={handleDeleteStudent}
+                  onSaveClass={handleSaveClass}
+                  onDeleteClass={handleDeleteClass}
+                  onLogoutAdmin={handleAdminLogout}
+                  onAddTeacher={handleAddTeacher}
+                  onAddBatchTeachers={handleAddBatchTeachers}
+                  onUpdateTeacher={handleUpdateTeacher}
+                  onDeleteTeacher={handleDeleteTeacher}
+                  onDeleteBatchTeachers={handleDeleteBatchTeachers}
+                  onAssignTeacherEmail={handleAssignTeacherEmail}
+                  onAssignBatchTeacherEmails={handleAssignBatchTeacherEmails}
+                  onAddGeneratedEmails={handleAddGeneratedEmails}
+                  onSaveStudent={handleSaveStudent}
+                  onSaveBatchStudents={handleSaveBatchStudents}
+                  onSaveClassAndStudents={handleSaveClassAndStudents}
+                  onUnlockExternalTeacher={handleUnlockExternalTeacher}
+                  auditTargetClass={auditTargetClass}
+                  onClearAuditTarget={() => setAuditTargetClass(null)}
+                  graphicsTier={graphicsTier}
+                  onOpenGraphicsSettings={() => setIsGraphicsSettingsOpen(true)}
+                  onSessionActivity={(info) => {
+                    childActivityReportedRef.current = true;
+                    reportSessionActivity({ ...info, role: 'admin' });
+                  }}
+                />
+              </div>
             )}
-          </div>
-        </div>
-      </footer>
+          </main>
+
+          {/* Apple Pro Glass Footer */}
+          <footer className="apple-glass border-t border-white/60 py-6 text-slate-600 text-xs mt-auto">
+            <div className="max-w-5xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-center sm:text-left">
+              <div className="space-y-0.5">
+                <p className="text-slate-800 font-semibold">
+                  © 2026 "Bir Million O'zbek Dasturchilari" maktab ta'lim monitoringi platformasi.
+                </p>
+                <p className="text-xs text-slate-500">
+                  Belgilangan xizmat to'lovi: 5 000 so'm / ta sertifikat
+                </p>
+              </div>
+
+              <div className="flex items-center gap-4 text-xs">
+                {currentView === 'admin' ? (
+                  <button
+                    onClick={handleRequestClearAllData}
+                    className="text-slate-500 hover:text-rose-600 flex items-center gap-1.5 transition-colors cursor-pointer"
+                    title="Barcha ma'lumotlarni tozalash"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Baza tozalash</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleOpenAdminLogin}
+                    className="text-slate-600 hover:text-slate-900 flex items-center gap-1.5 transition-all cursor-pointer px-3 py-1.5 rounded-lg apple-btn-secondary"
+                    title="Maktab ma'muriyati uchun"
+                  >
+                    <Lock className="w-3.5 h-3.5 text-blue-600" />
+                    <span className="font-medium">Boshqaruv</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </footer>
+        </>
+      )}
 
       {/* Modals */}
       {isConfirmClearOpen && (
