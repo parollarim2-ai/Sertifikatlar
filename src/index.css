@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {
   html {
@@ -13,6 +14,18 @@
   }
 }
 
+@keyframes foilSweep {
+  0% { transform: translateX(-140%) skewX(-18deg); opacity: 0; }
+  20% { opacity: 0.55; }
+  55% { opacity: 0.45; }
+  100% { transform: translateX(240%) skewX(-18deg); opacity: 0; }
+}
+
+@keyframes gentleFloat {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-6px); }
+}
+
 @layer utilities {
   .font-display {
     font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
@@ -23,6 +36,12 @@
   .font-mono-tech {
     font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     font-variant-numeric: tabular-nums;
+  }
+  .animate-foil-sweep {
+    animation: foilSweep 4.8s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  }
+  .animate-gentle-float {
+    animation: gentleFloat 5s ease-in-out infinite;
   }
 }
 
