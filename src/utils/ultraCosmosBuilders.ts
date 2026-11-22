@@ -196,6 +196,7 @@ const ACCRETION_DISK_FRAG = /* glsl */ `
   uniform float uTime;
   uniform float uInnerRadius;
   uniform float uOuterRadius;
+  uniform float uEnergy;
 
   float hash21(vec2 p) {
     p = fract(p * vec2(234.34, 435.345));
@@ -233,38 +234,40 @@ const ACCRETION_DISK_FRAG = /* glsl */ `
 
     float angle = atan(vLocalPos.y, vLocalPos.x);
 
-    // Keplerian differential shear: inner plasma orbits dramatically faster
-    float keplerSpeed = 1.65 / pow(max(r * 0.45, 0.35), 1.3);
-    float spiralAngle = angle + uTime * keplerSpeed - log(max(r, 0.2)) * 5.2;
+    // Keplerian differential shear accelerates dramatically with pointer/click energy
+    float keplerSpeed = (1.85 + uEnergy * 1.45) / pow(max(r * 0.45, 0.35), 1.3);
+    float spiralAngle = angle + uTime * keplerSpeed - log(max(r, 0.2)) * (5.2 + uEnergy * 1.2);
 
     // Seamless polar coordinates for swirling plasma filaments
     vec2 polarUv = vec2(cos(spiralAngle), sin(spiralAngle)) * (1.2 + normR * 3.4);
-    float n1 = fbm(polarUv * 2.1 + vec2(uTime * 0.12, -uTime * 0.09));
-    float n2 = fbm(polarUv * 4.8 - vec2(uTime * 0.18, uTime * 0.14) + n1 * 1.4);
+    float n1 = fbm(polarUv * 2.1 + vec2(uTime * 0.16, -uTime * 0.12));
+    float n2 = fbm(polarUv * 4.8 - vec2(uTime * 0.24, uTime * 0.18) + n1 * 1.45);
 
     // Concentric resonant dust lanes & glowing plasma arcs
-    float rings = 0.55 + 0.45 * sin(normR * 26.0 + n1 * 4.5 - uTime * 0.8);
-    float filaments = smoothstep(0.22, 0.88, n2 * 0.72 + rings * 0.42);
+    float rings = 0.55 + 0.45 * sin(normR * 26.0 + n1 * 4.5 - uTime * (1.1 + uEnergy * 1.5));
+    float filaments = smoothstep(0.20, 0.88, n2 * 0.72 + rings * 0.42);
 
     // Relativistic Doppler beaming (approaching side glows brighter & bluer)
-    float doppler = 0.74 + 0.58 * cos(angle - 0.55);
+    float doppler = 0.74 + 0.62 * cos(angle - 0.55);
 
     // Hot white-cyan ISCO -> electric cyan -> cosmic violet -> deep magenta-ember
-    vec3 colInnerHot = vec3(0.90, 0.97, 1.00);
-    vec3 colPlasmaCyan = vec3(0.18, 0.74, 1.00);
-    vec3 colVioletArc = vec3(0.56, 0.26, 0.96);
-    vec3 colOuterDust = vec3(0.88, 0.26, 0.58);
+    vec3 colInnerHot = vec3(0.92, 0.98, 1.00);
+    vec3 colPlasmaCyan = vec3(0.18, 0.78, 1.00);
+    vec3 colVioletArc = vec3(0.58, 0.28, 0.98);
+    vec3 colOuterDust = vec3(0.92, 0.28, 0.62);
 
     vec3 col = mix(colInnerHot, colPlasmaCyan, smoothstep(0.0, 0.24, normR));
     col = mix(col, colVioletArc, smoothstep(0.22, 0.65, normR));
     col = mix(col, colOuterDust, smoothstep(0.60, 0.96, normR));
+    col = mix(col, colInnerHot, clamp(uEnergy * 0.35, 0.0, 0.45) * (1.0 - normR));
 
     // ISCO inner photon spike + smooth outer horizon fade
-    float innerSpike = exp(-normR * 12.0) * 1.35;
-    float radialFade = smoothstep(0.0, 0.06, normR) * pow(1.0 - normR, 1.55);
-    float alpha = clamp((filaments * 0.85 + innerSpike) * radialFade * doppler, 0.0, 1.0);
+    float innerSpike = exp(-normR * 11.0) * (1.35 + uEnergy * 0.95);
+    float radialFade = smoothstep(0.0, 0.06, normR) * pow(1.0 - normR, 1.45);
+    float flareBoost = 1.0 + uEnergy * 0.75;
+    float alpha = clamp((filaments * 0.88 + innerSpike) * radialFade * doppler * flareBoost, 0.0, 1.0);
 
-    gl_FragColor = vec4(col * (1.05 + innerSpike * 1.1) * doppler, alpha * 0.88);
+    gl_FragColor = vec4(col * (1.08 + innerSpike * 1.15) * doppler * flareBoost, alpha * 0.90);
   }
 `;
 
@@ -287,22 +290,23 @@ const PHOTON_HALO_FRAG = /* glsl */ `
   varying vec3 vViewPos;
   varying vec3 vLocalPos;
   uniform float uTime;
+  uniform float uEnergy;
 
   void main() {
     vec3 viewDir = normalize(vViewPos);
     float ndotv = abs(dot(normalize(vNormal), viewDir));
     // Razor-sharp photon ring right at the grazing limb + softer gravitational lensing corona
-    float photonRing = pow(1.0 - ndotv, 6.5);
-    float softCorona = pow(1.0 - ndotv, 2.6) * 0.35;
+    float photonRing = pow(1.0 - ndotv, 6.0 - min(uEnergy * 1.6, 2.2));
+    float softCorona = pow(1.0 - ndotv, 2.4) * (0.35 + uEnergy * 0.35);
 
-    float shimmer = 0.86 + 0.14 * sin(vLocalPos.x * 5.0 + vLocalPos.y * 4.0 + uTime * 2.2);
+    float shimmer = 0.86 + 0.14 * sin(vLocalPos.x * 5.0 + vLocalPos.y * 4.0 + uTime * (2.5 + uEnergy * 3.5));
     float dopplerRim = 0.8 + 0.35 * normalize(vLocalPos).x;
 
-    vec3 ringColor = mix(vec3(0.32, 0.78, 1.0), vec3(0.75, 0.45, 1.0), 0.38 + 0.25 * sin(uTime * 0.7 + vLocalPos.y * 2.0));
-    vec3 coreRim = vec3(0.95, 0.98, 1.0);
+    vec3 ringColor = mix(vec3(0.32, 0.78, 1.0), vec3(0.78, 0.45, 1.0), 0.38 + 0.28 * sin(uTime * 0.9 + vLocalPos.y * 2.0));
+    vec3 coreRim = vec3(0.96, 0.99, 1.0);
 
-    vec3 finalCol = mix(ringColor, coreRim, smoothstep(0.45, 0.95, photonRing)) * shimmer * dopplerRim;
-    float alpha = clamp((photonRing * 1.35 + softCorona) * shimmer, 0.0, 1.0);
+    vec3 finalCol = mix(ringColor, coreRim, smoothstep(0.42, 0.95, photonRing)) * shimmer * dopplerRim * (1.0 + uEnergy * 0.75);
+    float alpha = clamp((photonRing * 1.45 + softCorona) * shimmer, 0.0, 1.0);
 
     gl_FragColor = vec4(finalCol, alpha);
   }
@@ -328,19 +332,20 @@ const JET_FRAG = /* glsl */ `
   varying vec3 vViewPos;
   uniform float uTime;
   uniform float uDir;
+  uniform float uEnergy;
 
   void main() {
     vec3 viewDir = normalize(vViewPos);
-    float edgeFade = pow(abs(dot(normalize(vNormal), viewDir)), 1.7);
+    float edgeFade = pow(abs(dot(normalize(vNormal), viewDir)), 1.65);
 
     // Distance along polar axis (0 near core -> 1 at tip)
     float along = uDir > 0.0 ? vUv.y : (1.0 - vUv.y);
-    float pulse = 0.72 + 0.28 * sin(along * 18.0 - uTime * 3.8);
-    float spiral = 0.65 + 0.35 * sin(vUv.x * 12.566 + along * 8.0 - uTime * 2.4);
+    float pulse = 0.72 + 0.28 * sin(along * 18.0 - uTime * (4.2 + uEnergy * 6.0));
+    float spiral = 0.65 + 0.35 * sin(vUv.x * 12.566 + along * 8.0 - uTime * (2.6 + uEnergy * 3.5));
 
-    float fadeEnds = smoothstep(0.0, 0.14, along) * pow(1.0 - along, 1.85);
-    vec3 col = mix(vec3(0.55, 0.88, 1.0), vec3(0.52, 0.28, 0.96), along * 0.85);
-    float alpha = edgeFade * fadeEnds * pulse * spiral * 0.42;
+    float fadeEnds = smoothstep(0.0, 0.14, along) * pow(1.0 - along, 1.75);
+    vec3 col = mix(vec3(0.58, 0.90, 1.0), vec3(0.56, 0.30, 0.98), along * 0.85) * (1.0 + uEnergy * 0.85);
+    float alpha = edgeFade * fadeEnds * pulse * spiral * (0.44 + uEnergy * 0.42);
 
     gl_FragColor = vec4(col, alpha);
   }
@@ -353,11 +358,12 @@ export interface SingularityRig {
   haloMaterial: THREE.ShaderMaterial;
   jetMaterials: THREE.ShaderMaterial[];
   helixGroup: THREE.Group;
+  helixMaterial: THREE.MeshBasicMaterial;
 }
 
 export function buildRelativisticSingularity(disposables: DisposableResource[]): SingularityRig {
   const group = new THREE.Group();
-  group.position.set(3.55, 0.35, -3.4);
+  group.position.set(3.45, 0.35, -3.4);
   group.rotation.set(0.28, -0.34, -0.22);
 
   // 1. Pitch-black Event Horizon Core
@@ -373,7 +379,7 @@ export function buildRelativisticSingularity(disposables: DisposableResource[]):
   // 2. Relativistic Photon Sphere & Gravitational Lensing Corona
   const haloGeo = new THREE.SphereGeometry(1.18, 64, 64);
   const haloMaterial = new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 } },
+    uniforms: { uTime: { value: 0 }, uEnergy: { value: 0 } },
     vertexShader: PHOTON_HALO_VERT,
     fragmentShader: PHOTON_HALO_FRAG,
     transparent: true,
@@ -392,6 +398,7 @@ export function buildRelativisticSingularity(disposables: DisposableResource[]):
       uTime: { value: 0 },
       uInnerRadius: { value: 1.16 },
       uOuterRadius: { value: 4.95 },
+      uEnergy: { value: 0 },
     },
     vertexShader: ACCRETION_DISK_VERT,
     fragmentShader: ACCRETION_DISK_FRAG,
@@ -412,6 +419,7 @@ export function buildRelativisticSingularity(disposables: DisposableResource[]):
       uTime: { value: 0 },
       uInnerRadius: { value: 1.09 },
       uOuterRadius: { value: 2.22 },
+      uEnergy: { value: 0 },
     },
     vertexShader: ACCRETION_DISK_VERT,
     fragmentShader: ACCRETION_DISK_FRAG,
@@ -440,6 +448,7 @@ export function buildRelativisticSingularity(disposables: DisposableResource[]):
       uniforms: {
         uTime: { value: 0 },
         uDir: { value: dir },
+        uEnergy: { value: 0 },
       },
       vertexShader: JET_VERT,
       fragmentShader: JET_FRAG,
@@ -460,7 +469,7 @@ export function buildRelativisticSingularity(disposables: DisposableResource[]):
   const helixMat = new THREE.MeshBasicMaterial({
     color: 0x67e8f9,
     transparent: true,
-    opacity: 0.34,
+    opacity: 0.36,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
   });
@@ -492,6 +501,7 @@ export function buildRelativisticSingularity(disposables: DisposableResource[]):
     haloMaterial,
     jetMaterials,
     helixGroup,
+    helixMaterial: helixMat,
   };
 }
 
@@ -517,16 +527,17 @@ const ATMO_FRAG = /* glsl */ `
   varying vec3 vWorldNormal;
   varying vec3 vViewPos;
   uniform vec3 uSunDir;
+  uniform float uEnergy;
 
   void main() {
     vec3 viewDir = normalize(vViewPos);
-    float rim = pow(clamp(1.0 - max(dot(normalize(vNormal), viewDir), 0.0), 0.0, 1.0), 3.6);
+    float rim = pow(clamp(1.0 - max(dot(normalize(vNormal), viewDir), 0.0), 0.0, 1.0), 3.2 - min(uEnergy * 0.7, 1.0));
     float daySide = smoothstep(-0.35, 0.55, dot(normalize(vWorldNormal), normalize(uSunDir)));
 
-    vec3 atmoDay = vec3(0.24, 0.72, 1.0);
-    vec3 atmoTwilight = vec3(0.58, 0.32, 0.96);
-    vec3 col = mix(atmoTwilight, atmoDay, daySide);
-    float alpha = rim * (0.28 + daySide * 0.72);
+    vec3 atmoDay = vec3(0.24, 0.76, 1.0);
+    vec3 atmoTwilight = vec3(0.62, 0.34, 0.98);
+    vec3 col = mix(atmoTwilight, atmoDay, daySide) * (1.0 + uEnergy * 0.65);
+    float alpha = rim * (0.30 + daySide * 0.72 + uEnergy * 0.25);
 
     gl_FragColor = vec4(col, alpha);
   }
@@ -552,6 +563,8 @@ const PLANET_RING_FRAG = /* glsl */ `
   uniform vec3 uPlanetCenter;
   uniform float uPlanetRadius;
   uniform vec3 uSunDir;
+  uniform float uEnergy;
+  uniform float uTime;
 
   void main() {
     float r = length(vLocalPos.xy);
@@ -561,7 +574,7 @@ const PLANET_RING_FRAG = /* glsl */ `
     // Fine multi-frequency icy ringlets + Cassini & Encke divisions
     float fineRings =
       0.55 +
-      0.28 * sin(t * 95.0) +
+      0.28 * sin(t * 95.0 + uTime * 0.3) +
       0.17 * cos(t * 210.0 + 1.2) +
       0.12 * sin(t * 37.0);
 
@@ -577,11 +590,11 @@ const PLANET_RING_FRAG = /* glsl */ `
     float perpDist = length(rel - sDir * proj);
     float inShadow = (proj < 0.0) ? smoothstep(uPlanetRadius * 0.92, uPlanetRadius * 1.06, perpDist) : 1.0;
 
-    vec3 iceColor = mix(vec3(0.45, 0.62, 0.86), vec3(0.76, 0.86, 0.98), clamp(fineRings, 0.0, 1.0));
-    vec3 warmTint = vec3(0.72, 0.65, 0.84);
-    vec3 finalCol = mix(warmTint, iceColor, smoothstep(0.15, 0.7, t)) * (0.14 + 0.86 * inShadow);
+    vec3 iceColor = mix(vec3(0.45, 0.62, 0.86), vec3(0.76, 0.88, 1.0), clamp(fineRings, 0.0, 1.0));
+    vec3 warmTint = vec3(0.72, 0.65, 0.88);
+    vec3 finalCol = mix(warmTint, iceColor, smoothstep(0.15, 0.7, t)) * (0.14 + 0.86 * inShadow) * (1.0 + uEnergy * 0.38);
 
-    float alpha = clamp(fineRings * cassini * encke * radialEnvelope * 0.68, 0.0, 0.85);
+    float alpha = clamp(fineRings * cassini * encke * radialEnvelope * (0.68 + uEnergy * 0.14), 0.0, 0.90);
     gl_FragColor = vec4(finalCol, alpha);
   }
 `;
@@ -590,6 +603,7 @@ export interface ExoplanetRig {
   group: THREE.Group;
   planetMesh: THREE.Mesh;
   planetMaterial: THREE.MeshStandardMaterial;
+  atmoMaterial: THREE.ShaderMaterial;
   ringMaterial: THREE.ShaderMaterial;
   sunDir: THREE.Vector3;
 }
@@ -690,6 +704,7 @@ export function buildExoplanetSystem(
   const atmoMat = new THREE.ShaderMaterial({
     uniforms: {
       uSunDir: { value: sunDir.clone().normalize() },
+      uEnergy: { value: 0 },
     },
     vertexShader: ATMO_VERT,
     fragmentShader: ATMO_FRAG,
@@ -710,6 +725,8 @@ export function buildExoplanetSystem(
       uPlanetCenter: { value: group.position.clone() },
       uPlanetRadius: { value: 1.52 },
       uSunDir: { value: sunDir.clone().normalize() },
+      uEnergy: { value: 0 },
+      uTime: { value: 0 },
     },
     vertexShader: PLANET_RING_VERT,
     fragmentShader: PLANET_RING_FRAG,
@@ -722,7 +739,7 @@ export function buildExoplanetSystem(
   group.add(ringMesh);
   disposables.push(ringGeo, ringMat);
 
-  return { group, planetMesh, planetMaterial, ringMaterial: ringMat, sunDir };
+  return { group, planetMesh, planetMaterial, atmoMaterial: atmoMat, ringMaterial: ringMat, sunDir };
 }
 
 // ============================================================================
@@ -741,6 +758,7 @@ const NEBULA_FRAG = /* glsl */ `
   varying vec2 vUv;
   uniform float uTime;
   uniform float uSeed;
+  uniform float uEnergy;
   uniform vec3 uColorA;
   uniform vec3 uColorB;
 
@@ -776,14 +794,14 @@ const NEBULA_FRAG = /* glsl */ `
     if (radial < 0.01) discard;
 
     vec2 q = vec2(
-      nFbm(vUv * 3.1 + vec2(uSeed, uTime * 0.035)),
-      nFbm(vUv * 3.1 + vec2(uSeed + 4.2, -uTime * 0.028))
+      nFbm(vUv * 3.1 + vec2(uSeed, uTime * 0.05)),
+      nFbm(vUv * 3.1 + vec2(uSeed + 4.2, -uTime * 0.04))
     );
     float density = nFbm(vUv * 3.8 + q * 1.6);
-    float wisps = smoothstep(0.25, 0.85, density) * radial;
+    float wisps = smoothstep(0.24, 0.85, density) * radial;
 
-    vec3 col = mix(uColorA, uColorB, q.x);
-    gl_FragColor = vec4(col, wisps * 0.22);
+    vec3 col = mix(uColorA, uColorB, q.x) * (1.0 + uEnergy * 0.65);
+    gl_FragColor = vec4(col, wisps * (0.22 + uEnergy * 0.14));
   }
 `;
 
@@ -817,6 +835,7 @@ export function buildVolumetricNebulaWisps(
       uniforms: {
         uTime: { value: 0 },
         uSeed: { value: i * 13.37 },
+        uEnergy: { value: 0 },
         uColorA: { value: new THREE.Color(pair[0]) },
         uColorB: { value: new THREE.Color(pair[1]) },
       },
@@ -851,3 +870,62 @@ export function buildVolumetricNebulaWisps(
   }
   return items;
 }
+
+// ============================================================================
+// 6. 3D RELATIVISTIC GRAVITATIONAL SHOCKWAVE RING (ON CLICK / TAP)
+// ============================================================================
+const SHOCKWAVE_VERT = /* glsl */ `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const SHOCKWAVE_FRAG = /* glsl */ `
+  precision highp float;
+  varying vec2 vUv;
+  uniform float uProgress;
+  void main() {
+    if (uProgress <= 0.0 || uProgress >= 1.0) discard;
+    vec2 p = (vUv - 0.5) * 2.0;
+    float d = length(p);
+    float ringR = 0.08 + uProgress * 0.88;
+    float band = exp(-pow((d - ringR) * 24.0, 2.0));
+    float innerEcho = exp(-pow((d - ringR * 0.72) * 32.0, 2.0)) * 0.55;
+    float fade = pow(1.0 - uProgress, 1.4);
+
+    vec3 col = mix(vec3(0.35, 0.86, 1.0), vec3(0.75, 0.42, 1.0), uProgress);
+    float alpha = (band + innerEcho) * fade * 0.95;
+    gl_FragColor = vec4(col * 1.45, alpha);
+  }
+`;
+
+export interface ShockwaveRig {
+  mesh: THREE.Mesh;
+  material: THREE.ShaderMaterial;
+}
+
+export function buildShockwaveRing(
+  scene: THREE.Scene,
+  disposables: DisposableResource[]
+): ShockwaveRig {
+  const geo = new THREE.PlaneGeometry(14, 14);
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uProgress: { value: 1.0 },
+    },
+    vertexShader: SHOCKWAVE_VERT,
+    fragmentShader: SHOCKWAVE_FRAG,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+  disposables.push(geo, mat);
+  return { mesh, material: mat };
+}
+

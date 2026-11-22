@@ -10,6 +10,7 @@ import {
   DisposableResource,
   buildExoplanetSystem,
   buildRelativisticSingularity,
+  buildShockwaveRing,
   buildVolumetricNebulaWisps,
   createAsteroidSurfaceMaps,
   createSculptedAsteroidGeometry,
@@ -456,8 +457,11 @@ export const UltraWorldOverlay: React.FC<{ active: boolean }> = ({ active }) => 
     const exoplanet = buildExoplanetSystem(sunDir, disposables);
     scene.add(exoplanet.group);
 
-    // 5D. 52 Sculpted Cratered Space Asteroids / Meteorites (InstancedMesh)
-    const ASTEROID_COUNT = isSoftwareGl ? 18 : 52;
+    // 5D. 3D Relativistic Shockwave Ring (expands across 3D space on click/tap)
+    const shockwave = buildShockwaveRing(scene, disposables);
+
+    // 5E. 56 Sculpted Cratered Space Asteroids with 3D Precessing Elliptical Physics
+    const ASTEROID_COUNT = isSoftwareGl ? 18 : 56;
     const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
     const { albedoMap: asteroidAlbedo, bumpMap: asteroidBump } =
       createAsteroidSurfaceMaps(maxAnisotropy);
@@ -467,8 +471,8 @@ export const UltraWorldOverlay: React.FC<{ active: boolean }> = ({ active }) => 
       map: asteroidAlbedo,
       bumpMap: asteroidBump,
       bumpScale: 0.085,
-      roughness: 0.74,
-      metalness: 0.38,
+      roughness: 0.72,
+      metalness: 0.42,
     });
     const asteroidsMesh = new THREE.InstancedMesh(asteroidGeo, asteroidMat, ASTEROID_COUNT);
     asteroidsMesh.frustumCulled = false;
@@ -480,42 +484,62 @@ export const UltraWorldOverlay: React.FC<{ active: boolean }> = ({ active }) => 
       new THREE.Color('#334155'), // volcanic obsidian
       new THREE.Color('#64748b'), // iron-nickel meteorite
       new THREE.Color('#52525b'), // cosmic graphite
-      new THREE.Color('#4c5c7a'), // deep silicate titanium
+      new THREE.Color('#5b6e8c'), // deep silicate titanium
     ];
 
     const asteroidData = Array.from({ length: ASTEROID_COUNT }, (_, i) => {
-      const orbitR = 2.9 + (i % 9) * 1.18 + Math.sin(i * 1.7) * 0.45;
-      const angle = (i / ASTEROID_COUNT) * Math.PI * 2 + (i % 3) * 0.35;
-      const yOffset = ((i % 11) - 5) * 0.78;
-      const speed = 0.055 + (i % 6) * 0.022;
-      const baseScale = 0.14 + (i % 5) * 0.068;
-      // Distinct triaxial scale per meteorite so no two asteroids share a silhouette
+      // Half orbit around the Kerr Singularity on inclined elliptical paths, half roam outer cosmic lanes
+      const orbitsBlackHole = i % 2 === 0;
+      const semiMajor = orbitsBlackHole
+        ? 2.85 + (i % 7) * 0.72 + Math.sin(i * 1.9) * 0.35
+        : 4.8 + (i % 9) * 0.92;
+      const eccentricity = 0.14 + ((i * 7) % 5) * 0.08;
+      const angle = (i / ASTEROID_COUNT) * Math.PI * 2 + (i % 5) * 0.41;
+      const inclX = ((i % 7) - 3) * 0.24;
+      const inclZ = ((i % 5) - 2) * 0.19;
+      const baseSpeed = (orbitsBlackHole ? 0.24 : 0.11) + (i % 6) * 0.032;
+      const baseScale = 0.15 + (i % 5) * 0.068;
       const sx = baseScale * (0.85 + ((i * 7) % 5) * 0.16);
       const sy = baseScale * (0.72 + ((i * 3) % 4) * 0.15);
       const sz = baseScale * (0.88 + ((i * 11) % 5) * 0.14);
       asteroidsMesh.setColorAt(i, asteroidPalette[i % asteroidPalette.length]);
       return {
-        orbitR,
+        orbitsBlackHole,
+        semiMajor,
+        eccentricity,
         angle,
-        yOffset,
-        speed,
+        inclX,
+        inclZ,
+        baseSpeed,
         sx,
         sy,
         sz,
         tiltPhase: i * 0.73,
-        spinX: 0.18 + (i % 4) * 0.09,
-        spinY: 0.22 + (i % 5) * 0.08,
+        rotX: i * 0.5,
+        rotY: i * 0.9,
+        spinX: 0.38 + (i % 4) * 0.18,
+        spinY: 0.44 + (i % 5) * 0.16,
+        spinBoost: 0,
+        dispX: 0,
+        dispY: 0,
+        dispZ: 0,
+        velX: 0,
+        velY: 0,
+        velZ: 0,
+        lastX: 0,
+        lastY: 0,
+        lastZ: -3.0,
       };
     });
     if (asteroidsMesh.instanceColor) asteroidsMesh.instanceColor.needsUpdate = true;
 
-    // 5E. Relativistic Micro-Meteor / Cosmic Ray Streaks
-    const STREAK_COUNT = isSoftwareGl ? 10 : 32;
-    const streakGeo = new THREE.PlaneGeometry(0.95, 0.014);
+    // 5F. 44 Relativistic Micro-Meteor / Cosmic Ray Streaks
+    const STREAK_COUNT = isSoftwareGl ? 12 : 44;
+    const streakGeo = new THREE.PlaneGeometry(1.05, 0.015);
     const streakMat = new THREE.MeshBasicMaterial({
       color: 0xbae6fd,
       transparent: true,
-      opacity: 0.42,
+      opacity: 0.48,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.DoubleSide,
@@ -530,11 +554,12 @@ export const UltraWorldOverlay: React.FC<{ active: boolean }> = ({ active }) => 
       streaksMesh.setColorAt(i, c);
       return {
         laneY: ((i % 13) - 6) * 0.92 + Math.sin(i) * 0.35,
-        z: -2.2 - (i % 6) * 1.45,
-        speed: 3.4 + (i % 5) * 1.15,
-        phase: (i * 1.93) % 14.0,
-        lengthScale: 0.65 + (i % 4) * 0.48,
-        tilt: -0.18 - (i % 3) * 0.06,
+        z: -2.0 - (i % 6) * 1.45,
+        speed: 4.2 + (i % 5) * 1.35,
+        phase: (i * 1.93) % 24.0,
+        lengthScale: 0.75 + (i % 4) * 0.52,
+        tilt: -0.22 - (i % 3) * 0.07,
+        progress: (i * 1.93) % 24.0,
       };
     });
     if (streaksMesh.instanceColor) streaksMesh.instanceColor.needsUpdate = true;
@@ -599,19 +624,30 @@ export const UltraWorldOverlay: React.FC<{ active: boolean }> = ({ active }) => 
       normY: 0.55,
       targetNormX: 0.5,
       targetNormY: 0.55,
+      prevNormX: 0.5,
+      prevNormY: 0.55,
+      velX: 0,
+      velY: 0,
       px: width * 0.5,
       py: height * 0.45,
       speed: 0,
+      energy: 0,
       clickAge: 99,
       clickNormX: 0.5,
       clickNormY: 0.5,
+      clickWorldX: 0,
+      clickWorldY: 0,
     };
 
     const updatePointerTarget = (clientX: number, clientY: number) => {
       const nx = clientX / Math.max(width, 1);
       const ny = 1.0 - clientY / Math.max(height, 1);
-      const dist = Math.hypot(nx - pointer.targetNormX, ny - pointer.targetNormY);
-      pointer.speed = Math.min(pointer.speed + dist * 6.5, 1.4);
+      const dx = nx - pointer.targetNormX;
+      const dy = ny - pointer.targetNormY;
+      const dist = Math.hypot(dx, dy);
+      pointer.speed = Math.min(pointer.speed + dist * 8.5, 1.8);
+      pointer.velX = THREE.MathUtils.clamp(pointer.velX * 0.6 + dx * 22.0, -2.0, 2.0);
+      pointer.velY = THREE.MathUtils.clamp(pointer.velY * 0.6 + dy * 22.0, -2.0, 2.0);
       pointer.targetNormX = nx;
       pointer.targetNormY = ny;
       pointer.px = clientX;
@@ -631,12 +667,38 @@ export const UltraWorldOverlay: React.FC<{ active: boolean }> = ({ active }) => 
     const handlePointerDown = (e: PointerEvent) => {
       const nx = e.clientX / Math.max(width, 1);
       const ny = 1.0 - e.clientY / Math.max(height, 1);
+      const cwX = (nx - 0.5) * 14.0;
+      const cwY = (ny - 0.5) * 8.5;
       pointer.clickNormX = nx;
       pointer.clickNormY = ny;
+      pointer.clickWorldX = cwX;
+      pointer.clickWorldY = cwY;
       pointer.clickAge = 0.001;
+      pointer.energy = Math.min(pointer.energy + 1.05, 1.85);
 
       auroraUniforms.uClickPos.value.set(nx, ny);
-      particleUniforms.uClickWorld.value.set((nx - 0.5) * 14, (ny - 0.5) * 8.5, 0);
+      particleUniforms.uClickWorld.value.set(cwX, cwY, 0);
+
+      // Launch 3D relativistic gravitational shockwave at click point
+      shockwave.mesh.position.set(cwX, cwY, -1.6);
+      shockwave.material.uniforms.uProgress.value = 0.01;
+
+      // Physically blast nearby sculpted asteroids outward with angular tumble impulse!
+      for (let i = 0; i < ASTEROID_COUNT; i++) {
+        const aData = asteroidData[i];
+        const dx = aData.lastX - cwX;
+        const dy = aData.lastY - cwY;
+        const dz = aData.lastZ + 2.2;
+        const dist = Math.hypot(dx, dy, dz);
+        if (dist < 8.5) {
+          const force = Math.pow(1.0 - dist / 8.5, 1.5) * 10.5;
+          const inv = 1.0 / Math.max(dist, 0.25);
+          aData.velX += dx * inv * force;
+          aData.velY += dy * inv * force;
+          aData.velZ += (dz * inv * 0.55 - 0.25) * force;
+          aData.spinBoost += force * 0.9;
+        }
+      }
 
       // Trigger crisp additive CSS optical pulse ring at click spot
       if (pulseRingRef.current) {
@@ -683,6 +745,8 @@ export const UltraWorldOverlay: React.FC<{ active: boolean }> = ({ active }) => 
     const dummy = new THREE.Object3D();
     const clockStart = performance.now();
     let lastFrameTime = clockStart;
+    let planetSpinAngle = 0;
+    let simTime = 0;
 
     const afterDraw = (nextTick: () => void) => {
       if (disposed) return;
@@ -703,13 +767,26 @@ export const UltraWorldOverlay: React.FC<{ active: boolean }> = ({ active }) => 
       lastFrameTime = now;
       const elapsed = (now - clockStart) / 1000;
 
-      // Smooth pointer interpolation
-      pointer.normX += (pointer.targetNormX - pointer.normX) * 0.085;
-      pointer.normY += (pointer.targetNormY - pointer.normY) * 0.085;
-      pointer.speed *= 0.92;
+      // Frame-rate independent smooth pointer interpolation & velocity decay
+      pointer.prevNormX = pointer.normX;
+      pointer.prevNormY = pointer.normY;
+      pointer.normX = THREE.MathUtils.damp(pointer.normX, pointer.targetNormX, 7.5, dt);
+      pointer.normY = THREE.MathUtils.damp(pointer.normY, pointer.targetNormY, 7.5, dt);
+      pointer.speed = THREE.MathUtils.damp(pointer.speed, 0, 4.2, dt);
+      pointer.velX = THREE.MathUtils.damp(pointer.velX, 0, 5.5, dt);
+      pointer.velY = THREE.MathUtils.damp(pointer.velY, 0, 5.5, dt);
+
       if (pointer.clickAge < 3.0) {
         pointer.clickAge += dt;
       }
+
+      // Unified emotional cosmic energy driven by cursor speed + click shockwave
+      const targetEnergy = Math.min(pointer.speed * 0.82, 1.5);
+      pointer.energy = THREE.MathUtils.damp(pointer.energy, targetEnergy, 4.8, dt);
+      const cosmicEnergy = pointer.energy;
+
+      // Advance dilated shader time faster during plasma surges
+      simTime += dt * (1.0 + cosmicEnergy * 1.15);
 
       // Sync CSS radial spotlight variables for frosted glass surface sheen
       const rootStyle = document.documentElement.style;
@@ -718,104 +795,244 @@ export const UltraWorldOverlay: React.FC<{ active: boolean }> = ({ active }) => 
       rootStyle.setProperty('--ultra-mx-pct', `${(pointer.normX * 100).toFixed(1)}%`);
       rootStyle.setProperty('--ultra-my-pct', `${((1 - pointer.normY) * 100).toFixed(1)}%`);
 
-      // Subtle dynamic SVG optical refraction frequency
+      // Dynamic SVG optical refraction frequency reacts to pointer motion
       if (turbRef.current) {
-        const fx = 0.011 + Math.sin(elapsed * 0.8) * 0.004;
-        const fy = 0.015 + Math.cos(elapsed * 0.7) * 0.004;
+        const fx = 0.011 + Math.sin(elapsed * 0.8) * 0.004 + cosmicEnergy * 0.005;
+        const fy = 0.015 + Math.cos(elapsed * 0.7) * 0.004 + cosmicEnergy * 0.005;
         turbRef.current.setAttribute('baseFrequency', `${fx.toFixed(4)} ${fy.toFixed(4)}`);
       }
 
-      // Update GLSL uniforms
-      auroraUniforms.uTime.value = elapsed;
+      // Update GLSL background & particle uniforms
+      auroraUniforms.uTime.value = simTime;
       auroraUniforms.uMouse.value.set(pointer.normX, pointer.normY);
       auroraUniforms.uMouseSpeed.value = pointer.speed;
       auroraUniforms.uClickAge.value = pointer.clickAge;
 
       const worldPtrX = (pointer.normX - 0.5) * 14.0;
       const worldPtrY = (pointer.normY - 0.5) * 8.5;
-      particleUniforms.uTime.value = elapsed;
+      particleUniforms.uTime.value = simTime;
       particleUniforms.uMouseWorld.value.set(worldPtrX, worldPtrY, 0);
       particleUniforms.uClickAge.value = pointer.clickAge;
 
-      // Smooth 3D camera parallax
-      camera.position.x += (worldPtrX * 0.075 - camera.position.x) * 0.05;
-      camera.position.y += (worldPtrY * 0.075 + 0.25 - camera.position.y) * 0.05;
-      camera.lookAt(0, 0, -1.5);
+      // Dynamic 3D Camera Flight, Roll Tilt & Warp FOV on fast motion/clicks
+      camera.position.x = THREE.MathUtils.damp(camera.position.x, worldPtrX * 0.16, 4.2, dt);
+      camera.position.y = THREE.MathUtils.damp(camera.position.y, worldPtrY * 0.15 + 0.25, 4.2, dt);
+      camera.lookAt(worldPtrX * 0.04, worldPtrY * 0.04, -1.8);
+      camera.rotation.z = THREE.MathUtils.damp(camera.rotation.z, -pointer.velX * 0.032, 6.0, dt);
 
-      // Animate Relativistic Kerr Singularity & Accretion Disk
-      singularity.diskMaterial.uniforms.uTime.value = elapsed;
-      singularity.lensingArcMaterial.uniforms.uTime.value = elapsed;
-      singularity.haloMaterial.uniforms.uTime.value = elapsed;
-      singularity.jetMaterials.forEach((jm) => {
-        jm.uniforms.uTime.value = elapsed;
-      });
-      singularity.group.position.y = 0.35 + Math.sin(elapsed * 0.45) * 0.16;
-      singularity.group.rotation.y = -0.34 + worldPtrX * 0.022;
-      singularity.group.rotation.x = 0.28 + worldPtrY * 0.018;
-      singularity.helixGroup.rotation.y = elapsed * 0.65;
-
-      // Animate Banded Gas-Giant Exoplanet & Storm Eddies
-      exoplanet.planetMesh.rotation.y = elapsed * 0.085;
-      if (exoplanet.planetMaterial.userData.shader) {
-        exoplanet.planetMaterial.userData.shader.uniforms.uTime.value = elapsed;
+      const targetFov = 52 + cosmicEnergy * 3.6;
+      if (Math.abs(camera.fov - targetFov) > 0.02) {
+        camera.fov = THREE.MathUtils.damp(camera.fov, targetFov, 5.5, dt);
+        camera.updateProjectionMatrix();
       }
-      exoplanet.group.position.y = 1.85 + Math.cos(elapsed * 0.32) * 0.12;
+
+      // Expressive "Emotional" Kerr Black Hole Singularity tracking cursor + plasma surge
+      singularity.diskMaterial.uniforms.uTime.value = simTime;
+      singularity.diskMaterial.uniforms.uEnergy.value = cosmicEnergy;
+      singularity.lensingArcMaterial.uniforms.uTime.value = simTime;
+      singularity.lensingArcMaterial.uniforms.uEnergy.value = cosmicEnergy;
+      singularity.haloMaterial.uniforms.uTime.value = simTime;
+      singularity.haloMaterial.uniforms.uEnergy.value = cosmicEnergy;
+      singularity.jetMaterials.forEach((jm) => {
+        jm.uniforms.uTime.value = simTime;
+        jm.uniforms.uEnergy.value = cosmicEnergy;
+      });
+      singularity.group.position.x = THREE.MathUtils.damp(
+        singularity.group.position.x,
+        3.45 - worldPtrX * 0.065,
+        4.5,
+        dt
+      );
+      singularity.group.position.y = THREE.MathUtils.damp(
+        singularity.group.position.y,
+        0.35 + Math.sin(elapsed * 0.6) * 0.18 - worldPtrY * 0.06,
+        4.5,
+        dt
+      );
+      singularity.group.rotation.y = THREE.MathUtils.damp(
+        singularity.group.rotation.y,
+        -0.34 + worldPtrX * 0.055,
+        4.8,
+        dt
+      );
+      singularity.group.rotation.x = THREE.MathUtils.damp(
+        singularity.group.rotation.x,
+        0.28 - worldPtrY * 0.048,
+        4.8,
+        dt
+      );
+      singularity.group.scale.setScalar(1.0 + cosmicEnergy * 0.045);
+      singularity.helixGroup.rotation.y += dt * (0.75 + cosmicEnergy * 2.8);
+      singularity.helixGroup.scale.setScalar(1.0 + cosmicEnergy * 0.14);
+      singularity.helixMaterial.opacity = Math.min(0.36 + cosmicEnergy * 0.42, 0.92);
+
+      // Expressive Banded Gas-Giant Exoplanet & Cassini Rings reacting to cursor & energy
+      planetSpinAngle += dt * (0.11 + cosmicEnergy * 0.45);
+      exoplanet.planetMesh.rotation.y = planetSpinAngle;
+      if (exoplanet.planetMaterial.userData.shader) {
+        exoplanet.planetMaterial.userData.shader.uniforms.uTime.value = simTime;
+      }
+      exoplanet.atmoMaterial.uniforms.uEnergy.value = cosmicEnergy;
+      exoplanet.ringMaterial.uniforms.uEnergy.value = cosmicEnergy;
+      exoplanet.ringMaterial.uniforms.uTime.value = simTime;
+      exoplanet.group.position.y = THREE.MathUtils.damp(
+        exoplanet.group.position.y,
+        1.85 + Math.cos(elapsed * 0.42) * 0.15 - worldPtrY * 0.045,
+        3.8,
+        dt
+      );
+      exoplanet.group.rotation.y = THREE.MathUtils.damp(
+        exoplanet.group.rotation.y,
+        0.15 + worldPtrX * 0.042,
+        3.8,
+        dt
+      );
+      exoplanet.group.rotation.x = THREE.MathUtils.damp(
+        exoplanet.group.rotation.x,
+        0.22 - worldPtrY * 0.036,
+        3.8,
+        dt
+      );
       exoplanet.ringMaterial.uniforms.uPlanetCenter.value.copy(exoplanet.group.position);
 
-      // Animate Volumetric Interstellar Nebula Filaments
-      for (let i = 0; i < nebulaWisps.length; i++) {
-        const w = nebulaWisps[i];
-        w.material.uniforms.uTime.value = elapsed;
-        w.mesh.position.x = w.baseX + Math.sin(elapsed * 0.14 + w.driftPhase) * 0.45;
-        w.mesh.position.y = w.baseY + Math.cos(elapsed * 0.11 + w.driftPhase) * 0.28;
+      // Update 3D Expanding Gravitational Shockwave Ring
+      if (pointer.clickAge > 0 && pointer.clickAge < 1.35) {
+        const p = pointer.clickAge / 1.35;
+        shockwave.material.uniforms.uProgress.value = p;
+        shockwave.mesh.lookAt(camera.position);
+      } else {
+        shockwave.material.uniforms.uProgress.value = 1.0;
       }
 
-      // Update Sculpted Cratered Asteroids (slow realistic gravitational orbit & tumble)
+      // Animate Volumetric Interstellar Nebula Filaments with pointer wake drift
+      for (let i = 0; i < nebulaWisps.length; i++) {
+        const w = nebulaWisps[i];
+        w.material.uniforms.uTime.value = simTime;
+        w.material.uniforms.uEnergy.value = cosmicEnergy;
+        const targetX = w.baseX + Math.sin(elapsed * 0.22 + w.driftPhase) * 0.62 - worldPtrX * 0.08;
+        const targetY = w.baseY + Math.cos(elapsed * 0.18 + w.driftPhase) * 0.42 - worldPtrY * 0.08;
+        w.mesh.position.x = THREE.MathUtils.damp(w.mesh.position.x, targetX, 3.2, dt);
+        w.mesh.position.y = THREE.MathUtils.damp(w.mesh.position.y, targetY, 3.2, dt);
+      }
+
+      // Sculpted Asteroids: 3D Precessing Keplerian Ellipses + Pointer Gravity Vortex + Shockwave Physics
+      const bhX = singularity.group.position.x;
+      const bhY = singularity.group.position.y;
+      const bhZ = singularity.group.position.z;
+
       for (let i = 0; i < ASTEROID_COUNT; i++) {
         const aData = asteroidData[i];
-        const a = aData.angle + elapsed * aData.speed;
-        const bob = Math.sin(elapsed * 0.65 + aData.tiltPhase) * 0.32;
-        dummy.position.set(
-          Math.cos(a) * aData.orbitR + 1.2,
-          aData.yOffset + bob,
-          Math.sin(a) * aData.orbitR - 3.6
-        );
-        dummy.rotation.set(
-          elapsed * aData.spinX + aData.tiltPhase,
-          elapsed * aData.spinY + aData.tiltPhase * 0.5,
-          elapsed * 0.14
-        );
+
+        // Elliptical Keplerian radius + Kepler's 2nd Law velocity boost near periapsis & Black Hole
+        const e = aData.eccentricity;
+        const cosA = Math.cos(aData.angle);
+        const sinA = Math.sin(aData.angle);
+        const r = (aData.semiMajor * (1 - e * e)) / (1 + e * cosA);
+        const keplerFactor = Math.pow(aData.semiMajor / Math.max(r, 0.8), 1.35);
+
+        aData.angle += dt * aData.baseSpeed * keplerFactor * (1.0 + cosmicEnergy * 0.45);
+
+        // Precessing 3D inclined orbital plane
+        const precess = elapsed * 0.07 + aData.tiltPhase;
+        const lx = r * cosA;
+        const lz = r * sinA;
+        const ly =
+          lx * Math.sin(aData.inclX + Math.sin(precess) * 0.18) +
+          lz * Math.sin(aData.inclZ);
+
+        const baseX = aData.orbitsBlackHole ? bhX + lx : lx * 1.15 - 0.6;
+        const baseY = aData.orbitsBlackHole ? bhY + ly : ly * 1.1 + ((i % 9) - 4) * 0.42;
+        const baseZ = aData.orbitsBlackHole ? bhZ + lz * 0.82 : lz * 0.85 - 4.2;
+
+        // Interactive Pointer Gravity Tractor + Tangential Swirl
+        const px = baseX + aData.dispX;
+        const py = baseY + aData.dispY;
+        const pdx = worldPtrX - px;
+        const pdy = worldPtrY - py;
+        const pDist = Math.hypot(pdx, pdy);
+
+        if (pDist < 4.6) {
+          const strength = Math.pow(1.0 - pDist / 4.6, 1.8);
+          const inv = 1.0 / Math.max(pDist, 0.3);
+          const swirlPower = (1.6 + pointer.speed * 7.5) * strength;
+          // Tangential vortex swirl + gentle gravitational wake toward cursor momentum
+          aData.velX += (-pdy * inv * swirlPower + pointer.velX * strength * 1.8) * dt;
+          aData.velY += (pdx * inv * swirlPower + pointer.velY * strength * 1.8) * dt;
+          aData.velZ += strength * (pointer.speed * 2.2) * dt;
+          aData.spinBoost = Math.min(aData.spinBoost + strength * (2.5 + pointer.speed * 6.0) * dt, 7.5);
+        }
+
+        // Second-order spring damping back toward natural Keplerian trajectory
+        const springK = 3.2;
+        const damping = 2.6;
+        aData.velX += (-springK * aData.dispX - damping * aData.velX) * dt;
+        aData.velY += (-springK * aData.dispY - damping * aData.velY) * dt;
+        aData.velZ += (-springK * aData.dispZ - damping * aData.velZ) * dt;
+
+        aData.dispX += aData.velX * dt;
+        aData.dispY += aData.velY * dt;
+        aData.dispZ += aData.velZ * dt;
+
+        aData.spinBoost = THREE.MathUtils.damp(aData.spinBoost, 0, 2.5, dt);
+
+        const finalX = baseX + aData.dispX;
+        const finalY = baseY + aData.dispY;
+        const finalZ = baseZ + aData.dispZ;
+        aData.lastX = finalX;
+        aData.lastY = finalY;
+        aData.lastZ = finalZ;
+
+        // Tidal spin boost near Black Hole or when energized by cursor/shockwave
+        const distToHole = Math.hypot(finalX - bhX, finalY - bhY, finalZ - bhZ);
+        const tidalSpin = distToHole < 3.5 ? (3.5 - distToHole) * 0.7 : 0;
+        const totalSpin = 1.0 + aData.spinBoost + tidalSpin;
+
+        aData.rotX += dt * aData.spinX * totalSpin;
+        aData.rotY += dt * aData.spinY * totalSpin;
+
+        dummy.position.set(finalX, finalY, finalZ);
+        dummy.rotation.set(aData.rotX, aData.rotY, aData.tiltPhase + elapsed * 0.22);
         dummy.scale.set(aData.sx, aData.sy, aData.sz);
         dummy.updateMatrix();
         asteroidsMesh.setMatrixAt(i, dummy.matrix);
       }
       asteroidsMesh.instanceMatrix.needsUpdate = true;
 
-      // Update Relativistic Micro-Meteor Streaks
+      // Relativistic Micro-Meteor Streaks accelerate & flare with cosmicEnergy
       for (let i = 0; i < STREAK_COUNT; i++) {
         const st = streakData[i];
-        const cycle = (elapsed * st.speed + st.phase) % 24.0;
-        const x = -12.0 + cycle;
-        const y = st.laneY + cycle * Math.tan(st.tilt);
+        st.progress = (st.progress + dt * st.speed * (1.0 + cosmicEnergy * 1.45)) % 24.0;
+        const x = -12.0 + st.progress;
+        const y = st.laneY + st.progress * Math.tan(st.tilt);
         dummy.position.set(x, y, st.z);
         dummy.rotation.set(0, 0, st.tilt);
-        const fade = Math.sin(Math.min(Math.max(cycle / 24.0, 0), 1) * Math.PI);
-        dummy.scale.set(st.lengthScale * (0.4 + fade * 0.9), 0.7 + fade * 0.6, 1);
+        const fade = Math.sin(Math.min(Math.max(st.progress / 24.0, 0), 1) * Math.PI);
+        dummy.scale.set(
+          st.lengthScale * (0.45 + fade * 0.95 + cosmicEnergy * 0.65),
+          0.75 + fade * 0.65 + cosmicEnergy * 0.45,
+          1
+        );
         dummy.updateMatrix();
         streaksMesh.setMatrixAt(i, dummy.matrix);
       }
       streaksMesh.instanceMatrix.needsUpdate = true;
 
-      // Orbit accretion lights + cursor light
-      lightCyan.position.set(3.55 + Math.cos(elapsed * 0.5) * 2.2, 0.35 + Math.sin(elapsed * 0.6) * 1.4, -1.2);
-      lightViolet.position.set(Math.sin(elapsed * 0.4) * -5.2, Math.cos(elapsed * 0.5) * 2.8, 2.5);
-      lightCursor.position.set(worldPtrX * 0.7, worldPtrY * 0.7, 4.5);
+      // Orbit accretion lights + dynamic cursor key light
+      lightCyan.position.set(bhX + Math.cos(simTime * 0.65) * 2.4, bhY + Math.sin(simTime * 0.75) * 1.6, -1.2);
+      lightCyan.intensity = 24 + cosmicEnergy * 24;
+      lightViolet.position.set(Math.sin(elapsed * 0.45) * -5.2, Math.cos(elapsed * 0.55) * 2.8, 2.5);
+      lightViolet.intensity = 18 + cosmicEnergy * 18;
+      lightCursor.position.set(worldPtrX * 0.85, worldPtrY * 0.85, 4.2);
+      lightCursor.intensity = 16 + cosmicEnergy * 32;
 
-      // Update chromatic aberration dynamically on cursor motion & clicks
+      // Dynamic Bloom & Chromatic Aberration Surge
+      if (bloomPass) {
+        bloomPass.strength = THREE.MathUtils.damp(bloomPass.strength, 0.62 + cosmicEnergy * 0.34, 6.0, dt);
+      }
       if (chromaticPass) {
-        const clickSpike = pointer.clickAge < 1.0 ? (1.0 - pointer.clickAge) * 0.0045 : 0;
+        const clickSpike = pointer.clickAge < 1.0 ? (1.0 - pointer.clickAge) * 0.0055 : 0;
         chromaticPass.uniforms.uAberration.value =
-          0.0018 + Math.min(pointer.speed * 0.0035, 0.004) + clickSpike;
+          0.0018 + Math.min(pointer.speed * 0.0042, 0.005) + clickSpike;
         chromaticPass.uniforms.uMouse.value.set(pointer.normX, pointer.normY);
       }
 
