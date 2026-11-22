@@ -6,6 +6,14 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import {
+  DisposableResource,
+  buildExoplanetSystem,
+  buildRelativisticSingularity,
+  buildVolumetricNebulaWisps,
+  createAsteroidSurfaceMaps,
+  createSculptedAsteroidGeometry,
+} from '../utils/ultraCosmosBuilders';
 
 // ============================================================================
 // GLSL SHADER 1: Fullscreen 7-Octave Domain-Warped Volumetric Aurora + Caustics
@@ -432,110 +440,129 @@ export const UltraWorldOverlay: React.FC<{ active: boolean }> = ({ active }) => 
     scene.add(particleCloud);
 
     // ------------------------------------------------------------------
-    // 5. Pass C: Procedural 3D Holographic Crystal Gyroscope & Shards
+    // 5. Pass C: Realistic Cosmic Formations (Zero Toy Primitives)
     // ------------------------------------------------------------------
-    const gyroGroup = new THREE.Group();
-    gyroGroup.position.set(2.9, 0.35, -1.6);
-    scene.add(gyroGroup);
+    const disposables: DisposableResource[] = [];
+    const sunDir = new THREE.Vector3(-0.75, 0.48, 0.55).normalize();
 
-    const crystalCoreGeo = new THREE.IcosahedronGeometry(1.42, 1);
-    const crystalCoreMat = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color('#60a5fa'),
-      metalness: 0.25,
-      roughness: 0.05,
-      iridescence: 1.0,
-      iridescenceIOR: 1.75,
-      clearcoat: 1.0,
-      clearcoatRoughness: 0.04,
-      emissive: new THREE.Color('#1d4ed8'),
-      emissiveIntensity: 0.42,
-      flatShading: true,
+    // 5A. Volumetric Interstellar Nebula Filaments in deep background
+    const nebulaWisps = buildVolumetricNebulaWisps(scene, isSoftwareGl ? 6 : 12, disposables);
+
+    // 5B. Relativistic Kerr Black Hole & Keplerian Accretion Disk (Right Deep Space)
+    const singularity = buildRelativisticSingularity(disposables);
+    scene.add(singularity.group);
+
+    // 5C. Banded Gas-Giant Exoplanet + Atmospheric Scattering + Cassini Rings (Left Deep Space)
+    const exoplanet = buildExoplanetSystem(sunDir, disposables);
+    scene.add(exoplanet.group);
+
+    // 5D. 52 Sculpted Cratered Space Asteroids / Meteorites (InstancedMesh)
+    const ASTEROID_COUNT = isSoftwareGl ? 18 : 52;
+    const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
+    const { albedoMap: asteroidAlbedo, bumpMap: asteroidBump } =
+      createAsteroidSurfaceMaps(maxAnisotropy);
+    const asteroidGeo = createSculptedAsteroidGeometry(isSoftwareGl ? 2 : 3);
+    const asteroidMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color('#cbd5e1'),
+      map: asteroidAlbedo,
+      bumpMap: asteroidBump,
+      bumpScale: 0.085,
+      roughness: 0.74,
+      metalness: 0.38,
     });
-    const crystalCore = new THREE.Mesh(crystalCoreGeo, crystalCoreMat);
-    gyroGroup.add(crystalCore);
+    const asteroidsMesh = new THREE.InstancedMesh(asteroidGeo, asteroidMat, ASTEROID_COUNT);
+    asteroidsMesh.frustumCulled = false;
+    scene.add(asteroidsMesh);
+    disposables.push(asteroidAlbedo, asteroidBump, asteroidGeo, asteroidMat, asteroidsMesh);
 
-    const wireframeGeo = new THREE.IcosahedronGeometry(1.66, 1);
-    const wireframeMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color('#38bdf8'),
-      wireframe: true,
-      transparent: true,
-      opacity: 0.36,
-    });
-    const crystalWire = new THREE.Mesh(wireframeGeo, wireframeMat);
-    gyroGroup.add(crystalWire);
-
-    const ringSpecs = [
-      { radius: 2.35, tube: 0.045, color: '#38bdf8', emissive: '#0284c7', rot: [0.65, 0.3, 0] },
-      { radius: 2.85, tube: 0.036, color: '#a855f7', emissive: '#7e22ce', rot: [-0.55, 0.9, 0.4] },
-      { radius: 3.35, tube: 0.028, color: '#60a5fa', emissive: '#2563eb', rot: [1.1, -0.45, 0.7] },
+    const asteroidPalette = [
+      new THREE.Color('#475569'), // slate basalt
+      new THREE.Color('#334155'), // volcanic obsidian
+      new THREE.Color('#64748b'), // iron-nickel meteorite
+      new THREE.Color('#52525b'), // cosmic graphite
+      new THREE.Color('#4c5c7a'), // deep silicate titanium
     ];
 
-    const gyroRings: THREE.Mesh[] = [];
-    const ringGeoList: THREE.BufferGeometry[] = [];
-    const ringMatList: THREE.Material[] = [];
-
-    ringSpecs.forEach(spec => {
-      const geo = new THREE.TorusGeometry(spec.radius, spec.tube, 20, 110);
-      const mat = new THREE.MeshPhysicalMaterial({
-        color: new THREE.Color(spec.color),
-        metalness: 0.85,
-        roughness: 0.12,
-        iridescence: 1.0,
-        clearcoat: 1.0,
-        emissive: new THREE.Color(spec.emissive),
-        emissiveIntensity: 0.75,
-      });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.rotation.set(spec.rot[0], spec.rot[1], spec.rot[2]);
-      gyroGroup.add(mesh);
-      gyroRings.push(mesh);
-      ringGeoList.push(geo);
-      ringMatList.push(mat);
+    const asteroidData = Array.from({ length: ASTEROID_COUNT }, (_, i) => {
+      const orbitR = 2.9 + (i % 9) * 1.18 + Math.sin(i * 1.7) * 0.45;
+      const angle = (i / ASTEROID_COUNT) * Math.PI * 2 + (i % 3) * 0.35;
+      const yOffset = ((i % 11) - 5) * 0.78;
+      const speed = 0.055 + (i % 6) * 0.022;
+      const baseScale = 0.14 + (i % 5) * 0.068;
+      // Distinct triaxial scale per meteorite so no two asteroids share a silhouette
+      const sx = baseScale * (0.85 + ((i * 7) % 5) * 0.16);
+      const sy = baseScale * (0.72 + ((i * 3) % 4) * 0.15);
+      const sz = baseScale * (0.88 + ((i * 11) % 5) * 0.14);
+      asteroidsMesh.setColorAt(i, asteroidPalette[i % asteroidPalette.length]);
+      return {
+        orbitR,
+        angle,
+        yOffset,
+        speed,
+        sx,
+        sy,
+        sz,
+        tiltPhase: i * 0.73,
+        spinX: 0.18 + (i % 4) * 0.09,
+        spinY: 0.22 + (i % 5) * 0.08,
+      };
     });
+    if (asteroidsMesh.instanceColor) asteroidsMesh.instanceColor.needsUpdate = true;
 
-    // 64 Instanced Floating Iridescent Crystal Shards
-    const SHARD_COUNT = isSoftwareGl ? 18 : 64;
-    const shardGeo = new THREE.OctahedronGeometry(0.22, 0);
-    const shardMat = new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color('#e0f2fe'),
-      metalness: 0.35,
-      roughness: 0.08,
-      iridescence: 1.0,
-      iridescenceIOR: 1.9,
-      clearcoat: 1.0,
-      emissive: new THREE.Color('#3b82f6'),
-      emissiveIntensity: 0.28,
+    // 5E. Relativistic Micro-Meteor / Cosmic Ray Streaks
+    const STREAK_COUNT = isSoftwareGl ? 10 : 32;
+    const streakGeo = new THREE.PlaneGeometry(0.95, 0.014);
+    const streakMat = new THREE.MeshBasicMaterial({
+      color: 0xbae6fd,
+      transparent: true,
+      opacity: 0.42,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
     });
-    const shardsMesh = new THREE.InstancedMesh(shardGeo, shardMat, SHARD_COUNT);
-    scene.add(shardsMesh);
+    const streaksMesh = new THREE.InstancedMesh(streakGeo, streakMat, STREAK_COUNT);
+    streaksMesh.frustumCulled = false;
+    scene.add(streaksMesh);
+    disposables.push(streakGeo, streakMat, streaksMesh);
 
-    const shardData = Array.from({ length: SHARD_COUNT }, (_, i) => {
-      const orbitR = 3.2 + (i % 7) * 1.15;
-      const angle = (i / SHARD_COUNT) * Math.PI * 2;
-      const yOffset = ((i % 9) - 4) * 0.92;
-      const speed = 0.14 + (i % 5) * 0.045;
-      const scale = 0.55 + (i % 4) * 0.36;
+    const streakData = Array.from({ length: STREAK_COUNT }, (_, i) => {
       const c = palette[i % palette.length];
-      shardsMesh.setColorAt(i, c);
-      return { orbitR, angle, yOffset, speed, scale, tiltPhase: i * 0.73 };
+      streaksMesh.setColorAt(i, c);
+      return {
+        laneY: ((i % 13) - 6) * 0.92 + Math.sin(i) * 0.35,
+        z: -2.2 - (i % 6) * 1.45,
+        speed: 3.4 + (i % 5) * 1.15,
+        phase: (i * 1.93) % 14.0,
+        lengthScale: 0.65 + (i % 4) * 0.48,
+        tilt: -0.18 - (i % 3) * 0.06,
+      };
     });
-    if (shardsMesh.instanceColor) shardsMesh.instanceColor.needsUpdate = true;
+    if (streaksMesh.instanceColor) streaksMesh.instanceColor.needsUpdate = true;
 
-    // Lighting for 3D Physical Crystals
-    const ambientLight = new THREE.AmbientLight('#93c5fd', 0.65);
-    scene.add(ambientLight);
+    // Cinematic Warm/Cool Cosmic Lighting Rig
+    const hemiLight = new THREE.HemisphereLight('#7dd3fc', '#090d24', 0.72);
+    scene.add(hemiLight);
 
-    const lightCyan = new THREE.PointLight('#38bdf8', 22, 26);
-    lightCyan.position.set(4, 3, 4);
+    const starKeyLight = new THREE.DirectionalLight('#fef3c7', 2.45);
+    starKeyLight.position.copy(sunDir).multiplyScalar(18);
+    scene.add(starKeyLight);
+
+    const lightCyan = new THREE.PointLight('#38bdf8', 24, 28);
+    lightCyan.position.set(3.55, 0.35, -1.5);
     scene.add(lightCyan);
 
-    const lightViolet = new THREE.PointLight('#a855f7', 20, 26);
-    lightViolet.position.set(-5, -2.5, 3);
+    const lightViolet = new THREE.PointLight('#a855f7', 18, 28);
+    lightViolet.position.set(-5.2, -2.5, 2.5);
     scene.add(lightViolet);
 
-    const lightCursor = new THREE.PointLight('#60a5fa', 16, 18);
+    const lightCursor = new THREE.PointLight('#60a5fa', 14, 18);
     lightCursor.position.set(0, 0, 5);
     scene.add(lightCursor);
+
+    // Pre-compile shaders on real GPUs to prevent first-frame hitch
+    if (!isSoftwareGl) {
+      renderer.compile(scene, camera);
+    }
 
     // ------------------------------------------------------------------
     // 6. Pass D: Multi-Pass EffectComposer (UnrealBloom + Chromatic Lens)
@@ -551,9 +578,9 @@ export const UltraWorldOverlay: React.FC<{ active: boolean }> = ({ active }) => 
 
       bloomPass = new UnrealBloomPass(
         new THREE.Vector2(width, height),
-        0.68, // radiant bloom strength
-        0.52, // halo radius
-        0.42  // threshold so aurora & crystals bloom without washing out dark void
+        0.62, // cinematic accretion & photon bloom
+        0.50, // smooth halo spread
+        0.48  // threshold keeps planets & asteroids crisp while photon arcs glow
       );
       composer.addPass(bloomPass);
 
@@ -715,50 +742,73 @@ export const UltraWorldOverlay: React.FC<{ active: boolean }> = ({ active }) => 
       camera.position.y += (worldPtrY * 0.075 + 0.25 - camera.position.y) * 0.05;
       camera.lookAt(0, 0, -1.5);
 
-      // Animate 3D Holographic Crystal Gyroscope
-      gyroGroup.position.y = 0.35 + Math.sin(elapsed * 0.9) * 0.28;
-      crystalCore.rotation.x = elapsed * 0.42 + worldPtrY * 0.08;
-      crystalCore.rotation.y = elapsed * 0.56 + worldPtrX * 0.08;
-      crystalWire.rotation.x = -elapsed * 0.28;
-      crystalWire.rotation.y = -elapsed * 0.38;
+      // Animate Relativistic Kerr Singularity & Accretion Disk
+      singularity.diskMaterial.uniforms.uTime.value = elapsed;
+      singularity.lensingArcMaterial.uniforms.uTime.value = elapsed;
+      singularity.haloMaterial.uniforms.uTime.value = elapsed;
+      singularity.jetMaterials.forEach((jm) => {
+        jm.uniforms.uTime.value = elapsed;
+      });
+      singularity.group.position.y = 0.35 + Math.sin(elapsed * 0.45) * 0.16;
+      singularity.group.rotation.y = -0.34 + worldPtrX * 0.022;
+      singularity.group.rotation.x = 0.28 + worldPtrY * 0.018;
+      singularity.helixGroup.rotation.y = elapsed * 0.65;
 
-      if (gyroRings[0]) {
-        gyroRings[0].rotation.x += dt * 0.75;
-        gyroRings[0].rotation.y += dt * 0.35;
+      // Animate Banded Gas-Giant Exoplanet & Storm Eddies
+      exoplanet.planetMesh.rotation.y = elapsed * 0.085;
+      if (exoplanet.planetMaterial.userData.shader) {
+        exoplanet.planetMaterial.userData.shader.uniforms.uTime.value = elapsed;
       }
-      if (gyroRings[1]) {
-        gyroRings[1].rotation.y -= dt * 0.82;
-        gyroRings[1].rotation.z += dt * 0.45;
-      }
-      if (gyroRings[2]) {
-        gyroRings[2].rotation.x -= dt * 0.55;
-        gyroRings[2].rotation.z -= dt * 0.65;
+      exoplanet.group.position.y = 1.85 + Math.cos(elapsed * 0.32) * 0.12;
+      exoplanet.ringMaterial.uniforms.uPlanetCenter.value.copy(exoplanet.group.position);
+
+      // Animate Volumetric Interstellar Nebula Filaments
+      for (let i = 0; i < nebulaWisps.length; i++) {
+        const w = nebulaWisps[i];
+        w.material.uniforms.uTime.value = elapsed;
+        w.mesh.position.x = w.baseX + Math.sin(elapsed * 0.14 + w.driftPhase) * 0.45;
+        w.mesh.position.y = w.baseY + Math.cos(elapsed * 0.11 + w.driftPhase) * 0.28;
       }
 
-      // Update 64 Instanced Floating Crystal Shards
-      for (let i = 0; i < SHARD_COUNT; i++) {
-        const s = shardData[i];
-        const a = s.angle + elapsed * s.speed;
-        const bob = Math.sin(elapsed * 1.4 + s.tiltPhase) * 0.45;
+      // Update Sculpted Cratered Asteroids (slow realistic gravitational orbit & tumble)
+      for (let i = 0; i < ASTEROID_COUNT; i++) {
+        const aData = asteroidData[i];
+        const a = aData.angle + elapsed * aData.speed;
+        const bob = Math.sin(elapsed * 0.65 + aData.tiltPhase) * 0.32;
         dummy.position.set(
-          Math.cos(a) * s.orbitR,
-          s.yOffset + bob,
-          Math.sin(a) * s.orbitR - 2.6
+          Math.cos(a) * aData.orbitR + 1.2,
+          aData.yOffset + bob,
+          Math.sin(a) * aData.orbitR - 3.6
         );
         dummy.rotation.set(
-          elapsed * 0.9 + s.tiltPhase,
-          elapsed * 1.15 + s.tiltPhase * 0.5,
-          elapsed * 0.5
+          elapsed * aData.spinX + aData.tiltPhase,
+          elapsed * aData.spinY + aData.tiltPhase * 0.5,
+          elapsed * 0.14
         );
-        dummy.scale.setScalar(s.scale);
+        dummy.scale.set(aData.sx, aData.sy, aData.sz);
         dummy.updateMatrix();
-        shardsMesh.setMatrixAt(i, dummy.matrix);
+        asteroidsMesh.setMatrixAt(i, dummy.matrix);
       }
-      shardsMesh.instanceMatrix.needsUpdate = true;
+      asteroidsMesh.instanceMatrix.needsUpdate = true;
 
-      // Orbit colored lights + cursor light
-      lightCyan.position.set(Math.cos(elapsed * 0.6) * 5.5, Math.sin(elapsed * 0.8) * 3.5, 4.0);
-      lightViolet.position.set(Math.sin(elapsed * 0.5) * -5.5, Math.cos(elapsed * 0.7) * 3.2, 3.5);
+      // Update Relativistic Micro-Meteor Streaks
+      for (let i = 0; i < STREAK_COUNT; i++) {
+        const st = streakData[i];
+        const cycle = (elapsed * st.speed + st.phase) % 24.0;
+        const x = -12.0 + cycle;
+        const y = st.laneY + cycle * Math.tan(st.tilt);
+        dummy.position.set(x, y, st.z);
+        dummy.rotation.set(0, 0, st.tilt);
+        const fade = Math.sin(Math.min(Math.max(cycle / 24.0, 0), 1) * Math.PI);
+        dummy.scale.set(st.lengthScale * (0.4 + fade * 0.9), 0.7 + fade * 0.6, 1);
+        dummy.updateMatrix();
+        streaksMesh.setMatrixAt(i, dummy.matrix);
+      }
+      streaksMesh.instanceMatrix.needsUpdate = true;
+
+      // Orbit accretion lights + cursor light
+      lightCyan.position.set(3.55 + Math.cos(elapsed * 0.5) * 2.2, 0.35 + Math.sin(elapsed * 0.6) * 1.4, -1.2);
+      lightViolet.position.set(Math.sin(elapsed * 0.4) * -5.2, Math.cos(elapsed * 0.5) * 2.8, 2.5);
       lightCursor.position.set(worldPtrX * 0.7, worldPtrY * 0.7, 4.5);
 
       // Update chromatic aberration dynamically on cursor motion & clicks
@@ -802,15 +852,7 @@ export const UltraWorldOverlay: React.FC<{ active: boolean }> = ({ active }) => 
       auroraMat.dispose();
       particleGeo.dispose();
       particleMat.dispose();
-      crystalCoreGeo.dispose();
-      crystalCoreMat.dispose();
-      wireframeGeo.dispose();
-      wireframeMat.dispose();
-      ringGeoList.forEach(g => g.dispose());
-      ringMatList.forEach(m => m.dispose());
-      shardGeo.dispose();
-      shardMat.dispose();
-      shardsMesh.dispose();
+      disposables.forEach((res) => res.dispose());
       envTarget.dispose();
 
       if (bloomPass) bloomPass.dispose();
